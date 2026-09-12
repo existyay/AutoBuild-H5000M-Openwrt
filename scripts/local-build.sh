@@ -946,9 +946,10 @@ EOF
 	# `kmod-xdp-sockets-diag` is deliberately NOT here even though the wider
 	# module list suggests it: it depends on KERNEL_XDP_SOCKETS, which this
 	# kernel does not set, so the symbol is dropped by defconfig regardless.
-	# Nothing in the proxy stack needs it — it is the `ss` tool's optional XDP
-	# view — and turning the kernel option on to satisfy it would change the
-	# kernel ABI and force a full rebuild for no benefit.
+	# Only Daed wants it, and only in its README rather than its Makefile, so
+	# `apk add daed` would not pull it either way.  Turning the kernel option on
+	# changes the kernel ABI and forces a full rebuild; see
+	# ENABLE_EBPF_PROXY_KERNEL below for that decision.
 	emit_service "" \
 		kmod-netlink-diag \
 		kmod-nf-nathelper \
@@ -956,6 +957,31 @@ EOF
 		kmod-sched-core \
 		kmod-ifb \
 		kmod-tcp-bbr
+
+	# Found by auditing the proxy packages' Makefiles rather than by guessing:
+	#   kmod-nft-queue            HomeProxy (VIKINGYFY variant) uses nft queue
+	#                             rather than tproxy; pulls kmod-nfnetlink-queue
+	#   kmod-sched-bpf            Daed traffic shaping
+	#   kmod-ipt-tproxy           OpenClash's firewall3 path and the fw3 branch
+	#   kmod-ipt-conntrack-extra  of ttimasdf's luci-app-xray
+	#   kmod-ipt-filter
+	#
+	# `kmod-lib-crc32c` is NOT in the list, and two independent audits disagreed
+	# about it, so here is the settled answer.  Its Kconfig is
+	# `depends on LINUX_6_12`, and this target sets CONFIG_LINUX_6_18, so the
+	# symbol cannot be selected at all — defconfig drops it no matter what is
+	# asked for.  It is also unnecessary: the kernel is built with
+	# CONFIG_NET_CRC32C=y and CONFIG_CRYPTO_CRC32C=y, i.e. CRC32C is already
+	# there, and the module package only exists for 6.12 where it evidently is
+	# not.  `kmod-nft-core`'s `select PACKAGE_kmod-lib-crc32c if LINUX_6_12`
+	# therefore does not fire for this build, which is correct rather than a gap.
+	emit_service "" \
+		kmod-nft-queue \
+		kmod-nfnetlink-queue \
+		kmod-sched-bpf \
+		kmod-ipt-tproxy \
+		kmod-ipt-conntrack-extra \
+		kmod-ipt-filter
 
 	return 0
 }
