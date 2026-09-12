@@ -726,6 +726,35 @@ kmod-sched-core    kmod-ifb           kmod-tcp-bbr
 `kmod-tcp-bbr` 顺带把 BBR 拥塞控制也带进了仓库——这在主线上是**真实可用**的加速手段
 之一（见 [七.6](#6-硬件加速不能用--根因是控制面不同已启用主线那条)）。
 
+#### 代理前端：本体 + LuCI + 中文翻译，三者缺一不可
+
+只编本体是不够的。`apk add luci-app-passwall` 之后界面没有中文，正是因为**上游把中文
+翻译做成独立的包**（`luci-i18n-passwall-zh-cn`），而没有任何东西会自动把它拉进来。
+所以下面每个代理都按**三件套**编入仓库：
+
+| 代理 | 本体 / LuCI / 中文包 | 上游仓库 |
+| --- | --- | --- |
+| PassWall | `luci-app-passwall` + `luci-i18n-passwall-zh-cn` | `Openwrt-Passwall/openwrt-passwall` @ `main` |
+| PassWall2 | `luci-app-passwall2` + `luci-i18n-passwall2-zh-cn` | `Openwrt-Passwall/openwrt-passwall2` @ `main` |
+| Momo | `momo` + `luci-app-momo` + `luci-i18n-momo-zh-cn` | `nikkinikki-org/OpenWrt-momo` @ `main` |
+| fcshark | `mihomo` + `luci-app-fchomo` + `luci-i18n-fchomo-zh-cn` | `fcshark-org/openwrt-fchomo` @ `master` |
+| NeKoBox | `luci-app-nekobox`（无中文 po） | `Thaolga/openwrt-nekobox` @ `main` |
+| luci-xray | `luci-app-xray` + `-geodata` + `-status`（无中文 po） | `yichya/luci-app-xray` @ `master` |
+| Daed | `daed` + `luci-app-daed` + `luci-i18n-daed-zh-cn` | `QiuSimons/luci-app-daed` @ `kix` |
+| HiJpass | `luci-app-hijpass` + `luci-i18n-hijpass-zh-cn` | `WROIATE/luci-app-hijpass` @ `main` |
+| v2rayA | `v2raya` + `luci-app-v2raya` | **主线 feeds，无需克隆** |
+| PassWall 核心群 | `chinadns-ng` `dns2socks` `geoview` `hysteria` `ipt2socks` `naiveproxy` `shadow-tls` `tcping` `v2ray-plugin` `xray-plugin` `shadowsocks-rust-*` `shadowsocksr-libev-*` `simple-obfs-*` | `Openwrt-Passwall/openwrt-passwall-packages` @ `main`（**已裁剪**） |
+
+> **包名取自构建系统自己的 `tmp/.packageinfo`，不是 grep Makefile 猜的。** 这些是 LuCI
+> 应用，包名等于目录名，`define Package/` 一个都找不到；猜错的名字会被 `defconfig`
+> **一声不响地丢掉**。
+
+**同名冲突用裁剪解决，而不是容忍。** `openwrt-passwall-packages` 自带 `xray-core`、
+`sing-box`、`microsocks`；`openwrt-nekobox` 自带 `sing-box` 和 `mihomo`；`fcshark` 也定义
+`mihomo`。整仓克隆会让同一个包名出现多个定义——而本工程的树目前 **12757 个包零同名
+冲突**，这个性质值得保住。做法是签出后删掉重复目录，让每个名字只剩一个定义，前端从
+feeds 解析其余依赖。
+
 **审计覆盖的软件包**：PassWall、PassWall2、SSR-Plus、HomeProxy（`immortalwrt` 与
 `VIKINGYFY` 两个变体）、OpenClash、Nikki、Momo、FullCombo Shark!（fchomo）、
 luci-xray（`yichya` 与 `ttimasdf`）、NeKoBox、Daed（`QiuSimons` 与 `kenzok8`）、
