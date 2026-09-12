@@ -74,7 +74,8 @@ SCRIPT="$WORK/root/usr/sbin/h5000m-firstboot"
 [ -f "$SCRIPT" ] || { echo "h5000m-firstboot missing from the rootfs" >&2; exit 2; }
 sed -e "s|/etc/config/|$WORK/config/|g" \
     -e "s|/etc/h5000m-defaults.conf|$WORK/h5000m-defaults.conf|g" \
-    -e "s|/etc/h5000m-defaults-applied|$WORK/marker|g" \
+    -e "s|/etc/h5000m-wifi-applied|$WORK/marker-wifi|g" \
+    -e "s|/etc/h5000m-offload-applied|$WORK/marker-offload|g" \
     -e 's|^\[ -n "${IPKG_INSTROOT:-}" \]|false|' \
     "$SCRIPT" > "$WORK/firstboot"
 
@@ -106,7 +107,7 @@ config wifi-iface 'default_radio1'
 	option ssid '$1'
 EOF
 	printf "config defaults\n\toption input 'REJECT'\n" > "$WORK/config/firewall"
-	rm -f "$WORK/marker"
+	rm -f "$WORK/marker-wifi" "$WORK/marker-offload"
 }
 
 echo
@@ -141,9 +142,28 @@ check "radio0.disabled kept"  "1"         "$(uci -q get wireless.radio0.disabled
 check "offload still applied" "$H5000M_FLOW_OFFLOAD" "$(uci -q get firewall.@defaults[0].flow_offloading)"
 
 echo
+echo "== profile: /etc/config/wireless exists but is EMPTY (as the image ships it)"
+# The image ships an empty wireless file.  If the marker is written on the
+# strength of the file merely existing, the ieee80211 hotplug that later fills in
+# the radios finds the marker and skips for ever, and WiFi is never enabled.
+cat > "$WORK/config/firewall" <<'FWEOS'
+config defaults
+	option input 'REJECT'
+FWEOS
+: > "$WORK/config/wireless"
+rm -f "$WORK/marker-wifi" "$WORK/marker-offload"
+sh "$WORK/firstboot"
+if [ -e "$WORK/marker-wifi" ]; then
+	bad "wifi marker written with no radios present — WiFi would never be configured"
+else
+	ok "wifi marker not written (no radios yet) and the hotplug pass can still apply it"
+fi
+check "offload still applied independently" "$H5000M_FLOW_OFFLOAD" "$(uci -q get firewall.@defaults[0].flow_offloading)"
+
+echo
 echo "== profile: marker present — second boot must be a no-op"
 seed_wireless OpenWrt
-touch "$WORK/marker"
+touch "$WORK/marker-wifi" "$WORK/marker-offload"
 sh "$WORK/firstboot"
 check "radio0.disabled kept"  "1"  "$(uci -q get wireless.radio0.disabled)"
 check "offload not applied"   ""   "$(uci -q get firewall.@defaults[0].flow_offloading)"

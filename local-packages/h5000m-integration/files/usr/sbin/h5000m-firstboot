@@ -22,7 +22,17 @@
 
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
 
-MARKER='/etc/h5000m-defaults-applied'
+# Two independent markers, because the two defaults become possible at
+# different times.  A single marker taken when /etc/config/wireless merely EXISTS
+# was wrong: the image ships that file empty, so on the first boot the wireless
+# pass finds no radio, does nothing, and still burned the marker — after which
+# the ieee80211 hotplug that later creates the radios would see the marker and
+# skip for ever.  WiFi would never be configured at all.
+#
+# Separate markers also stop the offload being re-applied on every boot until a
+# radio shows up, which would keep overwriting the owner's own changes to it.
+MARKER_WIFI='/etc/h5000m-wifi-applied'
+MARKER_OFFLOAD='/etc/h5000m-offload-applied'
 
 # The values below are written by scripts/local-build.sh into
 # /etc/h5000m-defaults.conf at build time, so the SSID, key, country and the
@@ -48,8 +58,11 @@ log() { logger -t h5000m-firstboot "$@" 2>/dev/null || true; }
 #
 # The guard is deliberately conservative: if ANY AP interface already carries a
 # non-default SSID the owner has configured wireless, and nothing is touched.
+# Returns 0 only when it actually applied the defaults.  "No radio sections yet"
+# and "the owner already configured this" both return 1, so the caller does not
+# record the work as done.
 configure_wireless() {
-	[ -f /etc/config/wireless ] || return 0
+	[ -f /etc/config/wireless ] || return 1
 
 	local iface radio band ssid configured=0 custom=0
 
@@ -62,8 +75,8 @@ configure_wireless() {
 		esac
 	done
 
-	[ "$custom" = '0' ] || return 0
-	[ "$configured" = '1' ] || return 0
+	[ "$custom" = '0' ] || return 1
+	[ "$configured" = '1' ] || return 1
 
 	for radio in $(uci -q show wireless | sed -n 's/^\(wireless\.[^.]*\)=wifi-device$/\1/p'); do
 		band="$(uci -q get "${radio}.band")"
@@ -90,6 +103,7 @@ configure_wireless() {
 
 	uci -q commit wireless
 	log "wireless enabled: ssid=${H5000M_WIFI_SSID} country=${H5000M_WIFI_COUNTRY}"
+	return 0
 }
 
 # ------------------------------------------------- flow offload / hardware ---
@@ -112,36 +126,33 @@ configure_wireless() {
 # hardware acceleration" means on this firmware, and the owner can see and
 # change both from LuCI (Network -> Firewall -> General Settings).
 configure_offload() {
-	[ -f /etc/config/firewall ] || return 0
+	[ -f /etc/config/firewall ] || return 1
 
-	uci -q get firewall.@defaults[0] >/dev/null 2>&1 || return 0
+	uci -q get firewall.@defaults[0] >/dev/null 2>&1 || return 1
 
 	uci -q set "firewall.@defaults[0].flow_offloading=${H5000M_FLOW_OFFLOAD}"
 	uci -q set "firewall.@defaults[0].flow_offloading_hw=${H5000M_FLOW_OFFLOAD_HW}"
 	uci -q commit firewall
 	log "flow offload: software=${H5000M_FLOW_OFFLOAD} hardware=${H5000M_FLOW_OFFLOAD_HW}"
+	return 0
 }
 
 main() {
-	[ -e "$MARKER" ] && return 0
-
-	# Do not burn the marker before a radio exists: on a first boot where the
-	# ieee80211 hotplug has not fired yet, running now would disable WiFi
-	# defaults forever.  Only wireless waits; offload does not depend on it.
-	if [ -f /etc/config/wireless ]; then
-		configure_wireless
-		wifi_ready=1
-	else
-		wifi_ready=0
+	# Each default is applied once, independently, and only after it actually
+	# took effect.  Re-running is safe either way — the guards inside make both
+	# passes no-ops when there is nothing to do or the owner has changed things.
+	if [ ! -e "$MARKER_WIFI" ]; then
+		if configure_wireless; then
+			touch "$MARKER_WIFI"
+			chmod 0600 "$MARKER_WIFI"
+		fi
 	fi
 
-	configure_offload
-
-	# The marker is only written once wireless could actually be configured, so
-	# the hotplug pass still gets its chance on the very first boot.
-	if [ "$wifi_ready" = '1' ]; then
-		touch "$MARKER"
-		chmod 0600 "$MARKER"
+	if [ ! -e "$MARKER_OFFLOAD" ]; then
+		if configure_offload; then
+			touch "$MARKER_OFFLOAD"
+			chmod 0600 "$MARKER_OFFLOAD"
+		fi
 	fi
 
 	return 0
