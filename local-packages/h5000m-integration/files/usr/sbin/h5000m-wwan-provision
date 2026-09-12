@@ -1,0 +1,140 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# h5000m-wwan-provision — bind the H5000M's built-in TD Tech MT5700M to wwand
+# and publish the result under the interface name luci-app-h5000m-netmode
+# discovers.
+#
+# Called from /etc/uci-defaults/91-h5000m-wwan (first boot) and from
+# /etc/hotplug.d/usb/50-h5000m-wwan (module enumerated later), so it has to be
+# idempotent and silent when there is nothing to do.
+#
+# It never overwrites an existing configuration: if network.MT5700M is already
+# present, whatever created it — this script on an earlier boot, the user, or
+# wwand's own autosetup — wins.
+#
+# One interface, dual-stack.  Do not add a companion `<parent>_6` dhcpv6
+# section: wwand's docs assign that to the rndis_host datapath, restrict
+# extendprefix to pdp_type 'ipv6', and note that the proto wwand shim already
+# shares its own /64.  A user-defined '@MT5700M' dhcpv6 section additionally
+# makes wwand hand IPv6 management over to the user, so it would stop working.
+#
+# The package does not hard-depend on wwand (see its Makefile): on an
+# ENABLE_MT5700M=true image wwand is deliberately absent and
+# luci-app-mt5700m owns the modem.  So bail out before touching anything when
+# the wwand protocol handler is not installed — writing a `proto wwand`
+# interface on a box that cannot resolve that proto would leave a permanently
+# failed interface behind.
+if [ ! -e /lib/netifd/proto/wwand.sh ]; then
+	logger -t h5000m-wwan -- "wwand proto not present; leaving modem configuration alone" 2>/dev/null || true
+	exit 0
+fi
+
+MT5700M_VENDOR='3466'
+MT5700M_PRODUCT='3301'
+
+MODEM_SECTION='m0'
+IFACE4='MT5700M'
+METRIC='50'
+
+log() {
+	logger -t h5000m-wwan -- "$*" 2>/dev/null || true
+}
+
+lower() {
+	printf '%s' "$1" | tr 'A-F' 'a-f'
+}
+
+# find_mt5700m — print "<usb-slot> <netdev>" for the MT5700M data interface.
+#
+# The USB *device* directory (`1-1`, `1-1.2`, ...) carries idVendor/idProduct;
+# the netdev hangs off one of its interface directories (`1-1:1.2/net/wwan0`),
+# which is why the glob is "$dev"*/net/*.  Mirrors the scan in the stock
+# luci-app-mt5700m helper so both agree on which netdev is the modem.
+find_mt5700m() {
+	local dev vendor product net
+
+	for dev in /sys/bus/usb/devices/*; do
+		[ -r "$dev/idVendor" ] && [ -r "$dev/idProduct" ] || continue
+		vendor="$(lower "$(cat "$dev/idVendor" 2>/dev/null)")"
+		product="$(lower "$(cat "$dev/idProduct" 2>/dev/null)")"
+		[ "$vendor" = "$MT5700M_VENDOR" ] || continue
+		[ "$product" = "$MT5700M_PRODUCT" ] || continue
+
+		for net in "$dev"*/net/*; do
+			[ -d "$net" ] || continue
+			printf '%s %s\n' "${dev##*/}" "${net##*/}"
+			return 0
+		done
+	done
+
+	return 1
+}
+
+# add_to_wan_zone <interface> — make the interface part of the stock `wan`
+# firewall zone, which is what carries masquerading and the WAN input policy.
+add_to_wan_zone() {
+	local iface="$1" current
+
+	uci -q get firewall.wan >/dev/null 2>&1 || return 0
+
+	current="$(uci -q get firewall.wan.network 2>/dev/null || true)"
+	case " $current " in
+		*" $iface "*) return 0 ;;
+	esac
+	uci -q add_list "firewall.wan.network=$iface" || return 0
+}
+
+provision() {
+	local info slot netdev
+
+	command -v uci >/dev/null 2>&1 || return 0
+	# /etc/config/network must be writable and netifd's config present.
+	[ -f /etc/config/network ] || return 0
+
+	if uci -q get "network.$IFACE4" >/dev/null 2>&1; then
+		log "$IFACE4 already configured; leaving it untouched"
+		return 0
+	fi
+
+	if ! info="$(find_mt5700m)"; then
+		log "MT5700M ${MT5700M_VENDOR}:${MT5700M_PRODUCT} not enumerated; wwand autosetup will handle it"
+		return 0
+	fi
+
+	slot="${info%% *}"
+	netdev="${info##* }"
+
+	log "provisioning $IFACE4 on $netdev (usb $slot)"
+
+	# `device` is wwand's documented modem anchor and `path` is the stable
+	# sysfs pin it prefers.  Both are derived from the same physical device
+	# here, so they cannot disagree; the path survives the L3 device being
+	# renamed to wwandN.
+	uci -q batch <<-EOF
+		set network.$MODEM_SECTION=wwand_modem
+		set network.$MODEM_SECTION.device='$netdev'
+		set network.$MODEM_SECTION.path='$slot'
+
+		set network.$IFACE4=interface
+		set network.$IFACE4.proto='wwand'
+		set network.$IFACE4.modem='$MODEM_SECTION'
+		set network.$IFACE4.pdp_type='ipv4v6'
+		set network.$IFACE4.metric='$METRIC'
+		set network.$IFACE4.defaultroute='1'
+		set network.$IFACE4.auto='1'
+		set network.$IFACE4.managed_by='wwand'
+		set network.$IFACE4.modem_config='wwand'
+
+		commit network
+	EOF
+
+	add_to_wan_zone "$IFACE4"
+	uci -q commit firewall 2>/dev/null || true
+
+	log "$IFACE4 provisioned"
+	return 0
+}
+
+provision "$@"
+exit 0

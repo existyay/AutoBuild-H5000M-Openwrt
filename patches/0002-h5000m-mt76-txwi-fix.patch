@@ -1,0 +1,62 @@
+diff --git a/package/kernel/mt76/patches/100-mt7996-always-fill-txwi.patch b/package/kernel/mt76/patches/100-mt7996-always-fill-txwi.patch
+new file mode 100644
+index 0000000..46c544d
+--- /dev/null
++++ b/package/kernel/mt76/patches/100-mt7996-always-fill-txwi.patch
+@@ -0,0 +1,56 @@
++From: Ziyang Huang <hzyitc@outlook.com>
++Subject: [PATCH] mt7996: always fill TXWI and apply TXD for 802.3 frames
++
++On MT7992/MT7996 the firmware mis-parses hardware-encapsulated 802.3
++frames when the host leaves the TXWI blank.  The symptom is degraded or
++non-working Wi-Fi: IPv4 NAT traffic towards Wi-Fi clients collapses in the
++download direction while upload, IPv6 and wired NAT keep running at line
++rate, and toggling flow offload makes no difference.
++
++The Hiveton H5000M is named in the upstream thread by the developer who
++added the board to OpenWrt, who confirmed this change fixes it, and a
++second developer confirmed the same in a follow-up comment.  Affected
++boards also include the Zbtlink ZBT-Z8803BE and GL-MT3600BE.
++
++Fill the TXWI and set MT_CT_INFO_APPLY_TXD unconditionally instead of only
++for non-802.3 frames and frames carrying a status pid, so the firmware
++always gets a descriptor it can process.
++
++Upstream has not merged this: openwrt/mt76 master still carries the
++conditional at mt7996/mac.c:1136 and :1188 as of this writing, so it has to
++be carried here.
++
++Link: https://github.com/openwrt/mt76/issues/1043
++Link: https://github.com/openwrt/mt76/issues/1043#issuecomment-4861848897
++---
++ mt7996/mac.c | 11 ++++-------
++ 1 file changed, 4 insertions(+), 7 deletions(-)
++
++--- a/mt7996/mac.c
+++++ b/mt7996/mac.c
++@@ -1132,10 +1132,9 @@
++ 
++ 	pid = mt76_tx_status_skb_add(mdev, wcid, tx_info->skb);
++ 	memset(txwi_ptr, 0, MT_TXD_SIZE);
++-	/* Transmit non qos data by 802.11 header and need to fill txd by host*/
++-	if (!is_8023 || pid >= MT_PACKET_ID_FIRST)
++-		mt7996_mac_write_txwi(dev, txwi_ptr, tx_info->skb, wcid, key,
++-				      pid, qid, 0, link_id);
+++	/* Always fill txwi for firmware to avoid incorrect header processing */
+++	mt7996_mac_write_txwi(dev, txwi_ptr, tx_info->skb, wcid, key,
+++			      pid, qid, 0, link_id);
++ 
++ 	/* MT7996 and MT7992 require driver to provide the MAC TXP for AddBA
++ 	 * req
++@@ -1184,9 +1183,8 @@
++ 		txp->fw.nbuf = nbuf;
++ 
++ 		txp->fw.flags = cpu_to_le16(MT_CT_INFO_FROM_HOST);
++-
++-		if (!is_8023 || pid >= MT_PACKET_ID_FIRST)
++-			txp->fw.flags |= cpu_to_le16(MT_CT_INFO_APPLY_TXD);
+++		/* Always apply TXD to ensure correct firmware processing */
+++		txp->fw.flags |= cpu_to_le16(MT_CT_INFO_APPLY_TXD);
++ 
++ 		if (!key)
++ 			txp->fw.flags |= cpu_to_le16(MT_CT_INFO_NONE_CIPHER_FRAME);

@@ -1,0 +1,1214 @@
+#!/usr/bin/env bash
+#
+# local-build.sh — build mainline OpenWrt for the Hiveton H5000M.
+#
+# This is the migrated successor of existyay/Auto-H5000M-BIN's local-build.sh.
+# The pipeline, the CLI, the ENABLE_* switch names and the artifact layout are
+# kept deliberately familiar; what changed is the upstream (ImmortalWrt ->
+# openwrt/openwrt) and the H5000M feature stack (QModem/ModemManager ->
+# ddimension/wwand, luci-app-Airpifanctrl -> luci-app-h5000m-fancontrol).
+#
+# Usage: see `scripts/local-build.sh --help`.
+#
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Upstream baseline (repo, branch, pinned revision, target triple).
+# shellcheck source=../configs/upstream.env
+. "${ROOT_DIR}/configs/upstream.env"
+
+# ---------------------------------------------------------------- knobs ------
+REPO_URL="${REPO_URL:-${OPENWRT_REPO_URL}}"
+REPO_BRANCH="${REPO_BRANCH:-${OPENWRT_REPO_BRANCH}}"
+SOURCE_DIR="${SOURCE_DIR:-openwrt}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts}"
+THREADS="${THREADS:-$(nproc 2>/dev/null || echo 2)}"
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-300}"
+
+TARGET_BOARD="${OPENWRT_TARGET}"
+TARGET_SUBTARGET="${OPENWRT_SUBTARGET}"
+TARGET_PROFILE="${OPENWRT_PROFILE}"
+TARGET_ARCH="${OPENWRT_ARCH}"
+IMAGE_PREFIX="${OPENWRT_IMAGE_PREFIX}"
+
+# Upstream tracking: `latest` follows the branch head (the point of a scheduled
+# auto-build); `pinned` builds the revision this harness was validated against.
+OPENWRT_TRACK="${OPENWRT_TRACK:-latest}"
+
+GIT_TIMEOUT="${GIT_TIMEOUT:-1800}"
+FEEDS_TIMEOUT="${FEEDS_TIMEOUT:-3600}"
+CONFIG_TIMEOUT="${CONFIG_TIMEOUT:-1800}"
+DOWNLOAD_TIMEOUT="${DOWNLOAD_TIMEOUT:-7200}"
+TOOLCHAIN_TIMEOUT="${TOOLCHAIN_TIMEOUT:-7200}"
+COMPILE_TIMEOUT="${COMPILE_TIMEOUT:-28800}"
+
+# Download accelerators — the same defaults the previous harness used; they are
+# harmless outside mainland China and can be overridden to the empty string.
+GOPROXY="${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct}"
+GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
+DOWNLOAD_MIRROR="${DOWNLOAD_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/openwrt/sources;https://mirrors.ustc.edu.cn/openwrt/sources;https://mirrors.bfsu.edu.cn/openwrt/sources}"
+export GOPROXY GOSUMDB DOWNLOAD_MIRROR
+export MAKEFLAGS="-j${THREADS}"
+
+# ----------------------------------------------------------- H5000M stack ----
+# Fan control — luci-app-h5000m-fancontrol (userspace PWM policy; the tree
+# patch in patches/ removes the three kernel cooling maps that would race it).
+ENABLE_FANCONTROL="${ENABLE_FANCONTROL:-true}"
+
+# Egress priority — luci-app-h5000m-netmode arbitrates wired WAN vs cellular.
+ENABLE_NETMODE="${ENABLE_NETMODE:-true}"
+
+# WWAN dialer — ddimension/wwand.  The H5000M's built-in TD Tech MT5700M
+# (3466:3301, cdc_ncm) is dialled by wwand-ncm; the other backends cover QMI,
+# MBIM and PCIe/MHI modules in the USB and M.2 slots.
+ENABLE_WWAND="${ENABLE_WWAND:-true}"
+
+# luci-app-mt5700m — FAN789's panel + NCM/DHCP dialer for the same module.
+# MUTUALLY EXCLUSIVE with wwand on the data path: both would drive the MT5700M's
+# cdc_ncm data interface and both want to own network.MT5700M.  Enabling it
+# turns wwand off (see resolve_modem_stack).  It is also the only source of the
+# modem temperature cache luci-app-h5000m-fancontrol reads, so a box that wants
+# module temperature in the fan curve should pick this and give up wwand.
+ENABLE_MT5700M="${ENABLE_MT5700M:-false}"
+
+# ------------------------------------------------------- optional services ---
+ENABLE_UPNP="${ENABLE_UPNP:-true}"
+ENABLE_ADBLOCK="${ENABLE_ADBLOCK:-true}"
+ENABLE_DOCKERMAN="${ENABLE_DOCKERMAN:-false}"
+ENABLE_NIKKI="${ENABLE_NIKKI:-false}"
+ENABLE_OPENCLASH="${ENABLE_OPENCLASH:-false}"
+ENABLE_MOSDNS="${ENABLE_MOSDNS:-false}"
+ENABLE_HOMEPROXY="${ENABLE_HOMEPROXY:-false}"
+ENABLE_ADGUARDHOME="${ENABLE_ADGUARDHOME:-false}"
+
+# Build the service packages into the apk repository even when they are not
+# installed into the image.  On by default: the whole point is that a user can
+# `apk add luci-app-dockerman` on the running router instead of having every
+# option baked into the firmware.  Turn it off for a fast iteration build — it
+# costs real time, because the Docker and proxy stacks are large Go programs.
+ENABLE_REPO_PACKAGES="${ENABLE_REPO_PACKAGES:-true}"
+
+# --------------------------------------------------------------------- UI ----
+# Argon is the theme the H5000M builds in the wild use, and it is not in any
+# mainline feed, so it has to be cloned in.  Installing it is sufficient to make
+# it the active theme: the package ships
+# root/etc/uci-defaults/30_luci-theme-argon, which sets luci.main.mediaurlbase.
+# luci-app-argon-config is its settings page and is useless without the theme.
+ENABLE_THEME_ARGON="${ENABLE_THEME_ARGON:-true}"
+ARGON_THEME_REPO_URL="${ARGON_THEME_REPO_URL:-https://github.com/jerrykuku/luci-theme-argon.git}"
+ARGON_THEME_REPO_BRANCH="${ARGON_THEME_REPO_BRANCH:-master}"
+ARGON_CONFIG_REPO_URL="${ARGON_CONFIG_REPO_URL:-https://github.com/jerrykuku/luci-app-argon-config.git}"
+ARGON_CONFIG_REPO_BRANCH="${ARGON_CONFIG_REPO_BRANCH:-master}"
+
+# ------------------------------------------------------------- run modes -----
+INSTALL_DEPS=false
+PREPARE_ONLY="${PREPARE_ONLY:-false}"
+CONFIG_ONLY="${CONFIG_ONLY:-false}"
+SKIP_TOOLCHAIN="${SKIP_TOOLCHAIN:-false}"
+SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-false}"
+SKIP_FEEDS_UPDATE="${SKIP_FEEDS_UPDATE:-false}"
+FORCE_PINNED=false
+
+SRC="${ROOT_DIR}/${SOURCE_DIR}"
+ART="${ROOT_DIR}/${ARTIFACTS_DIR}"
+LOG_FILE="${ROOT_DIR}/build.log"
+
+usage() {
+	cat <<'EOF'
+Usage: scripts/local-build.sh [options]
+
+Builds mainline OpenWrt (openwrt/openwrt, branch `main`) for the
+Hiveton H5000M (mediatek/filogic, profile hiveton_h5000m).
+
+Options:
+  --install-deps        Install build dependencies (apt-get, or pacman on Arch).
+  --prepare-only        Clone/update source, feeds, patches and local packages, then stop.
+  --config-only         Additionally run defconfig and verify the package set, then stop.
+  --pinned              Build OPENWRT_PINNED_REVISION instead of the branch head.
+  --skip-toolchain      Skip the explicit `make toolchain/install` prebuild step.
+  --skip-download       Skip `make download` prefetch.
+  --skip-feeds-update   Reuse the existing feeds checkout (no ./scripts/feeds update).
+  -h, --help            Show this help.
+
+Feature switches are environment variables, e.g.
+
+  ENABLE_MT5700M=true ENABLE_WWAND=false THREADS=8 scripts/local-build.sh
+  ENABLE_NIKKI=true ENABLE_ADBLOCK=false scripts/local-build.sh
+
+Board stack (defaults):
+  ENABLE_FANCONTROL=true   luci-app-h5000m-fancontrol + userspace fan DTS patch
+  ENABLE_NETMODE=true      luci-app-h5000m-netmode (wired WAN / 5G priority)
+  ENABLE_WWAND=true        ddimension/wwand dialer (QMI/MBIM/NCM/MHI)
+  ENABLE_MT5700M=false     luci-app-mt5700m instead of wwand (mutually exclusive)
+
+Optional services (defaults):
+  ENABLE_UPNP=true ENABLE_ADBLOCK=true
+  ENABLE_DOCKERMAN=false
+  ENABLE_NIKKI=false ENABLE_OPENCLASH=false ENABLE_MOSDNS=false
+  ENABLE_HOMEPROXY=false ENABLE_ADGUARDHOME=false
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--install-deps) INSTALL_DEPS=true ;;
+		--prepare-only) PREPARE_ONLY=true ;;
+		--config-only) CONFIG_ONLY=true ;;
+		--pinned) FORCE_PINNED=true; OPENWRT_TRACK=pinned ;;
+		--skip-toolchain) SKIP_TOOLCHAIN=true ;;
+		--skip-download) SKIP_DOWNLOAD=true ;;
+		--skip-feeds-update) SKIP_FEEDS_UPDATE=true ;;
+		-h|--help) usage; exit 0 ;;
+		*) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+	esac
+	shift
+done
+
+# ------------------------------------------------------------- logging -------
+log()  { printf '\033[1;34m[h5000m]\033[0m %s\n' "$*" | tee -a "$LOG_FILE"; }
+warn() { printf '\033[1;33m[h5000m:warn]\033[0m %s\n' "$*" | tee -a "$LOG_FILE" >&2; }
+die()  { printf '\033[1;31m[h5000m:error]\033[0m %s\n' "$*" | tee -a "$LOG_FILE" >&2; exit 1; }
+
+is_true() {
+	case "${1,,}" in
+		1|true|yes|y|on) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+run_with_timeout() {
+	local timeout_s="$1"; shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout --foreground -k 30 "$timeout_s" "$@"
+	else
+		"$@"
+	fi
+}
+
+# --------------------------------------------------------------- network -----
+github_url_candidates() {
+	local url="$1" prefix
+	printf '%s\n' "$url"
+	for prefix in ${GITHUB_PROXY_PREFIXES:-}; do
+		printf '%s%s\n' "$prefix" "$url"
+	done
+}
+
+git_clone_retry() {
+	local url="$1" branch="$2" dest="$3" candidate
+
+	for candidate in $(github_url_candidates "$url"); do
+		if run_with_timeout "$GIT_TIMEOUT" \
+			git clone --depth 1 --branch "$branch" "$candidate" "$dest"; then
+			return 0
+		fi
+		warn "clone failed, trying next mirror: $candidate"
+		rm -rf "$dest"
+	done
+
+	return 1
+}
+
+# --------------------------------------------------------- dependencies ------
+install_deps() {
+	if command -v apt-get >/dev/null 2>&1; then
+		log "Installing build dependencies with apt-get"
+		sudo apt-get update
+		sudo apt-get install -y --no-install-recommends \
+			build-essential ccache python3 python3-pyelftools libncurses-dev libssl-dev \
+			libgmp3-dev libmbedtls-dev zlib1g-dev autoconf automake libtool patch gawk \
+			gettext unzip file wget curl rsync zstd git bison flex gperf haveged \
+			libelf-dev libltdl-dev libmpc-dev libmpfr-dev libreadline-dev lld llvm \
+			ninja-build p7zip pkgconf python3-ply python3-setuptools qemu-utils re2c \
+			scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl vim xmlto \
+			xxd device-tree-compiler fastjar time
+		return 0
+	fi
+
+	if command -v pacman >/dev/null 2>&1; then
+		log "Installing build dependencies with pacman"
+		# Only packages that live in the official Arch repositories.  `fastjar`
+		# and `uglify-js` are AUR-only and `qemu-utils` is a Debian name — the
+		# Arch equivalent for the image tools is qemu-img.  The AUR extras are
+		# reported below rather than silently skipped.
+		sudo pacman -S --needed --noconfirm \
+			base-devel ccache python python-pyelftools ncurses openssl gmp mbedtls zlib \
+			autoconf automake libtool patch gawk gettext unzip file wget curl rsync zstd \
+			git bison flex gperf haveged libelf dtc time qemu-img re2c scons \
+			squashfs-tools subversion swig texinfo upx ninja p7zip pkgconf \
+			python-ply python-setuptools vim xmlto llvm lld clang cpio
+
+		local aur_missing=()
+		for cmd in fastjar uglifyjs; do
+			command -v "$cmd" >/dev/null 2>&1 || aur_missing+=("$cmd")
+		done
+		if [ "${#aur_missing[@]}" -gt 0 ]; then
+			warn "Still missing (AUR-only on Arch): ${aur_missing[*]}"
+			warn "Install them with your AUR helper if a package you enabled needs them, e.g. 'yay -S fastjar uglify-js'."
+		fi
+		return 0
+	fi
+
+	die "No supported package manager found (apt-get / pacman). Install the OpenWrt build deps manually."
+}
+
+# Tools the configuration stage needs.  Kept deliberately small: configuring a
+# tree (feeds + defconfig) must not demand the full cross-build toolchain, or
+# nobody could lint a config change without provisioning a build host.
+CONFIG_TOOLS=(git make gcc g++ python3 patch gawk find tar zstd)
+
+# Tools the download/compile stage additionally needs.
+BUILD_TOOLS=(unzip rsync flex bison gperf dtc fastjar)
+
+check_environment() {
+	local tools=("${CONFIG_TOOLS[@]}") missing=() cmd
+
+	if ! is_true "$CONFIG_ONLY" && ! is_true "$PREPARE_ONLY"; then
+		tools+=("${BUILD_TOOLS[@]}")
+	fi
+
+	for cmd in "${tools[@]}"; do
+		command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+	done
+
+	command -v wget >/dev/null 2>&1 || command -v curl >/dev/null 2>&1 || missing+=("wget|curl")
+
+	if [ "${#missing[@]}" -gt 0 ]; then
+		if is_true "$CONFIG_ONLY" || is_true "$PREPARE_ONLY"; then
+			die "Missing tools for the configuration stage: ${missing[*]}. Re-run with --install-deps."
+		fi
+		die "Missing build tools: ${missing[*]}. Re-run with --install-deps."
+	fi
+
+	if ! command -v rsync >/dev/null 2>&1; then
+		warn "rsync not found; falling back to cp for package staging"
+	fi
+
+	if is_true "$CONFIG_ONLY" || is_true "$PREPARE_ONLY"; then
+		log "Build host: $(uname -srm), ${THREADS} jobs (configuration stage — full build tools not checked)"
+	else
+		log "Build host: $(uname -srm), ${THREADS} jobs"
+	fi
+}
+
+show_features() {
+	log "Upstream      : ${REPO_URL} (${REPO_BRANCH}, track=${OPENWRT_TRACK})"
+	log "Target        : ${TARGET_BOARD}/${TARGET_SUBTARGET} profile=${TARGET_PROFILE}"
+	log "Board stack   : fancontrol=${ENABLE_FANCONTROL} netmode=${ENABLE_NETMODE} wwand=${ENABLE_WWAND} mt5700m=${ENABLE_MT5700M}"
+	log "UI            : argon=${ENABLE_THEME_ARGON}"
+	log "Optional      : upnp=${ENABLE_UPNP} adblock=${ENABLE_ADBLOCK} dockerman=${ENABLE_DOCKERMAN}"
+	log "Repo extras   : build=${ENABLE_REPO_PACKAGES} (services are =m unless their switch is on)"
+	log "Proxy/DNS     : nikki=${ENABLE_NIKKI} openclash=${ENABLE_OPENCLASH} mosdns=${ENABLE_MOSDNS} homeproxy=${ENABLE_HOMEPROXY} adguardhome=${ENABLE_ADGUARDHOME}"
+}
+
+resolve_modem_stack() {
+	# wwand and luci-app-mt5700m both dial the same MT5700M cdc_ncm interface
+	# and both want to own network.MT5700M.  The previous harness enforced the
+	# same rule for QModem vs luci-app-modem; keep the loud, automatic
+	# resolution so a mis-set environment never produces a box with two
+	# dialers racing for one modem.
+	if is_true "$ENABLE_WWAND" && is_true "$ENABLE_MT5700M"; then
+		warn "ENABLE_WWAND and ENABLE_MT5700M are mutually exclusive (one cdc_ncm data path, one network.MT5700M)."
+		warn "Keeping wwand (the WWAN dialer) and DISABLING luci-app-mt5700m."
+		ENABLE_MT5700M=false
+	fi
+
+	if ! is_true "$ENABLE_WWAND" && ! is_true "$ENABLE_MT5700M"; then
+		warn "Neither ENABLE_WWAND nor ENABLE_MT5700M is set: the image will have no cellular dialer,"
+		warn "and luci-app-h5000m-netmode will have no modem interface to arbitrate."
+	fi
+}
+
+# ---------------------------------------------------------------- source -----
+prepare_source() {
+	local rev
+
+	if [ ! -d "${SRC}/.git" ]; then
+		log "Cloning ${REPO_URL} (${REPO_BRANCH})"
+		git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$SRC" \
+			|| die "Unable to clone ${REPO_URL}"
+	fi
+
+	if [ "${OPENWRT_TRACK}" = "pinned" ]; then
+		rev="${OPENWRT_PINNED_REVISION}"
+		log "Fetching pinned revision ${rev}"
+		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$rev" \
+			|| die "Cannot fetch pinned revision ${rev}"
+		git -C "$SRC" checkout -f FETCH_HEAD
+	else
+		log "Updating ${REPO_BRANCH} to the current upstream head"
+		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$REPO_BRANCH" \
+			|| die "Cannot fetch ${REPO_BRANCH}"
+		git -C "$SRC" checkout -f FETCH_HEAD
+	fi
+
+	# A previous run may have applied tree patches; restore tracked files so
+	# patch application stays deterministic.  Deliberately NOT `git clean`:
+	# feeds/, package/, dl/, build_dir/, staging_dir/ and bin/ must survive to
+	# keep incremental builds and ccache useful.
+	git -C "$SRC" reset --hard HEAD >/dev/null 2>&1 || true
+
+	local head
+	head="$(git -C "$SRC" rev-parse HEAD)"
+	log "Source at $(git -C "$SRC" log --oneline -1)"
+	printf '%s\n' "$head" > "${ROOT_DIR}/.upstream-revision"
+
+	local desc
+	desc="$(git -C "$SRC" describe --tags --always 2>/dev/null || echo "$head")"
+	printf '%s\n' "$desc" > "${ROOT_DIR}/.upstream-describe"
+}
+
+write_feeds_conf() {
+	# The base feeds are always present.  The qmodem feed is *conditional*:
+	# luci-app-mt5700m hard-depends on ubus-at-daemon and sms-tool_q, and those
+	# two packages exist only there.  QModem is a whole competing modem stack
+	# (its own drivers and its own LuCI panel), so it must not be dragged into a
+	# wwand build — and on the wwand path nothing needs it.
+	{
+		cat "${ROOT_DIR}/feeds.conf.default"
+		if is_true "$ENABLE_MT5700M"; then
+			printf '\n# Added because ENABLE_MT5700M=true. luci-app-mt5700m hard-depends on\n'
+			printf '# ubus-at-daemon and sms-tool_q, which are only packaged here.\n'
+			printf 'src-git qmodem %s;%s\n' "$QMODEM_REPO_URL" "$QMODEM_REPO_BRANCH"
+		fi
+	} > "$SRC/feeds.conf.default"
+}
+
+# `feeds install` symlinks packages into package/feeds/<feed>/ but never removes
+# links for a feed that is no longer configured, so a tree that once built the
+# mt5700m stack would keep offering all of QModem on a later wwand build.  Drop
+# those links so the configured feed set is the only thing in the tree.  Only
+# symlinks live under package/feeds, so this cannot delete a checkout.
+prune_stale_feeds() {
+	local dir name entry fname configured
+
+	[ -d "${SRC}/package/feeds" ] || return 0
+
+	shopt -s nullglob
+	for dir in "${SRC}/package/feeds"/*/; do
+		name="$(basename "$dir")"
+		configured=false
+		while read -r entry fname _; do
+			case "$entry" in
+				src-git|src-link|src-svn|src-hg)
+					[ "$fname" = "$name" ] && configured=true
+					;;
+			esac
+		done < "$SRC/feeds.conf.default"
+
+		if [ "$configured" = false ]; then
+			log "Removing package links for the now-unconfigured feed ${name}"
+			rm -rf "$dir"
+		fi
+	done
+	shopt -u nullglob
+}
+
+# A feed named in feeds.conf.default but absent from feeds/ means the feed set
+# changed since the last update (e.g. qmodem was just switched on).  Skipping the
+# update then would make `feeds install` fail with a confusing error.
+feed_tree_is_complete() {
+	local entry name
+	while read -r entry name _; do
+		case "$entry" in
+			src-git|src-link|src-svn|src-hg)
+				[ -d "${SRC}/feeds/${name}" ] || return 1
+				;;
+		esac
+	done < "$SRC/feeds.conf.default"
+	return 0
+}
+
+prepare_feeds() {
+	cd "$SRC"
+
+	write_feeds_conf
+	prune_stale_feeds
+
+	if is_true "$SKIP_FEEDS_UPDATE" && feed_tree_is_complete; then
+		log "Skipping feeds update (--skip-feeds-update)"
+	else
+		if is_true "$SKIP_FEEDS_UPDATE"; then
+			warn "--skip-feeds-update was requested, but a configured feed has no local checkout; updating anyway"
+		else
+			log "Updating feeds"
+		fi
+		run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds update -a \
+			|| die "feeds update failed — refusing to build a firmware with missing packages"
+	fi
+
+	log "Installing feeds"
+	run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds install -a \
+		|| die "feeds install failed"
+
+	verify_wwand_feed
+}
+
+# The ddimension feed is not one directory per package: `wwand/Makefile` alone
+# defines wwand plus its qmi/mbim/ncm/mhi/esim/datapath subpackages.  So check
+# the package *definitions* where they actually live, and only look for a
+# directory for the two LuCI packages that really are separate.
+verify_wwand_feed() {
+	local feed="${SRC}/feeds/wwand" mk pkg
+
+	if [ ! -d "$feed" ]; then
+		warn "wwand feed is not present — ENABLE_WWAND will fail its package check"
+		return 0
+	fi
+
+	mk="${feed}/wwand/Makefile"
+	if [ ! -f "$mk" ]; then
+		warn "wwand feed has no wwand/Makefile"
+		return 0
+	fi
+
+	for pkg in wwand wwand-qmi wwand-ncm wwand-mbim wwand-mhi; do
+		grep -q "^define Package/${pkg}\$" "$mk" \
+			|| warn "wwand feed no longer defines the ${pkg} package"
+	done
+
+	for pkg in luci-app-wwand luci-proto-wwand; do
+		[ -d "${feed}/${pkg}" ] || warn "wwand feed is missing ${pkg}"
+	done
+
+	return 0
+}
+
+# --------------------------------------------------------------- patches -----
+apply_patches() {
+	local patch_file name paths applied=0
+
+	shopt -s nullglob
+	for patch_file in "${ROOT_DIR}"/patches/*.patch; do
+		name="$(basename "$patch_file")"
+
+		# A patch that only INSERTS lines is not idempotent under `git apply`:
+		# the surrounding context still matches afterwards, so a second run
+		# inserts a second copy of the block.  0001-h5000m-userspace-fan-control
+		# has exactly that shape — applying it twice yields two
+		# /delete-node/ blocks in the DTS, which dtc then rejects.
+		#
+		# The `--reverse --check` test below cannot catch this, so the real
+		# protection is prepare_source's `git reset --hard`.  Rather than trust
+		# that implicitly, assert it: refuse to apply a patch on top of a tree
+		# where the files it touches are already modified.  feeds.conf.default
+		# is deliberately excluded by scoping the test to the patch's own
+		# paths, because prepare_feeds legitimately rewrites it before this
+		# point.
+		paths="$(git -C "$SRC" apply --numstat "$patch_file" 2>/dev/null | cut -f3-)"
+		if [ -n "$paths" ] \
+			&& [ -n "$(git -C "$SRC" status --porcelain --untracked-files=no -- $paths)" ]; then
+			die "${name} targets files that are already modified in ${SRC} — the tree was not reset; applying it would duplicate inserted blocks"
+		fi
+
+		if git -C "$SRC" apply --check "$patch_file" >/dev/null 2>&1; then
+			git -C "$SRC" apply "$patch_file" || die "Failed to apply ${name}"
+			log "Applied patch ${name}"
+			applied=$((applied + 1))
+		elif git -C "$SRC" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+			log "Patch ${name} already applied"
+		else
+			die "Patch ${name} does not apply to $(git -C "$SRC" log --oneline -1) — upstream DTS changed; refresh patches/"
+		fi
+	done
+	shopt -u nullglob
+
+
+	if [ "$applied" -gt 0 ]; then
+		log "Applied ${applied} tree patch(es)"
+	fi
+	return 0
+}
+
+# --------------------------------------------------------------- staging -----
+stage_directory() {
+	local from="$1" to="$2"
+
+	mkdir -p "$to"
+	if command -v rsync >/dev/null 2>&1; then
+		rsync -a --delete-after --exclude '.git' "${from}/" "${to}/"
+	else
+		rm -rf "$to"
+		mkdir -p "$to"
+		cp -a "${from}/." "$to/"
+		rm -rf "${to}/.git"
+	fi
+}
+
+install_local_packages() {
+	local pkg
+
+	shopt -s nullglob
+	for pkg in "${ROOT_DIR}"/local-packages/*/; do
+		local name
+		name="$(basename "$pkg")"
+		log "Staging local package ${name}"
+		stage_directory "$pkg" "${SRC}/package/${name}"
+	done
+	shopt -u nullglob
+}
+
+# clone_external <name> <url> <branch> — pull a third-party package tree into
+# package/ the same way the previous harness did.  These projects are not in
+# the official feeds and are the user's own risk; they are all opt-in.
+clone_external() {
+	# Split across two statements on purpose: `local a="$1" b="${a}"` expands
+	# every argument before assigning any of them, so `b` would see an unbound
+	# `a` under `set -u`.
+	local name="$1" url="$2" branch="${3:-main}"
+	local dest="${SRC}/package/${name}"
+
+	if [ -d "${dest}/.git" ]; then
+		log "Updating external package ${name}"
+		if run_with_timeout "$GIT_TIMEOUT" git -C "$dest" fetch --depth 1 origin "$branch" \
+			&& git -C "$dest" checkout -f FETCH_HEAD; then
+			return 0
+		fi
+		# A usable checkout already exists; a transient fetch failure should not
+		# kill the build.
+		warn "Could not update ${name}; keeping the existing checkout"
+		return 0
+	fi
+
+	log "Cloning external package ${name} (${branch})"
+	if ! git_clone_retry "$url" "$branch" "$dest"; then
+		warn "Could not clone ${name} from ${url}"
+		return 1
+	fi
+	return 0
+}
+
+# The three H5000M board plugins are maintained outside any feed, so they are
+# cloned into package/ like the previous harness cloned luci-app-Airpifanctrl
+# and luci-app-turboacc-mtk.  They are required packages: if the clone fails the
+# build stops rather than shipping an image with no fan control or no egress
+# arbitration.
+install_board_plugins() {
+	local failed=0
+
+	if is_true "$ENABLE_FANCONTROL"; then
+		clone_external luci-app-h5000m-fancontrol \
+			https://github.com/FAN789/luci-app-h5000m-fancontrol.git main \
+			|| failed=1
+	fi
+
+	if is_true "$ENABLE_NETMODE"; then
+		clone_external luci-app-h5000m-netmode \
+			https://github.com/FAN789/luci-app-h5000m-netmode.git main \
+			|| failed=1
+	fi
+
+	if is_true "$ENABLE_MT5700M"; then
+		clone_external luci-app-mt5700m \
+			https://github.com/FAN789/luci-app-mt5700m.git main \
+			|| failed=1
+	fi
+
+	if [ "$failed" -ne 0 ]; then
+		die "Could not fetch the H5000M board plugins — refusing to build a firmware without them"
+	fi
+
+	return 0
+}
+
+# Argon lives in two repositories outside every feed, so it is cloned into
+# package/ exactly like the board plugins rather than pulled from a feed.
+# Both Makefiles include $(TOPDIR)/feeds/luci/luci.mk, so this has to run after
+# the feeds are installed.
+#
+# The clone failure is fatal rather than a warning: the seed lists
+# luci-theme-argon and luci-app-argon-config as required packages, so a silent
+# fetch failure would resurface much later as an opaque defconfig complaint
+# about an unknown package instead of as a network error here.
+install_theme() {
+	if ! is_true "$ENABLE_THEME_ARGON"; then
+		log "Argon theme disabled (ENABLE_THEME_ARGON=false) — keeping the stock theme"
+		return 0
+	fi
+
+	clone_external luci-theme-argon "$ARGON_THEME_REPO_URL" "$ARGON_THEME_REPO_BRANCH" \
+		|| die "Could not fetch luci-theme-argon from ${ARGON_THEME_REPO_URL}"
+	clone_external luci-app-argon-config "$ARGON_CONFIG_REPO_URL" "$ARGON_CONFIG_REPO_BRANCH" \
+		|| die "Could not fetch luci-app-argon-config from ${ARGON_CONFIG_REPO_URL}"
+
+	return 0
+}
+
+# Clone one optional third-party package on behalf of an ENABLE_* switch.
+#
+# The switch name is part of the failure message on purpose.  Under `set -e` a
+# failing `is_true X && clone_external ...` aborts the whole run, and the only
+# thing the user sees is the raw git error ("Repository not found") — which does
+# not name the switch to turn off, nor the URL that is wrong.  That is exactly
+# how a dead ADGUARDHOME url used to kill `--config-only` with
+# ENABLE_ADGUARDHOME=true.
+install_optional_external() {
+	local switch="$1" name="$2" url="$3" branch="$4"
+
+	clone_external "$name" "$url" "$branch" \
+		|| die "ENABLE_${switch} is set but ${name} could not be fetched from ${url}. Fix the URL or pick another source, or turn ENABLE_${switch} off."
+	return 0
+}
+
+# Clone a third-party package when it is needed in the tree for EITHER reason:
+# it is installed into the image (its ENABLE_* switch is on), or it is built into
+# the apk repository (ENABLE_REPO_PACKAGES).
+#
+# The second reason is easy to miss and was a real bug here.  append_optional_config
+# emits these packages as `=m` so they land in bin/packages/, but a `=m` symbol
+# only exists if the package definition exists.  Gating the clone on the ENABLE_*
+# switch alone meant that on a clean checkout — CI, or anyone cloning this repo —
+# nothing was cloned, defconfig silently dropped all seven symbols with exit 0, and
+# the packages never reached the repository at all.  It stayed hidden locally only
+# because earlier runs had left the clones in package/.
+clone_for_repo_or_image() {
+	local switch_value="$1"; shift
+
+	if is_true "$ENABLE_REPO_PACKAGES" || is_true "$switch_value"; then
+		install_optional_external "$@"
+	fi
+	return 0
+}
+
+install_external_packages() {
+	clone_for_repo_or_image "$ENABLE_NIKKI"     NIKKI     OpenWrt-nikki   https://github.com/nikkinikki-org/OpenWrt-nikki.git main
+	clone_for_repo_or_image "$ENABLE_OPENCLASH" OPENCLASH OpenClash       https://github.com/vernesong/OpenClash.git master
+	clone_for_repo_or_image "$ENABLE_MOSDNS"    MOSDNS    luci-app-mosdns https://github.com/sbwml/luci-app-mosdns.git v5
+	clone_for_repo_or_image "$ENABLE_HOMEPROXY" HOMEPROXY homeproxy       https://github.com/immortalwrt/homeproxy.git master
+
+	# AdGuardHome deliberately has NO clone here.  Its packages — adguardhome,
+	# luci-app-adguardhome and luci-i18n-adguardhome-zh-cn — are all in the
+	# official feeds now, so the third-party source the previous harness needed
+	# (a prebuilt ipk from sirpdboy/luci-app-adguardhome releases) is obsolete.
+	# ENABLE_ADGUARDHOME only selects the config symbols; see append_optional_config.
+	return 0
+}
+
+# --------------------------------------------------------------- config ------
+config_set_symbol() {
+	local symbol="$1" value="$2"
+
+	if grep -q "^${symbol}=" "$SRC/.config" 2>/dev/null; then
+		sed -i "s|^${symbol}=.*|${symbol}=${value}|" "$SRC/.config"
+	else
+		printf '%s=%s\n' "$symbol" "$value" >> "$SRC/.config"
+	fi
+}
+
+config_enable()  { config_set_symbol "CONFIG_PACKAGE_$1" "y"; }
+config_disable() { config_set_symbol "CONFIG_PACKAGE_$1" "n"; }
+
+append_board_stack_config() {
+	local out="$1"
+
+	cat >> "$out" <<'EOF'
+
+# --------------------------------------------------- H5000M board stack ------
+EOF
+
+	if is_true "$ENABLE_FANCONTROL"; then
+		cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_luci-app-h5000m-fancontrol=y
+CONFIG_PACKAGE_kmod-hwmon-pwmfan=y
+CONFIG_PACKAGE_luci-i18n-h5000m-fancontrol-zh-cn=y
+EOF
+	fi
+
+	if is_true "$ENABLE_NETMODE"; then
+		cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_luci-app-h5000m-netmode=y
+CONFIG_PACKAGE_luci-i18n-h5000m-netmode-zh-cn=y
+EOF
+	fi
+
+	if is_true "$ENABLE_WWAND"; then
+		cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_wwand=y
+CONFIG_PACKAGE_wwand-qmi=y
+CONFIG_PACKAGE_wwand-ncm=y
+CONFIG_PACKAGE_wwand-mbim=y
+CONFIG_PACKAGE_luci-app-wwand=y
+CONFIG_PACKAGE_luci-proto-wwand=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-mbim=y
+CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+CONFIG_PACKAGE_kmod-rmnet=y
+EOF
+	fi
+
+	if is_true "$ENABLE_MT5700M"; then
+		cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_luci-app-mt5700m=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
+EOF
+	fi
+
+	cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_h5000m-integration=y
+EOF
+}
+
+append_optional_config() {
+	local out="$1"
+
+	cat >> "$out" <<'EOF'
+
+# ------------------------------------------------------ optional services ---
+EOF
+
+	if is_true "$ENABLE_UPNP"; then
+		cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_luci-app-upnp=y
+CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
+CONFIG_PACKAGE_miniupnpd-nftables=y
+EOF
+	fi
+
+	# Argon theme and its settings page, both cloned into package/ above.
+	# Installing the theme is what activates it: it ships
+	# root/etc/uci-defaults/30_luci-theme-argon, which points
+	# luci.main.mediaurlbase at /luci-static/argon on first boot.
+	if is_true "$ENABLE_THEME_ARGON"; then
+		cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_luci-theme-argon=y
+CONFIG_PACKAGE_luci-app-argon-config=y
+EOF
+	fi
+
+	if is_true "$ENABLE_ADBLOCK"; then
+		cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_adblock=y
+CONFIG_PACKAGE_luci-app-adblock=y
+CONFIG_PACKAGE_luci-i18n-adblock-zh-cn=y
+EOF
+	fi
+
+	# ------------------------------------------------ services: image or repo ---
+	# These are the "extras" — a Docker stack, a proxy stack, AdGuardHome.  They
+	# are NOT baked into the image by default: they are large, most owners want
+	# only one of them, and every one of them can be installed afterwards from
+	# the apk repository this same build publishes.
+	#
+	# `=m` is the mechanism.  OpenWrt builds a `=m` package and drops its .apk in
+	# bin/packages/ without installing it into the rootfs — verified on this tree:
+	# CONFIG_PACKAGE_jq=m survived defconfig, `make .../jq/compile` produced
+	# bin/packages/aarch64_cortex-a53/packages/jq-1.8.2-r1.apk, and no module was
+	# installed into the image.  Runtime dependencies are emitted as `=m` too, so
+	# the repository stays self-contained and `apk add` resolves.
+	#
+	# Turning the matching ENABLE_* switch on upgrades the group to `=y`, i.e.
+	# installed into the firmware, for anyone who does want it baked in.
+	service_pkg_mode="m"
+	is_true "$ENABLE_REPO_PACKAGES" || service_pkg_mode="n"
+
+	# emit_service <switch-value> <package>...
+	emit_service() {
+		local on="$1"; shift
+		local mode="$service_pkg_mode"
+		local pkg
+		is_true "$on" && mode="y"
+		for pkg in "$@"; do
+			printf 'CONFIG_PACKAGE_%s=%s\n' "$pkg" "$mode" >> "$out"
+		done
+	}
+
+	emit_service "$ENABLE_DOCKERMAN" \
+		docker dockerd containerd runc docker-compose \
+		luci-app-dockerman luci-i18n-dockerman-zh-cn \
+		kmod-fs-cifs kmod-nf-nathelper-extra
+
+	emit_service "$ENABLE_NIKKI"     nikki mihomo-meta luci-app-nikki
+	emit_service "$ENABLE_OPENCLASH" luci-app-openclash
+	emit_service "$ENABLE_MOSDNS"    mosdns luci-app-mosdns
+	emit_service "$ENABLE_HOMEPROXY" luci-app-homeproxy sing-box kmod-nft-tproxy
+
+	# AdGuardHome and its LuCI app are in the official feeds, so this needs no
+	# clone at all.
+	emit_service "$ENABLE_ADGUARDHOME" \
+		adguardhome luci-app-adguardhome luci-i18n-adguardhome-zh-cn
+
+	return 0
+}
+
+build_required_packages() {
+	REQUIRED_PACKAGES=(
+		luci
+		luci-base
+		luci-ssl
+		luci-mod-admin-full
+		luci-app-firewall
+		luci-app-package-manager
+		luci-i18n-base-zh-cn
+	)
+	is_true "$ENABLE_FANCONTROL" && REQUIRED_PACKAGES+=(luci-app-h5000m-fancontrol kmod-hwmon-pwmfan)
+	is_true "$ENABLE_NETMODE"    && REQUIRED_PACKAGES+=(luci-app-h5000m-netmode)
+	is_true "$ENABLE_WWAND"      && REQUIRED_PACKAGES+=(wwand wwand-qmi wwand-ncm wwand-mbim luci-app-wwand luci-proto-wwand)
+	is_true "$ENABLE_MT5700M"    && REQUIRED_PACKAGES+=(luci-app-mt5700m ubus-at-daemon sms-tool_q)
+	is_true "$ENABLE_THEME_ARGON" && REQUIRED_PACKAGES+=(luci-theme-argon luci-app-argon-config)
+	REQUIRED_PACKAGES+=(h5000m-integration)
+
+	# Optional switches are verified too, and for a specific reason: `make
+	# defconfig` exits 0 even when a requested package does not exist, it just
+	# drops the symbol.  Measured: feeding it the 30 package names the reference
+	# harness used but mainline lacks left 20 of them silently absent and
+	# produced no diagnostic naming any of them.  Without these entries a typo
+	# in a package name, or an upstream package being removed, would ship a
+	# firmware that quietly lacks the feature the switch promised.
+	is_true "$ENABLE_DOCKERMAN"   && REQUIRED_PACKAGES+=(docker dockerd containerd runc luci-app-dockerman)
+	is_true "$ENABLE_NIKKI"       && REQUIRED_PACKAGES+=(nikki mihomo-meta luci-app-nikki)
+	is_true "$ENABLE_OPENCLASH"   && REQUIRED_PACKAGES+=(luci-app-openclash)
+	is_true "$ENABLE_MOSDNS"      && REQUIRED_PACKAGES+=(mosdns luci-app-mosdns)
+	is_true "$ENABLE_HOMEPROXY"   && REQUIRED_PACKAGES+=(luci-app-homeproxy)
+	is_true "$ENABLE_ADGUARDHOME" && REQUIRED_PACKAGES+=(adguardhome luci-app-adguardhome)
+	is_true "$ENABLE_UPNP"        && REQUIRED_PACKAGES+=(luci-app-upnp miniupnpd-nftables)
+	is_true "$ENABLE_ADBLOCK"     && REQUIRED_PACKAGES+=(adblock luci-app-adblock)
+
+	# Required, not cosmetic.  Every line above is `is_true X && ...`, so when
+	# the LAST switch is off the final statement returns 1 and — because this
+	# function is called as a plain statement under `set -e` — the whole build
+	# dies with no message at all.  Before the optional packages were added here
+	# the last line was an unconditional `REQUIRED_PACKAGES+=(...)`, which hid
+	# the trap.  It surfaced as the `minimal` coverage profile failing right
+	# after the second defconfig with a log that simply stopped.
+	return 0
+}
+
+# Packages that should be there but whose absence is only worth a warning: the
+# translation sub-packages generated by luci.mk from a plugin's po/ tree.  Their
+# exact name depends on LuCI's language-suffix mapping, so a rename upstream
+# must not fail an otherwise good firmware.
+build_expected_packages() {
+	EXPECTED_PACKAGES=()
+	is_true "$ENABLE_FANCONTROL" && EXPECTED_PACKAGES+=(luci-i18n-h5000m-fancontrol-zh-cn)
+	is_true "$ENABLE_NETMODE"    && EXPECTED_PACKAGES+=(luci-i18n-h5000m-netmode-zh-cn)
+	is_true "$ENABLE_UPNP"       && EXPECTED_PACKAGES+=(luci-i18n-upnp-zh-cn)
+	is_true "$ENABLE_ADBLOCK"    && EXPECTED_PACKAGES+=(luci-i18n-adblock-zh-cn)
+	return 0
+}
+
+configure_build() {
+	cd "$SRC"
+
+	prepare_config_stage
+
+	log "Writing .config"
+	cp -f "${ROOT_DIR}/configs/h5000m.config" .config
+	printf '\n' >> .config
+	append_board_stack_config .config
+	append_optional_config .config
+
+	log "Running defconfig"
+	run_with_timeout "$CONFIG_TIMEOUT" make defconfig \
+		|| die "make defconfig failed"
+
+	# defconfig silently drops symbols whose dependencies were not satisfied.
+	# Re-assert the ones this image is defined by, then fold the result again.
+	#
+	# The language gate has to be re-asserted with the packages: every
+	# luci-i18n-<app>-zh-cn package defaults to LUCI_LANG_zh_Hans, so if a
+	# defconfig pass drops the language the translations silently disappear even
+	# though each app is still enabled.
+	config_set_symbol "CONFIG_LUCI_LANG_zh_Hans" "y"
+
+	build_required_packages
+	local pkg
+	for pkg in "${REQUIRED_PACKAGES[@]}"; do
+		config_enable "$pkg"
+	done
+	run_with_timeout "$CONFIG_TIMEOUT" make defconfig \
+		|| die "second make defconfig failed"
+}
+
+# OpenWrt gates .config on $(STAGING_DIR_HOST)/.prereq-build, whose recipe runs
+# the *full* host prerequisite check — including tools such as unzip and rsync
+# that only a compile needs.  Configuring a tree compiles nothing, so for
+# --prepare-only / --config-only we satisfy that stamp directly and let a config
+# change be linted on a lightweight host.  A real build always goes through the
+# real gate, so a genuinely under-provisioned build host still fails early.
+prepare_config_stage() {
+	local stamp
+
+	if ! is_true "$CONFIG_ONLY" && ! is_true "$PREPARE_ONLY"; then
+		return 0
+	fi
+
+	stamp="${SRC}/staging_dir/host/.prereq-build"
+	mkdir -p "$(dirname "$stamp")"
+	touch "$stamp"
+
+	log "Configuration stage: host prerequisite gate satisfied directly (nothing is compiled)"
+}
+
+config_symbol_is_set() {
+	grep -q "^CONFIG_PACKAGE_$1=y$" "$SRC/.config"
+}
+
+verify_config() {
+	local pkg missing=()
+
+	build_required_packages
+	for pkg in "${REQUIRED_PACKAGES[@]}"; do
+		config_symbol_is_set "$pkg" || missing+=("$pkg")
+	done
+
+	if [ "${#missing[@]}" -gt 0 ]; then
+		printf '\n' >&2
+		for pkg in "${missing[@]}"; do
+			warn "required package did not survive defconfig: ${pkg}"
+		done
+		die "Configuration is missing required packages — refusing to build a firmware without ${missing[*]}"
+	fi
+
+	# Board target must be the H5000M, not a generic filogic profile.
+	grep -q "^CONFIG_TARGET_${TARGET_BOARD}_${TARGET_SUBTARGET}_DEVICE_${TARGET_PROFILE}=y$" "$SRC/.config" \
+		|| die "target profile ${TARGET_PROFILE} is not selected in .config"
+
+	log "Verified ${#REQUIRED_PACKAGES[@]} required packages and target profile ${TARGET_PROFILE}"
+
+	build_expected_packages
+	for pkg in "${EXPECTED_PACKAGES[@]}"; do
+		config_symbol_is_set "$pkg" || warn "expected package is absent: ${pkg}"
+	done
+}
+
+dump_enabled_packages() {
+	local out="$ART/enabled-packages.txt" n
+
+	mkdir -p "$ART"
+
+	# This file lists .config SYMBOLS, which is not the same set as the packages
+	# in the image.  Two differences bite anyone who diffs it against the
+	# manifest and concludes that packages went missing:
+	#
+	#   * ABI-versioned libraries appear under their symbol alias here and under
+	#     their real name in the manifest — libubox vs libubox20260721,
+	#     libgcc vs libgcc1, jansson vs jansson4.
+	#   * Some symbols are build-time knobs, not installable packages at all:
+	#     MAC80211_DEBUGFS, TAR_GZIP, trusted-firmware-a-mt7981-ram-ddr3.
+	#
+	# The authoritative answer to "what is in the image" is the .manifest, which
+	# collect_artifacts() copies next to this file.  Say so in the file itself.
+	{
+		printf '# .config symbols set to =y for this build.\n'
+		printf '# NOT the package list of the image: ABI-versioned libraries show their\n'
+		printf '# symbol alias here (libubox, libgcc1 -> libgcc) and some entries are\n'
+		printf '# build-time knobs rather than packages (MAC80211_DEBUGFS, TAR_GZIP,\n'
+		printf '# trusted-firmware-a-*).  For the installed set see the .manifest.\n'
+		grep '^CONFIG_PACKAGE_.*=y$' "$SRC/.config" \
+			| sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
+	} > "$out"
+
+	n="$(grep -vc '^#' "$out")"
+	log "Wrote ${out} (${n} enabled .config symbols)"
+}
+
+# ---------------------------------------------------------------- build ------
+prefetch_and_toolchain() {
+	cd "$SRC"
+
+	if is_true "$SKIP_DOWNLOAD"; then
+		log "Skipping source download (--skip-download)"
+	else
+		log "Prefetching sources (make download)"
+		run_with_timeout "$DOWNLOAD_TIMEOUT" make download -j"${THREADS}" \
+			|| warn "make download reported failures; the compile step will retry them"
+	fi
+
+	if is_true "$SKIP_TOOLCHAIN"; then
+		log "Skipping explicit toolchain prebuild (--skip-toolchain)"
+		return 0
+	fi
+
+	log "Building toolchain (this is the long part)"
+	run_with_timeout "$TOOLCHAIN_TIMEOUT" make toolchain/install -j"${THREADS}" \
+		|| die "Toolchain build failed"
+}
+
+compile_firmware() {
+	cd "$SRC"
+
+	log "Compiling firmware with ${THREADS} jobs — this takes a while"
+
+	local start make_pid heartbeat_pid
+	start="$(date +%s)"
+
+	make -j"${THREADS}" &
+	make_pid=$!
+
+	# Heartbeat so CI logs show progress instead of going quiet for hours.
+	(
+		while kill -0 "$make_pid" 2>/dev/null; do
+			sleep "$HEARTBEAT_INTERVAL"
+			kill -0 "$make_pid" 2>/dev/null || break
+			log "still compiling... $(( ($(date +%s) - start) / 60 )) min elapsed"
+		done
+	) &
+	heartbeat_pid=$!
+
+	if ! wait "$make_pid"; then
+		kill "$heartbeat_pid" 2>/dev/null || true
+		die "Firmware compilation failed"
+	fi
+
+	kill "$heartbeat_pid" 2>/dev/null || true
+	wait "$heartbeat_pid" 2>/dev/null || true
+
+	log "Compilation finished in $(( ($(date +%s) - start) / 60 )) min"
+}
+
+collect_artifacts() {
+	local bin_dir="${SRC}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}"
+	local dest="${ART}"
+
+	[ -d "$bin_dir" ] || die "No build output at ${bin_dir}"
+
+	mkdir -p "$dest"
+
+	log "Collecting artifacts from ${bin_dir}"
+	# Images + the metadata needed to install a matching plugin later: the
+	# kernel ABI is what ties luci-app-h5000m-* packages to this firmware.
+	# The rootfs tarballs are included because this config builds them
+	# (CONFIG_TARGET_ROOTFS_TARGZ) and they are the artifact used for a
+	# container/chroot or a manual sysupgrade.
+	find "$bin_dir" -maxdepth 1 -type f \
+		\( -name '*.bin' -o -name '*.itb' -o -name '*.tar.gz' -o -name '*.img.gz' \
+		   -o -name '*.manifest' -o -name 'profiles.json' -o -name 'sha256sums' \
+		   -o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \) \
+		-exec cp -f {} "$dest/" \;
+
+	if [ -d "${bin_dir}/packages" ]; then
+		mkdir -p "${dest}/packages"
+		find "${bin_dir}/packages" -maxdepth 1 -type f -name '*.apk' -exec cp -f {} "${dest}/packages/" \;
+	fi
+
+	# Architecture-level feed packages, kept in OpenWrt's own layout
+	# (<arch>/<feed>/ each with packages.adb + index.json) so this is a directly
+	# usable apk repository.  These were built in this very run and therefore
+	# match this firmware's kernel ABI — which is the whole point: the official
+	# snapshot repo carries a different vermagic, so a package taken from there
+	# would refuse to install.
+	local pkg_dir="${SRC}/bin/packages/${TARGET_ARCH}"
+	if [ -d "$pkg_dir" ]; then
+		mkdir -p "${dest}/apk-repo"
+		cp -a "$pkg_dir" "${dest}/apk-repo/" 2>/dev/null || true
+		log "Collected a matching apk repository ($(find "${dest}/apk-repo" -name '*.apk' | wc -l) packages)"
+	fi
+
+	write_build_info "$dest"
+
+	log "Artifacts:"
+	ls -la "$dest"
+}
+
+write_build_info() {
+	local dest="$1" rev desc ver code kver abi
+	local profiles="${dest}/profiles.json"
+
+	rev="$(cat "${ROOT_DIR}/.upstream-revision" 2>/dev/null || echo unknown)"
+	desc="$(cat "${ROOT_DIR}/.upstream-describe" 2>/dev/null || echo unknown)"
+
+	# The authoritative version/kernel data is the target's profiles.json, which
+	# the build writes into bin/targets/<target>/<subtarget>/ and collect_artifacts
+	# has already copied here.  version.buildinfo is NOT a key=value file — it is
+	# the bare output of scripts/getver.sh — so parsing it for kernel_version
+	# silently produced "unknown".
+	#
+	# linux_kernel.vermagic is the kernel ABI hash: it is what a separately built
+	# plugin .apk must match to be installable on this image.
+	if [ -f "$profiles" ] && command -v python3 >/dev/null 2>&1; then
+		eval "$(python3 - "$profiles" <<'PY'
+import json, shlex, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+k = d.get("linux_kernel") or {}
+for name, val in (
+    ("code", d.get("version_code")),
+    ("ver", d.get("version_number")),
+    ("kver", k.get("version")),
+    ("abi", k.get("vermagic")),
+):
+    if val:
+        print(f"{name}={shlex.quote(str(val))}")
+PY
+)"
+	fi
+
+	# A shallow clone carries no tags, so scripts/getver.sh can only produce
+	# `r0-<sha>`: the revision counter is derived from the nearest base tag plus
+	# the commit count, and --depth 1 has neither.  When we built exactly the
+	# revision this project pins, record the published snapshot id instead of a
+	# misleading r0.  Any other revision keeps the tree-derived value, because
+	# inventing a snapshot number we did not verify would be worse.
+	if [ -n "${OPENWRT_PINNED_SNAPSHOT:-}" ] && [ -n "${OPENWRT_PINNED_REVISION:-}" ] \
+		&& [ "$rev" = "$OPENWRT_PINNED_REVISION" ]; then
+		code="$OPENWRT_PINNED_SNAPSHOT"
+	fi
+
+	cat > "${dest}/BUILD-INFO.txt" <<EOF
+project=AutoBuild-H5000M-Openwrt
+upstream_url=${REPO_URL}
+upstream_branch=${REPO_BRANCH}
+upstream_track=${OPENWRT_TRACK}
+openwrt_revision=${rev}
+openwrt_version_code=${code:-unknown}
+openwrt_version_number=${ver:-unknown}
+openwrt_describe=${desc}
+kernel_version=${kver:-unknown}
+kernel_abi=${abi:-unknown}
+target=${TARGET_BOARD}/${TARGET_SUBTARGET}
+profile=${TARGET_PROFILE}
+arch=${TARGET_ARCH}
+built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+enable_fancontrol=${ENABLE_FANCONTROL}
+enable_netmode=${ENABLE_NETMODE}
+enable_wwand=${ENABLE_WWAND}
+enable_mt5700m=${ENABLE_MT5700M}
+enable_upnp=${ENABLE_UPNP}
+enable_adblock=${ENABLE_ADBLOCK}
+enable_dockerman=${ENABLE_DOCKERMAN}
+EOF
+
+	log "Wrote ${dest}/BUILD-INFO.txt (kernel ${kver:-?}, abi ${abi:-?})"
+}
+
+# ----------------------------------------------------------------- main ------
+main() {
+	cd "$ROOT_DIR"
+	: > "$LOG_FILE"
+
+	is_true "$INSTALL_DEPS" && install_deps
+	check_environment
+	resolve_modem_stack
+	show_features
+
+	prepare_source
+	prepare_feeds
+	apply_patches
+	install_local_packages
+	install_board_plugins
+	install_theme
+	install_external_packages
+	configure_build
+	verify_config
+	dump_enabled_packages
+
+	if is_true "$PREPARE_ONLY"; then
+		log "Prepare-only requested; stopping before download/build"
+		exit 0
+	fi
+	if is_true "$CONFIG_ONLY"; then
+		log "Config-only requested; stopping before download/build"
+		exit 0
+	fi
+
+	prefetch_and_toolchain
+	compile_firmware
+	collect_artifacts
+
+	log "Done."
+}
+
+main "$@"

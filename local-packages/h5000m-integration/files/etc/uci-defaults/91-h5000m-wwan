@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# First-boot provisioning of the H5000M WWAN interface (see
+# /usr/sbin/h5000m-wwan-provision).  Exits 0 so uci-defaults discards it after
+# the first run; the USB hotplug hook covers the case where the MT5700M
+# enumerates later than first boot.
+
+[ -x /usr/sbin/h5000m-wwan-provision ] || exit 0
+
+/usr/sbin/h5000m-wwan-provision
+
+exit 0

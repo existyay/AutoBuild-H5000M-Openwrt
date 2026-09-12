@@ -1,0 +1,355 @@
+name: Build H5000M mainline OpenWrt
+
+# Mainline OpenWrt (openwrt/openwrt main) for the Hiveton H5000M.
+# Weekly scheduled build + manual dispatch + tag releases.
+on:
+  schedule:
+    - cron: '0 4 * * 1'   # Mondays 04:00 UTC (Beijing 12:00)
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Create/update a GitHub Release with the images'
+        type: boolean
+        default: false
+      pinned:
+        description: 'Build the pinned upstream revision instead of the branch head'
+        type: boolean
+        default: false
+      runner_type:
+        description: 'Runner to use'
+        type: choice
+        options: [github-hosted, self-hosted]
+        default: github-hosted
+      run_config_coverage:
+        description: 'Also run the configuration coverage profiles'
+        type: boolean
+        default: true
+      coverage_profile_set:
+        description: 'Coverage profile set'
+        type: choice
+        options: [quick, full]
+        default: quick
+      enable_wwand:
+        description: 'WWAN dialer: ddimension/wwand'
+        type: boolean
+        default: true
+      enable_mt5700m:
+        description: 'WWAN dialer: luci-app-mt5700m (disables wwand)'
+        type: boolean
+        default: false
+      enable_fancontrol:
+        description: 'luci-app-h5000m-fancontrol'
+        type: boolean
+        default: true
+      enable_netmode:
+        description: 'luci-app-h5000m-netmode'
+        type: boolean
+        default: true
+      enable_upnp:
+        description: 'UPnP IGD'
+        type: boolean
+        default: true
+      enable_theme_argon:
+        description: 'Argon LuCI theme (cloned from jerrykuku; not in any feed)'
+        type: boolean
+        default: true
+      enable_adblock:
+        description: 'Adblock'
+        type: boolean
+        default: true
+      enable_repo_packages:
+        description: 'Build the service packages (Docker, proxy stack, AdGuardHome) into the apk repo without installing them'
+        type: boolean
+        default: true
+      enable_dockerman:
+        description: 'DockerMan + dockerd'
+        type: boolean
+        default: false
+      enable_nikki:
+        description: 'Nikki / mihomo-meta'
+        type: boolean
+        default: false
+      enable_openclash:
+        description: 'OpenClash'
+        type: boolean
+        default: false
+      enable_mosdns:
+        description: 'MosDNS'
+        type: boolean
+        default: false
+      enable_homeproxy:
+        description: 'HomeProxy'
+        type: boolean
+        default: false
+      enable_adguardhome:
+        description: 'AdGuardHome'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'openwrt-*'
+      - 'v*'
+
+permissions:
+  contents: write
+
+# Action majors are pinned deliberately: checkout v7 / upload-artifact v7 /
+# cache v6 are the first majors whose action.yml declares `using: node24`.  The
+# previous v4 majors declared node20, which GitHub has deprecated, and the tree
+# used to paper over that with `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` — a
+# transition-era escape hatch that runs a node20 action on a runtime it was
+# never tested against.  Bumping the majors is the actual fix; do not
+# reintroduce the env var, and do not downgrade below these majors.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cheap gate: does this host have what the configuration stage needs, and is
+  # the repository internally consistent?
+  # ---------------------------------------------------------------------------
+  check:
+    name: Repository and host checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install configuration-stage dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gawk unzip wget curl rsync zstd git patch python3
+
+      - name: Check build host
+        run: ./scripts/check-deps.sh
+
+      - name: Shell syntax check
+        run: |
+          for f in scripts/*.sh; do
+            bash -n "$f" || exit 1
+          done
+          echo "all scripts parse"
+
+      - name: ShellCheck (errors only)
+        run: |
+          # -S error: fail on real bugs (unbound variables, bad expansions) but
+          # not on style.  This is the class of bug that `local a="$1" b="${a}"`
+          # is: every argument is expanded before any of them is assigned.
+          shellcheck -S error scripts/*.sh
+
+      - name: Verify target support upstream
+        run: |
+          set -euo pipefail
+          # The whole project rests on openwrt/openwrt carrying this device.
+          # Fail loudly here rather than 40 minutes into a build.
+          . configs/upstream.env
+          url="https://raw.githubusercontent.com/openwrt/openwrt/${OPENWRT_REPO_BRANCH}/target/linux/mediatek/image/filogic.mk"
+          curl -fsSL "$url" | grep -q "Device/${OPENWRT_PROFILE}" \
+            || { echo "::error::${OPENWRT_PROFILE} is not defined in ${url}"; exit 1; }
+          echo "found Device/${OPENWRT_PROFILE} on ${OPENWRT_REPO_BRANCH}"
+
+      - name: Verify tree patches still apply upstream
+        run: |
+          set -euo pipefail
+          . configs/upstream.env
+          git clone --depth 1 --branch "${OPENWRT_REPO_BRANCH}" \
+            "${OPENWRT_REPO_URL}" /tmp/upstream-check
+          status=0
+          for p in patches/*.patch; do
+            echo "--- $p"
+            if git -C /tmp/upstream-check apply --check "$p"; then
+              echo "    applies"
+            elif git -C /tmp/upstream-check apply --reverse --check "$p"; then
+              echo "    already applied upstream"
+            else
+              echo "::error::patch $(basename "$p") no longer applies to ${OPENWRT_REPO_BRANCH}"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Verify the board plugin repositories still exist
+        run: |
+          set -euo pipefail
+          # These three are cloned straight from their upstreams into package/ at
+          # build time, so a rename, a force-push to a different default branch,
+          # or a deletion would only surface deep inside a build.  Check here.
+          fail=0
+          for repo in \
+            FAN789/luci-app-h5000m-fancontrol \
+            FAN789/luci-app-h5000m-netmode \
+            FAN789/luci-app-mt5700m \
+            ddimension/openwrt-repo
+          do
+            code="$(curl -s -o /dev/null -w '%{http_code}' \
+              -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${repo}")"
+            if [ "$code" = "200" ]; then
+              echo "ok   ${repo}"
+            else
+              echo "::error::${repo} is not reachable (HTTP ${code})"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # ---------------------------------------------------------------------------
+  # Configuration coverage: every ENABLE_* profile must still produce a valid
+  # .config.  Independent of the firmware build, so a config regression does not
+  # stop a release.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Configuration coverage
+    needs: check
+    if: github.event_name != 'workflow_dispatch' || inputs.run_config_coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache gawk unzip wget curl rsync zstd git patch python3 \
+            libncurses-dev libssl-dev zlib1g-dev
+
+      - name: Run configuration coverage
+        env:
+          PROFILE_SET: ${{ github.event_name == 'workflow_dispatch' && inputs.coverage_profile_set || 'quick' }}
+        run: ./scripts/coverage-test.sh "${PROFILE_SET}"
+
+      - name: Upload coverage logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-logs
+          path: |
+            coverage-*.log
+            artifacts-coverage/enabled-packages.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # The firmware build.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build firmware
+    needs: check
+    # A self-hosted runner must carry the labels linux, x64 and h5000m.
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && fromJSON('["self-hosted","linux","x64","h5000m"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Install build dependencies
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
+        run: ./scripts/local-build.sh --install-deps
+
+      - name: Restore download cache
+        uses: actions/cache@v6
+        with:
+          path: openwrt/dl
+          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: h5000m-dl-
+
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.ccache
+            openwrt/.ccache
+          key: h5000m-ccache-${{ github.run_id }}
+          restore-keys: h5000m-ccache-
+
+      - name: Build
+        env:
+          THREADS: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && '8' || '4' }}
+          # `format('{0}', <bool>)` renders "true"/"false".  Without it the usual
+          # `cond && input || default` fallback would rewrite a boolean input of
+          # false back into the default, because a non-empty string is truthy in
+          # GitHub's expression language — i.e. a switch that silently cannot be
+          # turned off.
+          ENABLE_FANCONTROL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_fancontrol) || 'true' }}
+          ENABLE_NETMODE: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_netmode) || 'true' }}
+          ENABLE_WWAND: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_wwand) || 'true' }}
+          ENABLE_MT5700M: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_mt5700m) || 'false' }}
+          ENABLE_UPNP: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_upnp) || 'true' }}
+          ENABLE_THEME_ARGON: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_theme_argon) || 'true' }}
+          ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'true' }}
+          ENABLE_REPO_PACKAGES: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_repo_packages) || 'true' }}
+          ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
+          ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
+          ENABLE_OPENCLASH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_openclash) || 'false' }}
+          ENABLE_MOSDNS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_mosdns) || 'false' }}
+          ENABLE_HOMEPROXY: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_homeproxy) || 'false' }}
+          ENABLE_ADGUARDHOME: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adguardhome) || 'false' }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.pinned }}" = "true" ]; then
+            args+=(--pinned)
+          fi
+          ./scripts/local-build.sh "${args[@]}"
+
+      - name: Collect build info
+        if: always()
+        run: |
+          echo "=== BUILD-INFO.txt ==="
+          cat artifacts/BUILD-INFO.txt 2>/dev/null || echo "(not produced)"
+          echo
+          echo "=== images ==="
+          ls -la artifacts/ 2>/dev/null || true
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: H5000M-mainline-openwrt
+          path: |
+            artifacts/
+            build.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish release
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            rel_name="${GITHUB_REF_NAME}"
+          else
+            rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
+            rel_name="openwrt-${rev}"
+          fi
+
+          files=()
+          while IFS= read -r -d '' f; do files+=("$f"); done \
+            < <(find . -maxdepth 1 -type f \( -name '*sysupgrade.bin' -o -name 'BUILD-INFO.txt' -o -name 'profiles.json' -o -name '*.manifest' \) -print0)
+
+          notes="Mainline OpenWrt (openwrt/openwrt main) for the Hiveton H5000M.
+          Built $(date -u +%Y-%m-%d) from upstream revision $(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt).
+
+          Includes luci-app-h5000m-fancontrol, luci-app-h5000m-netmode and the ddimension/wwand dialer.
+          Flash only the *squashfs-sysupgrade.bin image. See BUILD-INFO.txt for the kernel ABI."
+
+          if gh release view "${rel_name}" >/dev/null 2>&1; then
+            gh release upload "${rel_name}" "${files[@]}" --clobber
+          else
+            gh release create "${rel_name}" "${files[@]}" \
+              --title "H5000M mainline OpenWrt ${rel_name}" \
+              --notes "${notes}"
+          fi

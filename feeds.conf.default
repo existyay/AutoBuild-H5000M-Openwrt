@@ -1,0 +1,27 @@
+# AutoBuild-H5000M-Openwrt feed configuration - mainline OpenWrt.
+# NOTE FOR EDITORS: scripts/feeds strips comments with s/#.+$// and then skips
+# blank lines. A lone "#" with nothing after it is therefore NOT a comment to
+# that parser and dies with "Syntax error in feeds.conf.default". Every comment
+# line here must have text after the hash.
+# Upstream source is openwrt/openwrt (branch main, i.e. SNAPSHOT). The official
+# OpenWrt feed repositories publish their development branch as master, which
+# is what openwrt/openwrt's own feeds.conf.default references - keep that so
+# the feeds stay in lockstep with the tree we build.
+# Since OpenWrt 25.12 the package manager is apk, not opkg; CONFIG_PACKAGE_*
+# symbols are unchanged and nothing here is ImmortalWrt-specific.
+
+src-git packages https://github.com/openwrt/packages.git;master
+src-git luci https://github.com/openwrt/luci.git;master
+src-git routing https://github.com/openwrt/routing.git;master
+src-git telephony https://github.com/openwrt/telephony.git;master
+src-git video https://github.com/openwrt/video.git;master
+
+# wwand - the H5000M WWAN dialer (ddimension).
+# The H5000M's built-in module is a TD Tech MT5700M (USB 3466:3301) that
+# enumerates as a cdc_ncm device with AT side channels; wwand drives it through
+# its NCM backend natively (no comgt-ncm, no ModemManager, no uqmi). The same
+# package set covers QMI / MBIM / PCIe-MHI modules in the USB and M.2 slots,
+# which is why every backend is enabled by default.
+# Provides: wwand, wwand-qmi, wwand-mbim, wwand-ncm, wwand-mhi, wwand-esim,
+# luci-app-wwand, luci-proto-wwand.
+src-git wwand https://github.com/ddimension/openwrt-repo.git;main

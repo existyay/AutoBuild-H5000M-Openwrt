@@ -1,0 +1,24 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Re-run the WWAN provisioner when the MT5700M appears after first boot.
+#
+# The provisioner is idempotent and a no-op once network.MT5700M exists, so the
+# only cost of firing on every matching add is a uci lookup.  Without this hook
+# a box flashed with the module still powered down would keep wwand's default
+# `wwan0` interface name and luci-app-h5000m-netmode would never see it.
+
+[ "$ACTION" = "add" ] || exit 0
+[ "$DEVTYPE" = "usb_device" ] || exit 0
+[ "$ID_VENDOR_ID" = "3466" ] || exit 0
+[ "$ID_MODEL_ID" = "3301" ] || exit 0
+[ -x /usr/sbin/h5000m-wwan-provision ] || exit 0
+
+# netifd may still be enumerating the netdev; one short retry is enough and
+# keeps the hotplug path asynchronous.
+(
+	sleep 2
+	/usr/sbin/h5000m-wwan-provision
+) >/dev/null 2>&1 &
+
+exit 0

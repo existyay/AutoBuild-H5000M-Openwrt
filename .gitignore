@@ -1,0 +1,76 @@
+# AutoBuild-H5000M-Openwrt — repository hygiene.
+#
+# What this repo tracks is deliberately narrow: the scripts, config seeds,
+# patches and CI that BUILD the firmware.  Nothing that a build produces or
+# downloads belongs here, because the GitHub Action re-creates all of it from
+# scratch and a committed copy would silently shadow the real thing.
+#
+# Tracked: README.md, LICENSE, .gitignore, .gitattributes, feeds.conf.default,
+# .github/workflows/build.yml, configs/*, patches/*, mt76-patches/*,
+# local-packages/*, scripts/*.sh  — 18 files.
+
+# ---------------------------------------------------------------------------
+# The OpenWrt source tree. ~16 GB after a build, cloned at run time by
+# scripts/local-build.sh into openwrt/ (or into $SOURCE_DIR).  Never commit it.
+# ---------------------------------------------------------------------------
+openwrt/
+openwrt-*/
+SOURCE_DIR/
+
+# ---------------------------------------------------------------------------
+# Feed checkouts.  Installed by `scripts/feeds install` inside the source tree
+# above; listed separately so an out-of-tree feeds/ checkout is covered too.
+# ---------------------------------------------------------------------------
+feeds/
+
+# ---------------------------------------------------------------------------
+# Build output.  artifacts/ is what scripts/local-build.sh publishes (firmware,
+# manifest, apk repository, BUILD-INFO.txt); artifacts-coverage/ is what
+# coverage-test.sh writes.  Both are reproducible from tracked sources.
+# ---------------------------------------------------------------------------
+artifacts/
+artifacts-*/
+source.tar.gz
+
+# ---------------------------------------------------------------------------
+# Packages cloned at build time: the three FAN789 board plugins, the Argon
+# theme, the optional proxy stack and ddimension/wwand.  They are fetched into
+# package/ (or $SOURCE_DIR/package/) on every run, so they must not be tracked —
+# a stale committed copy would hide a clone failure instead of surfacing it.
+# local-packages/ is NOT matched by this: that one is ours and IS tracked.
+# ---------------------------------------------------------------------------
+package/
+
+# ---------------------------------------------------------------------------
+# Upstream pin bookkeeping, written by prepare_source.  Derived, not source.
+# ---------------------------------------------------------------------------
+.upstream-revision
+.upstream-describe
+
+# ---------------------------------------------------------------------------
+# Logs and scratch.  Per-profile coverage logs land in the repo root.
+# ---------------------------------------------------------------------------
+*.log
+build.log
+coverage-*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# ---------------------------------------------------------------------------
+# Migration-time reference checkouts (see README 九、迁移参考).  ~23 MB of
+# other people's trees, kept locally for comparison only.
+# ---------------------------------------------------------------------------
+refs/
+
+# ---------------------------------------------------------------------------
+# Editor / OS / agent metadata.
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.claude/
+.agents/
+.vscode/
+.idea/
+skills-lock.json

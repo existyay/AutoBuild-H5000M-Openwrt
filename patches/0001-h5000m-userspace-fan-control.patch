@@ -1,0 +1,30 @@
+From: FAN789 <https://github.com/FAN789/luci-app-h5000m-fancontrol>
+Subject: [PATCH] mediatek: hiveton_h5000m: hand PWM fan policy to userspace
+
+Imported verbatim from luci-app-h5000m-fancontrol 2.1.0
+(openwrt-patches/h5000m-userspace-fan-control.patch).
+
+The H5000M device tree inherits four cooling maps from mt7987.dtsi.  Three of
+them drive the same PWM channel that luci-app-h5000m-fancontrol owns, so the
+kernel thermal governor and the userspace controller fight over pwm1.  Drop the
+three PWM-owning maps and keep cpu-active-hot, so CPU throttling, the hot trip
+and the critical shutdown trip stay in the kernel exactly as before.
+
+diff --git a/target/linux/mediatek/dts/mt7987a-hiveton-h5000m.dts b/target/linux/mediatek/dts/mt7987a-hiveton-h5000m.dts
+--- a/target/linux/mediatek/dts/mt7987a-hiveton-h5000m.dts
++++ b/target/linux/mediatek/dts/mt7987a-hiveton-h5000m.dts
+@@ -100,3 +100,14 @@
+ };
+ 
++/*
++ * Fan policy is managed by luci-app-h5000m-fancontrol. Keep the CPU cooling,
++ * hot and critical trips intact, but prevent the thermal governor from racing
++ * userspace for the same PWM output.
++ */
++&{/thermal-zones/cpu-thermal/cooling-maps} {
++	/delete-node/ cpu-active-high;
++	/delete-node/ cpu-active-low;
++	/delete-node/ cpu-passive;
++};
++
+ &gmac0 {
