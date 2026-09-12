@@ -927,6 +927,36 @@ EOF
 	emit_service "$ENABLE_ADGUARDHOME" \
 		adguardhome luci-app-adguardhome luci-i18n-adguardhome-zh-cn
 
+	# ------------------------------------------- proxy ecosystem kmod support ---
+	# PassWall, PassWall2, SSR-Plus, HomeProxy, OpenClash, Nikki, Momo, FullCombo
+	# Shark!, luci-xray, NeKoBox, Daed, HiJpass and v2rayA all redirect traffic
+	# through the same handful of kernel facilities: nftables tproxy/socket, the
+	# legacy iptables equivalents, tun/inet-diag for the userspace tunnels, and
+	# the NAT helper and traffic-control modules for the rest.  A user who
+	# `apk add`s one of them gets these pulled from the repository, so they have
+	# to be IN the repository — which is what `=m` produces.
+	#
+	# ONLY modules that are not already built are listed here.  Writing `=m` for
+	# a module that something else already pulls in as `=y` is not a no-op: it
+	# can demote an installed module to repository-only and remove it from the
+	# image, which would break the firewall.  Everything the base system already
+	# needs (kmod-nft-*, kmod-nf-conntrack, kmod-nf-nat, kmod-ipt-*, ...) is
+	# therefore deliberately absent from this list — it is already present in
+	# the image, which is even better than being installable.
+	# `kmod-xdp-sockets-diag` is deliberately NOT here even though the wider
+	# module list suggests it: it depends on KERNEL_XDP_SOCKETS, which this
+	# kernel does not set, so the symbol is dropped by defconfig regardless.
+	# Nothing in the proxy stack needs it — it is the `ss` tool's optional XDP
+	# view — and turning the kernel option on to satisfy it would change the
+	# kernel ABI and force a full rebuild for no benefit.
+	emit_service "" \
+		kmod-netlink-diag \
+		kmod-nf-nathelper \
+		kmod-macvlan \
+		kmod-sched-core \
+		kmod-ifb \
+		kmod-tcp-bbr
+
 	return 0
 }
 

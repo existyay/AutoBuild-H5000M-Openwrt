@@ -671,6 +671,60 @@ CI 会自动按运行它的仓库推导地址，并有独立 job 把仓库发布
 | `H5000M_WIFI_SSID` / `_KEY` / `_COUNTRY` | `H5000M` / `77778888` / `CN` | 首启无线默认值 |
 | `H5000M_FLOW_OFFLOAD` / `_HW` | `1` / `1` | 软件 / PPE 硬件卸载 |
 
+### 8. 调制解调器重复 —— 已修复（只剩一个 wwand）
+
+镜像里只有**一个拨号器**（`wwand` + 它的 3 个后端），没有 `luci-app-mt5700m`、
+`comgt`、`ModemManager`、`uqmi`/`umbim`。但存在一条真实的重复路径：
+
+`wwand` 的**零配置 autosetup** 在"完全没有 wwand 配置"时会自建
+`config wwand_modem 'wwmodem_auto'` + `config interface 'wwan0'`
+（`docs/reference.md`：*"Autosetup never runs when any wwand config exists"*）。
+而本工程的 provisioner 建的是 `network.m0` + `network.MT5700M`，**原来的守卫只查
+`MT5700M`，检测不到 autosetup 建的那一套**。
+
+启动顺序让这个竞态真实存在：`S10boot`（跑 uci-defaults，provisioner 首次执行）→
+`S19wwand`。如果首次执行时 MT5700M 还没枚举完，provisioner 会提前退出；
+随后 wwand autosetup 建好配置；等 USB 热插拔再次调用 provisioner 时，它会在
+autosetup 的配置**之上**再加一套 —— 一个模组两个拨号接口。
+
+修复两处：
+
+* 守卫改为"**只要存在任何 wwand 配置就不动手**"，匹配 `wwand_modem` 段或任何
+  `proto 'wwand'` 接口，因此 autosetup 的命名也能识别
+* 成功建立自己的配置**之后**，写
+  `config wwand_globals 'globals'` + `option autosetup '0'`，让 wwand 不会再补第二套
+
+"之后才关"是刻意的：如果 provisioner 因为换了 USB ID 不同的模组而无法配置，
+autosetup 仍是开启的，机器能自己起来。
+
+### 9. 代理软件的 kmod 依赖 —— 已补齐
+
+代理插件（PassWall / PassWall2 / SSR-Plus / HomeProxy / OpenClash / Nikki / Momo /
+FullCombo Shark! / luci-xray / NeKoBox / Daed / HiJpass / v2rayA）重定向流量依赖的是
+同一批内核设施：nftables 的 tproxy/socket、对应的 iptables 老接口、用户态隧道用的
+tun 与 inet-diag，以及 NAT helper 与流量控制模块。
+
+盘点后发现**基础集已经齐备**（`kmod-nft-tproxy`、`kmod-nft-socket`、`kmod-nft-nat`、
+`kmod-nf-tproxy`、`kmod-nf-socket`、`kmod-nf-nat`、`kmod-nf-conntrack`、`kmod-tun`、
+`kmod-inet-diag`、`kmod-nf-nathelper-extra`、`kmod-veth`、`kmod-dummy`、
+`kmod-br-netfilter` 等），缺的是这 6 个，已补为 `=m` 进入仓库：
+
+```
+kmod-netlink-diag  kmod-nf-nathelper  kmod-macvlan
+kmod-sched-core    kmod-ifb           kmod-tcp-bbr
+```
+
+> **只补"完全没构建"的模块，这是有意的。** 对已经是 `=y` 的模块写 `=m` 不是空操作：
+> 它可能把已安装的模块降级成"仅仓库"，从而**从镜像里移除**，把防火墙弄坏。所以
+> 基础系统已经需要的那批（`kmod-nft-*`、`kmod-nf-conntrack`、`kmod-nf-nat`、
+> `kmod-ipt-*` …）**刻意不列入** —— 它们本来就在镜像里，比"可安装"更好。
+>
+> `kmod-xdp-sockets-diag` **刻意不加**：它依赖 `KERNEL_XDP_SOCKETS`，而本内核没有开启
+> 该选项，符号会被 defconfig 丢掉；代理栈里没有任何东西需要它（那是 `ss` 工具的可选
+> 视图），为它打开内核选项会变更 ABI、触发全量重编却不带来收益。
+
+`kmod-tcp-bbr` 顺带把 BBR 拥塞控制也带进了仓库——这在主线上是**真实可用**的加速手段
+之一（见 [七.6](#6-硬件加速不能用--根因是控制面不同已启用主线那条)）。
 
 ## 八、已知限制
 
