@@ -92,8 +92,30 @@ provision() {
 	# /etc/config/network must be writable and netifd's config present.
 	[ -f /etc/config/network ] || return 0
 
+	# Exactly one wwand configuration may exist.  Two guards, because two
+	# different things can create one:
+	#
+	#   1. Our own named interface (this script on an earlier boot, or the user).
+	#   2. wwand's zero-config autosetup, which — quoting docs/reference.md —
+	#      "never runs when any wwand config exists" and otherwise creates
+	#      `config wwand_modem 'wwmodem_auto'` plus `config interface 'wwan0'`.
+	#
+	# Checking only (1) is not enough.  The boot order is S10boot (uci-defaults,
+	# where we first run) then S19wwand, so if the MT5700M has not enumerated by
+	# the time we first run we bail out — and the USB hotplug that calls us again
+	# arrives after wwand has already autosetup'd.  Adding MT5700M then puts a
+	# second modem section and a second interface on one modem, which is exactly
+	# the duplicate this guard exists to prevent.
 	if uci -q get "network.$IFACE4" >/dev/null 2>&1; then
 		log "$IFACE4 already configured; leaving it untouched"
+		return 0
+	fi
+
+	local existing
+	existing="$(uci -q show network 2>/dev/null | grep -E "=wwand_modem$|\.proto='wwand'$" || true)"
+	if [ -n "$existing" ]; then
+		log "wwand is already configured by autosetup or the user; not adding a second modem config:"
+		printf '%s\n' "$existing" | while IFS= read -r line; do log "  $line"; done
 		return 0
 	fi
 
@@ -115,7 +137,6 @@ provision() {
 		set network.$MODEM_SECTION=wwand_modem
 		set network.$MODEM_SECTION.device='$netdev'
 		set network.$MODEM_SECTION.path='$slot'
-
 		set network.$IFACE4=interface
 		set network.$IFACE4.proto='wwand'
 		set network.$IFACE4.modem='$MODEM_SECTION'
@@ -128,6 +149,21 @@ provision() {
 
 		commit network
 	EOF
+
+	# Turn off wwand's zero-config autosetup now that we own the configuration.
+	# Set only AFTER our own sections are committed, so the two can never both
+	# apply: if this script is ever unable to provision (module swapped for one
+	# with different USB IDs, say) autosetup is still enabled and the box comes
+	# up by itself.  See the guard above for the full reasoning.
+	#
+	# `config wwand_globals 'globals'` is the documented section; `autosetup`
+	# defaults to on, so this is the opt-out.
+	uci -q batch <<-EOF
+		set network.wglobals=wwand_globals
+		set network.wglobals.autosetup='0'
+		commit network
+	EOF
+	log "autosetup disabled: $IFACE4 is now the only wwand configuration"
 
 	add_to_wan_zone "$IFACE4"
 	uci -q commit firewall 2>/dev/null || true

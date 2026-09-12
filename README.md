@@ -575,6 +575,102 @@ wwand 自己的文档 `docs/reference.md`（"RNDIS IPv6 — the dhcpv6 subinterf
 修复：删掉整个 `MT5700Mv6`，只保留单个双栈 wwand 接口，IPv6 交给 `proto wwand` 的 shim。
 `IFACE6` 变量、Makefile 描述和 provisioner 头注释里的相关说法一并清理。
 
+### 5. 烧录重启后无线默认关闭 —— 已修复
+
+OpenWrt 出厂把所有 radio 设为 `disabled`，要登录并选国家才启用。在一台 5G CPE 上，
+这个默认行为会被理解成"无线坏了"。
+
+新增 `/usr/sbin/h5000m-firstboot`，写入两个入口、共用同一份实现：
+
+| 入口 | 时机 |
+| --- | --- |
+| `/etc/uci-defaults/92-h5000m-defaults` | 首次启动 |
+| `/etc/hotplug.d/ieee80211/20-h5000m-defaults` | 无线 PHY 出现时 |
+
+**为什么是两个入口**：`/etc/config/wireless` **不在镜像里**，它由 `/sbin/wifi config`
+生成，而触发它的是镜像自带的 `/etc/hotplug.d/ieee80211/10-wifi-detect`。只写
+uci-defaults 有可能在任何 radio 段存在之前就运行、什么都没配上。把 hotplug 脚本编到
+`20`（在 `10-wifi-detect` 之后）才能保证顺序。
+
+应用一次后用 `/etc/h5000m-defaults-applied` 标记，并由
+`lib/upgrade/keep.d/h5000m-defaults` 让 sysupgrade 保留该标记，所以后续刷机
+**不会重置用户改过的设置**。判断条件也很保守：只要任一 AP 的 SSID 已不是默认值，
+就完全不碰。
+
+默认值（构建时可覆盖，见下表）：
+
+```
+SSID       H5000M
+密码       77778888          ← 请务必改掉
+国家/加密  CN / sae-mixed（WPA2+WPA3 混合）
+htmode     2.4G=EHT40  5G=EHT160
+```
+
+另外**不写** `bss_transition` —— 官方紧凑版 wpad 不认识该 hostapd 选项，会导致
+**整个 AP 配置被拒绝**。
+
+### 6. 硬件加速不能用 —— 根因是控制面不同，已启用主线那条
+
+这里要说清楚一件事：**你要的 TurboACC 面板在主线上一行代码都没有**。
+
+| 检查 | 结果 |
+| --- | --- |
+| 主线是否有 `mtk_hnat` | 否 |
+| 主线是否有 `luci-app-turboacc` / `turboacc-mtk` | 否 |
+| 主线是否有 `shortcut-fe` / `fast-classifier` | 否 |
+
+TurboACC 面板开关的是 `/sys/kernel/debug/hnat/` 下的 **厂商 out-of-tree HNAT 驱动**，
+主线没有这个驱动，所以那个面板即使硬塞进来也是个写不存在 sysfs 的死 UI。
+
+**但同一块硬件在主线上是有的，只是换了个控制面。** 主线把 HNAT 的能力吸收进了
+`mtk_ppe_offload.c`，通过**标准 netfilter flowtable 卸载 API**（`flow_cls_offload`）
+暴露，也就是 fw4 的 `flow_offloading_hw`。MT7987 的接线是完整的：
+
+* `mtk_eth_soc.c` 的 `mt7987_data` 声明 `.offload_version = 2`、`.ppe_num = 2`
+* `mtk_ppe_init()` 对两个 PPE 都被调用（`mtk_eth_soc.c:5816`）
+* `nf_flow_table.ko`、`nf_flow_table_inet.ko`、`nft_flow_offload.ko` 都在镜像里
+* 内核 `CONFIG_NFT_FLOW_OFFLOAD=m`、`CONFIG_NF_FLOW_TABLE=m`
+
+**所以它只是没打开**：fw4 把 `flow_offloading` 与 `flow_offloading_hw` 都默认成 `"0"`，
+而 stock 的 `/etc/config/firewall` 两个都不写。首启脚本现在把两者都设为 `1`，
+并且它们在 LuCI（网络 → 防火墙 → 常规设置）里**依旧可见可改**。
+
+> 也就是说：**同一块 PPE，"硬件加速"在主线上叫 `flow_offloading_hw`，不叫 TurboACC。**
+
+### 7. 代理软件包的源与 kmod 依赖 —— 已修复
+
+两个独立问题：
+
+**(a) 固件里没有任何指向本工程的源。** `distfeeds.list` 全部指向
+`downloads.openwrt.org`，而**官方 kmod 与本镜像的 vermagic 不同**，从那里装任何带 kmod
+依赖的包都会被拒；同时没有任何一条指向我们自己产出的仓库。
+
+现在 `collect_artifacts` 会装配一个**扁平单索引仓库**，同时收录两处产物：
+
+```
+bin/packages/<arch>/<feed>/            架构级包
+bin/targets/<board>/<subtarget>/packages/   全部 kmod   ← 别的仓库给不了
+```
+
+做成扁平而非 OpenWrt 的 `<arch>/<feed>/` 树，是因为固件必须在**任何东西被编译之前**
+（`install_local_packages` 阶段）就知道源地址，那时无法判断哪些 feed 目录最终非空。
+单索引只需要一条 URL，从根上消掉了这个顺序问题和空 feed 问题。
+
+**(b) 代理的 kmod 依赖没有完整进入仓库。** 代理栈的 kmod 依赖——
+`kmod-tun`、`kmod-nft-tproxy`、`kmod-inet-diag`——**已经编译出来了**，但此前它们只是
+散落在 `artifacts/packages/` 里，**没有索引**，所以不是可安装的仓库。现在它们和架构级
+包一起进了同一个带索引的仓库。
+
+固件侧：`H5000M_APK_REPO_URL` 会被烘焙成
+`/etc/apk/repositories.d/50-h5000m.list`（OpenWrt 为此保留的文件，且 sysupgrade 会保留）。
+CI 会自动按运行它的仓库推导地址，并有独立 job 把仓库发布到 Pages。
+
+| 构建变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `H5000M_APK_REPO_URL` | 空 | 仓库基址；**留空则固件不带额外源**（指向不存在的托管会让 `apk update` 报错） |
+| `H5000M_WIFI_SSID` / `_KEY` / `_COUNTRY` | `H5000M` / `77778888` / `CN` | 首启无线默认值 |
+| `H5000M_FLOW_OFFLOAD` / `_HW` | `1` / `1` | 软件 / PPE 硬件卸载 |
+
 
 ## 八、已知限制
 
