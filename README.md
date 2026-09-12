@@ -307,11 +307,11 @@ ENABLE_WWAND=false ENABLE_MT5700M=true ENABLE_NIKKI=true THREADS=8 ./scripts/loc
 | `openwrt-mediatek-filogic-hiveton_h5000m-squashfs-sysupgrade.bin` | **刷机镜像** |
 | `openwrt-mediatek-filogic-hiveton_h5000m-initramfs-kernel.bin` | initramfs 恢复镜像 |
 | `*-targz-rootfs.tar.gz` / `*-rootfs.tar.gz` | rootfs 压缩包（本配置 `CONFIG_TARGET_ROOTFS_TARGZ=y`） |
-| `*.manifest` | 镜像内实际安装的包清单（约 276 个） |
+| `*.manifest` | 镜像内实际安装的包清单（约 274 个） |
 | `BUILD-INFO.txt` | 本次上游 revision、kernel 版本与 **kernel ABI** |
 | `profiles.json` | 上游生成的版本/内核元数据（ABI 的权威来源） |
 | `sha256sums` | 校验和 |
-| `enabled-packages.txt` | 进入最终 `.config` 的符号清单（约 292 个），见下方说明 |
+| `enabled-packages.txt` | 进入最终 `.config` 的符号清单（约 297 个），见下方说明 |
 | `packages/` | 本 target 专有的 `.apk` —— **kmod 都在这里**（含 `kmod-mt7996e`） |
 | `apk-repo/` | **与本镜像 ABI 匹配的 apk 仓库**，保留 OpenWrt 原生 `<arch>/<feed>/` 布局（含 `packages.adb` 与 `index.json`），可直接给 apk 用 |
 
@@ -323,7 +323,7 @@ kmod 会因 ABI 不匹配被拒绝；同一轮构建产出的仓库才是配套�
 
 ### 关于镜像大小
 
-本机实测（含 argon 主题的版本）：sysupgrade **18.3 MB**，而官方 snapshot 同型号是
+本机实测：sysupgrade **18.3 MB**，而官方 snapshot 同型号是
 **11.0 MB** —— 我们比官方**大 66%**，不是小。差别来自本工程在官方最小镜像之上加了
 LuCI 全套、中文语言包、argon 主题、三个
 板级组件、wwand、AdBlock、UPnP 以及一批诊断工具（htop / nano / ttyd / iperf3 / tmux /
@@ -582,12 +582,12 @@ wwand 自己的文档 `docs/reference.md`（"RNDIS IPv6 — the dhcpv6 subinterf
 
   | 项目 | 结果 |
   | --- | --- |
-  | 上游 revision | `f0d3e332e5f839508f77fba8c7420ceeb079ab86`（main head 恰与此相同） |
-  | kernel | `6.18.44`，ABI `48a4502edabd86d1be6154346965da27` |
-  | 刷机镜像 | `…-squashfs-sysupgrade.bin`，18,278,662 字节（约 18 MB，含 argon 主题与 ttyd 修复） |
-  | initramfs | `…-initramfs-kernel.bin`，17,245,356 字节 |
-  | 镜像内包数 | 276（`manifest`） |
-  | 收集的 apk | target 专有 122 个 + 架构级 feed 仓库 155 个 |
+  | 上游 revision | `d0d8c40b678c8326551ad37fc8bbecc53cb33217`（`OPENWRT_TRACK=latest`；`--pinned` 可回到固定的 `f0d3e332e5`） |
+  | kernel | `6.18.44`，ABI `949e3839f10545b1b342c4acf59c6ba6` |
+  | 刷机镜像 | `…-squashfs-sysupgrade.bin`，18,288,902 字节（约 18 MB） |
+  | initramfs | `…-initramfs-kernel.bin`，17,248,520 字节 |
+  | 镜像内包数 | 274（`manifest`；服务类包为 `=m`，不在其中） |
+  | 收集的 apk | target 专有 168 个 + 仓库 221 个（含 16 个服务类包） |
 
   三个 H5000M 组件确实进入了镜像（取自 `manifest`，非推测）：
 
@@ -609,8 +609,15 @@ wwand 自己的文档 `docs/reference.md`（"RNDIS IPv6 — the dhcpv6 subinterf
   | `mt5700m` | `ENABLE_WWAND=false ENABLE_MT5700M=true` | PASS，14 个必需包，`.config` 中**无任何 wwand 包** |
   | `minimal` | 关掉 upnp / adblock / fancontrol / netmode | PASS |
 
-  注：本机构建使用 `OPENWRT_TRACK=latest`，而运行当天 main head 与所固定的 revision 一致，
-  所以这次构建同时也是一次可复现构建。
+  注：本次构建走的是默认的 `OPENWRT_TRACK=latest`，落到当时的 main head
+  `d0d8c40`——**已经不是所固定的 `f0d3e332e5` 了**，上游在此期间前进了。这一点顺带验证了
+  两件事：两个树补丁（风扇策略、mt76 TXWI）在移动后的 head 上**仍然干净适用**，
+  `defconfig` 与全量编译都通过。要构建与文档快照 `r36216-f0d3e332e5` 完全对应的版本，
+  用 `scripts/local-build.sh --pinned`。
+
+  另：`--pinned` 之外的构建会得到 `r0-<sha>` 形式的 `openwrt_version_code`，因为浅克隆
+  没有 tag、`scripts/getver.sh` 算不出真实计数；脚本只在 revision 正好等于固定值时替换为
+  已知的 snapshot id（见下方说明）。
 * **实机验证状态**：已刷机，可正常进系统。实测暴露的主题、无线、加速、IPv6 四项见
   [七、实机测试反馈与修复](#七实机测试反馈与修复)。其中**风扇曲线、5G 附着与出口切换
   仍未验证**，需要真机确认。
