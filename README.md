@@ -1049,6 +1049,89 @@ rootfs**；其运行时依赖同样以 `=m` 产出，所以仓库自洽，用户
 代价要讲清楚：这会显著拉长构建时间，Docker 与代理栈都是大型 Go 程序。
 只想快速验证固件本身时，用 `ENABLE_REPO_PACKAGES=false` 跳过。
 
+## 十一、仿真测试
+
+没有真机时能验证到什么程度，实测结论如下。**两条路径的边界完全不同**，值得分开记。
+
+### Renode：能建出平台，但无法引导到用户态
+
+Renode 装在本机（`/opt/renode`），但缺 `dotnet` 运行时。**这一点可以免 root 解决**：
+官方 `dotnet-install.sh` 把 .NET 8 装到 `~/.dotnet` 即可，之后 `renode --version`
+正常输出 `v1.17.0 / .NET 8.0.31`。
+
+平台也不是死路。Renode 自带 229 个 `.repl` 里**没有任何 MediaTek 平台**，但它配套的
+`dts2repl` 可以把设备树转成平台描述。该工具的安装方式被它自己的
+`tools/dts2repl-version.sh` 钉死了（且钉死了兼容 commit）：
+
+```
+pip install "git+https://github.com/antmicro/dts2repl@<version.sh 给出的 commit>"
+```
+
+把已构建的 DTB 反编译后喂给它，**确实生成了一个可用的 MT7987 平台**：4 个
+Cortex-A53、GICv3（含 redistributor）、ARM 通用定时器（62.5 MHz）、
+256 MB DRAM @ `0x40000000`。再补一个 `UART.NS16550`（`wideRegisters: true`，
+对应 MTK 的 32 位寄存器间隔，IRQ 123）就能加载内核：
+
+```
+sysbus: Loading block of 17273604 bytes length at 0x40080000.
+sysbus: Loading block of 27762 bytes length at 0x4F000000.
+```
+
+**但引导到此为止。** 要让 cpu0 从内核入口而不是复位向量 0x0 开始执行，必须先
+`cpu0 IsHalted true` → 设 PC → 再解除 halt；即便如此，内核会**立即触发同步异常**
+跳到 `0x200`（未初始化的异常向量表）。原因不是配置问题，而是模型缺口：
+
+* MT7987 的**时钟控制器**（`topckgen` / `infracfg` / `apmixedsys`）、pinctrl、
+  reset、watchdog 在 Renode 里**没有模型**，而 Linux 的 MTK 平台代码必须先让这些
+  驱动 probe 成功，才能建立定时器和串口
+* 更根本的是：**MT7992 无线、5G 模组、风扇 PWM、以太网交换芯片在 Renode 里完全
+  不存在**。哪怕把平台补到能进用户态，**也无法验证这台机器上真正要验证的任何东西**
+
+要往下走是一个平台开发项目（为 MTK 外设写 Renode 模型），不是配置调整。已探明边界，
+没有继续投入。
+
+### qemu-user + 真实 uci：这条路径有效，并且抓到了一个会出货的 bug
+
+`qemu-aarch64-static` 可以预编译二进制取得（无需 root），配合 `-L <rootfs>` 能直接执行
+固件里的 aarch64 程序。关键点是 **uci 支持 `-c <path>` 指定配置目录**，所以**根本不需要
+proot/chroot/root** —— 而且实测确认它只读写指定目录，**不会碰宿主机的 `/etc/config`**。
+
+`scripts/rootfs-script-test.sh` 就是这条路：解出 rootfs → 用**固件自带的那个 uci 二进制**
+跑首启脚本 → 断言配置结果。
+
+**它立刻抓到了一个我和静态审查都没发现的 bug：**
+
+```sh
+uci -q set "wireless.radio0.disabled='0'"     # 引号在双引号内 → 值是字面的 '0'
+```
+
+`uci` 存进去的是 `'0'` 而不是 `0`。而 OpenWrt 的 `config_get_bool` **不认识** `'0'`，
+会回落到默认值 —— 也就是说**无线仍然是关闭的**，而 `/etc/config/wireless` 看起来
+完全正常。同样受影响的还有 SSID（客户端会看到一个名为 `'H5000M'` 的网络）、国家码、
+htmode，以及两个 flow offload 开关（**硬件卸载根本没打开**）。
+
+也就是说：**我上一轮声称"已修复"的无线默认开启与硬件加速，实际都会静默失效。**
+
+`uci batch` **会**剥掉引号，所以用 batch 的 `h5000m-wwan-provision` 本来就是对的；
+错的只有命令行 `uci set` 这一种形式。
+
+**为什么之前没抓到**：此前我用 shell mock 验证过同一段逻辑并通过了 —— 但 mock 会把
+传进来的字符串原样存下，`'0'` 和 `0` 都能"通过"。**只有真实解析器会拒绝它。**
+
+> 测试脚本还会额外断言配置**原始文件**内容，因为带引号的值读回来仍是"非空"，
+> 单看取值会显得合理。
+>
+> 注意：该脚本验证的是 `artifacts/` 里的 rootfs 打包，所以**在重新构建固件之前，
+> 它会对已出货的镜像持续报这个 bug** —— 这正是它应有的行为。
+
+### 结论
+
+| 路径 | 结论 |
+| --- | --- |
+| Renode 全系统 | 平台能生成，**引导不进用户态**；且关键外设无法仿真 —— 对本项目无实用价值 |
+| qemu-user + 真实 uci | **有效**，可验证首启脚本、uci 写入、守卫与幂等性；已抓到一个真实 bug |
+| 真机 | **仍然必需** —— 无线起不起、5G 能否附着、风扇曲线、硬件卸载是否真的生效，只有真机能答 |
+
 ## 许可证
 
 本工程自身的脚本与配置采用 Apache-2.0。固件继承各自上游许可证
