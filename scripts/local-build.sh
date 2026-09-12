@@ -124,9 +124,15 @@ H5000M_FLOW_OFFLOAD_HW="${H5000M_FLOW_OFFLOAD_HW:-1}"
 # /etc/apk/repositories.d/50-h5000m.list so the service packages (built as =m,
 # not installed) and every kmod can be installed on the running router.
 #
-# Leaving it empty ships no extra source, which is the safe default: an entry
-# pointing at a host that does not serve the repository makes `apk update` fail.
-# Set it to wherever artifacts/apk-repo/ is hosted, WITHOUT a trailing slash.
+# Empty by default, and that default is deliberate.  An earlier revision derived
+# a GitHub Pages URL from the repository name and baked it in unconditionally;
+# the repository did not exist, so every device shipped with a source entry that
+# 404'd and `apk update` reported "wget: exited with error 8" against it.  A
+# source that cannot be reached is worse than no source at all: it makes the
+# package manager look broken and hides the entries that do work.
+#
+# scripts/serve-apk-repo.sh serves artifacts/apk-repo/ over HTTP and prints the
+# exact value to build with, which is the quickest way to a working setup.
 H5000M_APK_REPO_URL="${H5000M_APK_REPO_URL:-}"
 
 # --------------------------------------------------------------------- UI ----
@@ -1210,6 +1216,12 @@ configure_build() {
 	# defconfig pass drops the language the translations silently disappear even
 	# though each app is still enabled.
 	config_set_symbol "CONFIG_LUCI_LANG_zh_Hans" "y"
+
+	# Re-asserted for the same reason as the language: defconfig regenerates the
+	# feed symbols, and losing this one puts a URL that does not exist back into
+	# the image's apk sources, where it makes every `apk update` on the device
+	# fail.  See the note in configs/h5000m.config.
+	config_set_symbol "CONFIG_FEED_wwand" "m"
 
 	build_required_packages
 	local pkg
