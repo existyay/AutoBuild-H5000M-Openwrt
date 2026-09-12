@@ -1,0 +1,7 @@
+#!/bin/sh
+# First-boot product defaults: enable the radios and switch on the PPE hardware
+# flow offload.  The implementation lives in /usr/sbin/h5000m-firstboot because
+# the same code also runs from the ieee80211 hotplug path, where
+# /etc/config/wireless is guaranteed to exist.
+[ -x /usr/sbin/h5000m-firstboot ] && /usr/sbin/h5000m-firstboot
+exit 0

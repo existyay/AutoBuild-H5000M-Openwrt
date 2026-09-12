@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs AFTER 10-wifi-detect, which is what generates /etc/config/wireless via
+# `/sbin/wifi config`.  Without this ordering the defaults script would run
+# before any radio section exists and silently configure nothing.
+[ "$ACTION" = "add" ] || exit 0
+[ -x /usr/sbin/h5000m-firstboot ] && /usr/sbin/h5000m-firstboot
+exit 0

@@ -61,6 +61,14 @@ on:
         description: 'Build the service packages (Docker, proxy stack, AdGuardHome) into the apk repo without installing them'
         type: boolean
         default: true
+      publish_apk_repo:
+        description: 'Publish the built apk repository to GitHub Pages so the firmware source entry resolves (requires Pages enabled once in repo settings)'
+        type: boolean
+        default: true
+      apk_repo_url:
+        description: 'Base URL where artifacts/apk-repo/ is hosted, baked into the firmware so it can apk add the service packages. Leave empty to ship no extra source.'
+        type: string
+        default: ''
       enable_dockerman:
         description: 'DockerMan + dockerd'
         type: boolean
@@ -288,6 +296,7 @@ jobs:
           ENABLE_THEME_ARGON: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_theme_argon) || 'true' }}
           ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'true' }}
           ENABLE_REPO_PACKAGES: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_repo_packages) || 'true' }}
+          H5000M_APK_REPO_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.apk_repo_url || '' }}
           ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
           ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
           ENABLE_OPENCLASH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_openclash) || 'false' }}
@@ -300,6 +309,21 @@ jobs:
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.pinned }}" = "true" ]; then
             args+=(--pinned)
           fi
+
+          # Where the firmware should look for this project's own apk
+          # repository.  The repository is published as the apk-repo artifact;
+          # for the entry to work it has to be served over HTTP at this URL.
+          #
+          # Derived from the repository the workflow is running in rather than
+          # hard-coded, so a fork gets its own URL for free.  Override with the
+          # apk_repo_url input (or delete the entry on the device) if you host
+          # it somewhere else — an entry pointing at a host that does not serve
+          # the repository makes `apk update` report an error.
+          if [ -z "${H5000M_APK_REPO_URL:-}" ]; then
+            export H5000M_APK_REPO_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          fi
+          echo "apk repository URL for the firmware: ${H5000M_APK_REPO_URL}"
+
           ./scripts/local-build.sh "${args[@]}"
 
       - name: Collect build info
@@ -318,6 +342,14 @@ jobs:
           path: |
             artifacts/
             build.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload apk repository
+        uses: actions/upload-artifact@v7
+        with:
+          name: apk-repo
+          path: artifacts/apk-repo/
           if-no-files-found: error
           retention-days: 14
 
@@ -353,3 +385,41 @@ jobs:
               --title "H5000M mainline OpenWrt ${rel_name}" \
               --notes "${notes}"
           fi
+
+  # Publishes artifacts/apk-repo/ to GitHub Pages, which is what makes the
+  # firmware's built-in source entry reachable.  The URL is derived from the
+  # repository at build time (see H5000M_APK_REPO_URL above), so this job is
+  # what turns that URL from a promise into something apk can actually read.
+  #
+  # continue-on-error because Pages has to be enabled once in the repository
+  # settings.  A build that produced a perfectly good firmware must not be
+  # marked failed because the optional hosting step was not configured yet.
+  publish-apk-repo:
+    needs: build
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_apk_repo
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download the apk repository
+        uses: actions/download-artifact@v7
+        with:
+          name: apk-repo
+          path: apk-repo
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apk-repo
+
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
