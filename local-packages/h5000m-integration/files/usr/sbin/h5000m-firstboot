@@ -68,10 +68,10 @@ configure_wireless() {
 	for radio in $(uci -q show wireless | sed -n 's/^\(wireless\.[^.]*\)=wifi-device$/\1/p'); do
 		band="$(uci -q get "${radio}.band")"
 		uci -q set "${radio}.country=${H5000M_WIFI_COUNTRY}"
-		uci -q set "${radio}.disabled='0'"
+		uci -q set "${radio}.disabled=0"
 		case "$band" in
-			2g) uci -q set "${radio}.htmode='${H5000M_WIFI_HTMODE_2G}'" ;;
-			5g) uci -q set "${radio}.htmode='${H5000M_WIFI_HTMODE_5G}'" ;;
+			2g) uci -q set "${radio}.htmode=${H5000M_WIFI_HTMODE_2G}" ;;
+			5g) uci -q set "${radio}.htmode=${H5000M_WIFI_HTMODE_5G}" ;;
 		esac
 	done
 
@@ -80,12 +80,12 @@ configure_wireless() {
 		# bss_transition must stay unset: the official compact wpad variant
 		# does not know that hostapd option and rejects the whole AP config.
 		uci -q delete "${iface}.bss_transition"
-		uci -q set "${iface}.ssid='${H5000M_WIFI_SSID}'"
-		uci -q set "${iface}.encryption='${H5000M_WIFI_ENCRYPTION}'"
-		uci -q set "${iface}.key='${H5000M_WIFI_KEY}'"
-		uci -q set "${iface}.ieee80211w='1'"
-		uci -q set "${iface}.ieee80211k='1'"
-		uci -q set "${iface}.disabled='0'"
+		uci -q set "${iface}.ssid=${H5000M_WIFI_SSID}"
+		uci -q set "${iface}.encryption=${H5000M_WIFI_ENCRYPTION}"
+		uci -q set "${iface}.key=${H5000M_WIFI_KEY}"
+		uci -q set "${iface}.ieee80211w=1"
+		uci -q set "${iface}.ieee80211k=1"
+		uci -q set "${iface}.disabled=0"
 	done
 
 	uci -q commit wireless
@@ -116,8 +116,8 @@ configure_offload() {
 
 	uci -q get firewall.@defaults[0] >/dev/null 2>&1 || return 0
 
-	uci -q set "firewall.@defaults[0].flow_offloading='${H5000M_FLOW_OFFLOAD}'"
-	uci -q set "firewall.@defaults[0].flow_offloading_hw='${H5000M_FLOW_OFFLOAD_HW}'"
+	uci -q set "firewall.@defaults[0].flow_offloading=${H5000M_FLOW_OFFLOAD}"
+	uci -q set "firewall.@defaults[0].flow_offloading_hw=${H5000M_FLOW_OFFLOAD_HW}"
 	uci -q commit firewall
 	log "flow offload: software=${H5000M_FLOW_OFFLOAD} hardware=${H5000M_FLOW_OFFLOAD_HW}"
 }
