@@ -850,6 +850,8 @@ install_proxy_repos() {
 	clone_and_prune openwrt-nekobox \
 		https://github.com/Thaolga/openwrt-nekobox.git main \
 		sing-box mihomo
+	fix_nekobox_release
+
 	install_optional_external LUCIXRAY luci-app-xray  https://github.com/yichya/luci-app-xray.git master
 	# Daed is deliberately NOT cloned.  Its daemon declares
 	# `PKG_BUILD_DEPENDS:=golang/host bpf-headers` and bpf-headers fails to
@@ -861,6 +863,33 @@ install_proxy_repos() {
 	# they change the kernel ABI.
 	install_optional_external HIJPass luci-app-hijpass https://github.com/WROIATE/luci-app-hijpass.git main
 
+	return 0
+}
+
+# Upstream packaging bug in Thaolga/openwrt-nekobox, worked around rather than
+# waited on.
+#
+# Its Makefile sets `PKG_RELEASE:=rc14`, but luci.mk composes the package version
+# as `$(PKG_VERSION)-r$(PKG_RELEASE)` (feeds/luci/luci.mk:185), which yields
+# `2.0.9-rrc14`.  apk rejects that -- `-r` must be followed by a number -- and
+# the build stops with the unhelpful
+#
+#   ERROR: failed to create package: package version is invalid
+#
+# The first look at this looked like a CSS-minification complaint, because
+# luci-theme-spectra logs its own message immediately before it; the real error
+# only shows up under `make ... V=s`.  A numeric PKG_RELEASE makes the version
+# `2.0.9-r1`, which is valid.  The `rc14` marker is cosmetic and is dropped
+# rather than encoded as `2.0.9_rc14`, whose underscore form apk's version parser
+# would also have to accept.
+fix_nekobox_release() {
+	local mk="${SRC}/package/openwrt-nekobox/luci-app-nekobox/Makefile"
+
+	[ -f "$mk" ] || return 0
+	grep -q '^PKG_RELEASE:=rc14$' "$mk" || return 0
+
+	sed -i 's/^PKG_RELEASE:=rc14$/PKG_RELEASE:=1/' "$mk"
+	log "  fixed luci-app-nekobox PKG_RELEASE (upstream rc14 becomes apk-invalid -rrc14)"
 	return 0
 }
 
