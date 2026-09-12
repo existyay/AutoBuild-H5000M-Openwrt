@@ -726,6 +726,38 @@ kmod-sched-core    kmod-ifb           kmod-tcp-bbr
 `kmod-tcp-bbr` 顺带把 BBR 拥塞控制也带进了仓库——这在主线上是**真实可用**的加速手段
 之一（见 [七.6](#6-硬件加速不能用--根因是控制面不同已启用主线那条)）。
 
+**审计覆盖的软件包**：PassWall、PassWall2、SSR-Plus、HomeProxy（`immortalwrt` 与
+`VIKINGYFY` 两个变体）、OpenClash、Nikki、Momo、FullCombo Shark!（fchomo）、
+luci-xray（`yichya` 与 `ttimasdf`）、NeKoBox、Daed（`QiuSimons` 与 `kenzok8`）、
+HiJpass、v2rayA。逐包的 Makefile 路径、行号与审计 commit 见
+[`docs/proxy-kmod-audit.md`](docs/proxy-kmod-audit.md)。
+
+**审计顺带查出的、与 kmod 无关但会绊住你的事**：
+
+* **流传的仓库地址大多已失效。** `xiaorouji/openwrt-passwall` 与
+  `xiaorouji/openwrt-passwall2` 现在都是 **404**，已转移到
+  `Openwrt-Passwall/` 组织；`v2rayA/openwrt` 是 **404**，实为
+  `v2rayA/v2raya-openwrt`；**`QiuSimons/openwrt-xray` 根本不存在**
+  （该用户下没有任何 xray 仓库）。照抄旧地址的脚本会静默抓不到东西。
+* **PassWall / PassWall2 仓库里只有 LuCI 前端**，核心守护进程包在**独立的
+  `openwrt-passwall-packages`** 仓库，三个都要加。
+* **v2rayA 有两个来源、kmod 结论相反**：`v2rayA/v2raya-openwrt` 的包
+  **不声明任何 kmod**（只在 README 里要求手动装 `kmod-nft-tproxy`），会让
+  `apk add v2raya` 后 tproxy **静默失败**；`openwrt/packages` 官方 feed 版才有
+  硬依赖。
+* **代理的非 kmod 依赖大面积缺失。** 例如 `chinadns-ng`、`dns2socks`、`tcping`、
+  `geoview`、`shadowsocks-rust-*`、`shadowsocksr-libev-*`、`naiveproxy`、
+  `hysteria`、`shadow-tls` 等 14 个包不在本工程的任何 feed 里。
+  **本次只解决了 kmod 部分**；要真正 `apk add` 装上这些代理，还需要为它们补第三方
+  feed 或把它们一并编进仓库。
+* **`xray-core` 会同名冲突**：`openwrt/packages` 与 `openwrt-passwall-packages`
+  都提供 `xray-core`，只能留一个。
+* **Daed 需要内核选项，不只是 kmod**：`CONFIG_KERNEL_XDP_SOCKETS`、
+  `CONFIG_KERNEL_DEBUG_INFO_BTF`、`CONFIG_KERNEL_BPF_EVENTS/CGROUPS/CGROUP_BPF`、
+  `CONFIG_BPF_TOOLCHAIN_HOST`。这些**不是包而是内核配置**，开启会变更内核 ABI 并
+  触发全量重编，且 BTF 会明显增大镜像。**本次未开启**，因此 Daed 目前装不上；
+  需要的话告诉我，我加一个独立开关。
+
 ## 八、已知限制
 
 * **已完成验证的范围 —— 完整固件已在本机编译成功**（`BUILD_EXIT=0`，6 核，含工具链）：

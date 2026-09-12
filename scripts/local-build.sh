@@ -89,6 +89,13 @@ ENABLE_ADGUARDHOME="${ENABLE_ADGUARDHOME:-false}"
 # costs real time, because the Docker and proxy stacks are large Go programs.
 ENABLE_REPO_PACKAGES="${ENABLE_REPO_PACKAGES:-true}"
 
+# Clone and build the third-party proxy frontends (PassWall, PassWall2, Momo,
+# fcshark, NeKoBox, luci-xray, Daed, HiJpass) alongside the ones already handled.
+# They are built into the apk repository as =m, never installed into the image.
+# Turn off together with ENABLE_REPO_PACKAGES for a fast iteration build — these
+# pull in a lot of Go compilation.
+ENABLE_PROXY_REPOS="${ENABLE_PROXY_REPOS:-true}"
+
 # ------------------------------------------------- first-boot product setup ---
 # Applied once by /usr/sbin/h5000m-firstboot (uci-defaults + ieee80211 hotplug)
 # and written into the image as /etc/h5000m-defaults.conf.
@@ -784,6 +791,72 @@ install_external_packages() {
 	return 0
 }
 
+# Clone a third-party tree and then drop named subdirectories from it.
+#
+# openwrt-passwall-packages carries its own xray-core, sing-box and microsocks,
+# and the official feeds carry packages with those exact PKG_NAMEs.  Cloning it
+# wholesale would introduce duplicate package definitions — this project's tree
+# currently has ZERO name collisions across 12757 packages, which is worth
+# keeping.  Dropping the duplicates leaves exactly the helpers the official feeds
+# lack, and the frontends resolve xray-core/sing-box from the feeds instead.
+clone_and_prune() {
+	local name="$1" url="$2" branch="$3"; shift 3
+	local dest="${SRC}/package/${name}"
+	local drop
+
+	install_optional_external "$name" "$name" "$url" "$branch" || return 1
+
+	for drop in "$@"; do
+		if [ -e "${dest}/${drop}" ]; then
+			rm -rf "${dest}/${drop}"
+			log "  pruned ${name}/${drop} (official feeds already provide it)"
+		fi
+	done
+	return 0
+}
+
+# Proxy frontends, plus the cores the official feeds do not carry.  Everything is
+# emitted as `=m`: built into the apk repository, not installed into the image, so
+# a user picks with `apk add` and the frontend pulls its backend and helpers in.
+#
+# It is not enough to ship the daemon: each entry here also carries its LuCI app
+# and, where upstream has one, the `luci-i18n-<app>-zh-cn` translation, because
+# `apk add passwall` without `luci-app-passwall` installs something with no UI.
+#
+# Repository paths verified against upstream.  Several of the ones in circulation
+# are dead: xiaorouji/openwrt-passwall and -passwall2 now 404 and live under the
+# Openwrt-Passwall org, v2rayA/openwrt is v2rayA/v2raya-openwrt, and
+# QiuSimons/openwrt-xray does not exist at all.
+#
+# v2rayA needs no clone: v2raya and luci-app-v2raya are in the official feeds.
+install_proxy_repos() {
+	is_true "$ENABLE_REPO_PACKAGES" || is_true "$ENABLE_PROXY_REPOS" || return 0
+
+	install_optional_external PASSWALL  openwrt-passwall    https://github.com/Openwrt-Passwall/openwrt-passwall.git main
+	install_optional_external PASSWALL2 openwrt-passwall2   https://github.com/Openwrt-Passwall/openwrt-passwall2.git main
+
+	# Cores and helpers PassWall/PassWall2/SSR-Plus/HiJpass need that the
+	# official feeds do not have.  The three official-feeds duplicates are pruned.
+	clone_and_prune openwrt-passwall-packages \
+		https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git main \
+		xray-core sing-box microsocks
+
+	install_optional_external MOMO    OpenWrt-momo    https://github.com/nikkinikki-org/OpenWrt-momo.git main
+	install_optional_external FCHOMO  openwrt-fchomo  https://github.com/fcshark-org/openwrt-fchomo.git master
+	# NeKoBox bundles its own sing-box and mihomo.  sing-box duplicates the
+	# official feed; mihomo would duplicate fcshark's.  Keep one of each defined
+	# in the tree — fcshark's mihomo, the official sing-box — and let NeKoBox
+	# depend on them.
+	clone_and_prune openwrt-nekobox \
+		https://github.com/Thaolga/openwrt-nekobox.git main \
+		sing-box mihomo
+	install_optional_external LUCIXRAY luci-app-xray  https://github.com/yichya/luci-app-xray.git master
+	install_optional_external DAED    luci-app-daed   https://github.com/QiuSimons/luci-app-daed.git kix
+	install_optional_external HIJPass luci-app-hijpass https://github.com/WROIATE/luci-app-hijpass.git main
+
+	return 0
+}
+
 # --------------------------------------------------------------- config ------
 config_set_symbol() {
 	local symbol="$1" value="$2"
@@ -982,6 +1055,43 @@ EOF
 		kmod-ipt-tproxy \
 		kmod-ipt-conntrack-extra \
 		kmod-ipt-filter
+
+	# ------------------------------------------- third-party proxy frontends ---
+	# Built into the repository, never installed.  Package names are taken from
+	# the build system's own tmp/.packageinfo rather than guessed from the
+	# Makefiles: these are LuCI apps whose package name comes from the directory,
+	# so grepping for `define Package/` finds nothing.
+	#
+	# The daemon, its LuCI app AND its Chinese translation are all listed.  A user
+	# who runs `apk add luci-app-passwall` and gets a UI with no Chinese is the
+	# failure this prevents -- upstream ships the translation as its own package
+	# and nothing pulls it in automatically.
+	emit_service "" \
+		luci-app-passwall luci-i18n-passwall-zh-cn \
+		luci-app-passwall2 luci-i18n-passwall2-zh-cn \
+		luci-app-momo luci-i18n-momo-zh-cn momo \
+		luci-app-fchomo luci-i18n-fchomo-zh-cn mihomo \
+		luci-app-nekobox luci-theme-spectra \
+		luci-app-xray luci-app-xray-geodata luci-app-xray-status \
+		luci-app-daed luci-i18n-daed-zh-cn daed \
+		luci-app-hijpass luci-i18n-hijpass-zh-cn \
+		v2raya luci-app-v2raya
+
+	# Cores and helpers PassWall/PassWall2/HiJpass need that the official feeds do
+	# not carry, from the pruned openwrt-passwall-packages checkout.
+	emit_service "" \
+		chinadns-ng dns2socks geoview hysteria ipt2socks naiveproxy \
+		shadow-tls tcping v2ray-plugin xray-plugin \
+		shadowsocks-rust-sslocal shadowsocks-rust-ssserver \
+		shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir \
+		shadowsocksr-libev-ssr-server \
+		simple-obfs-client simple-obfs-server
+
+	# Translations for the frontends that were already listed.  Some arrive on
+	# their own because luci.mk selects the configured language, but naming them
+	# is what turns "the Chinese UI is present" into a checked property.
+	emit_service "" \
+		luci-i18n-nikki-zh-cn luci-i18n-mosdns-zh-cn luci-i18n-homeproxy-zh-cn
 
 	return 0
 }
@@ -1403,6 +1513,7 @@ main() {
 	install_board_plugins
 	install_theme
 	install_external_packages
+	install_proxy_repos
 	configure_build
 	verify_config
 	dump_enabled_packages
