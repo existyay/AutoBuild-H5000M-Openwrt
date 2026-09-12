@@ -1090,9 +1090,25 @@ collect_artifacts() {
 	# would refuse to install.
 	local pkg_dir="${SRC}/bin/packages/${TARGET_ARCH}"
 	if [ -d "$pkg_dir" ]; then
+		local arch_dir
 		mkdir -p "${dest}/apk-repo"
 		cp -a "$pkg_dir" "${dest}/apk-repo/" 2>/dev/null || true
-		log "Collected a matching apk repository ($(find "${dest}/apk-repo" -name '*.apk' | wc -l) packages)"
+
+		# Drop feed directories that produced nothing.  OpenWrt creates one
+		# directory per configured feed, so routing/telephony/video sit there
+		# empty for this configuration — no .apk and, crucially, no packages.adb
+		# index.  Publishing an index-less repository directory is worse than not
+		# publishing it: anyone pointing apk at it gets a directory that looks
+		# like a feed but cannot be read.  Only directories that actually carry
+		# an index are kept.
+		for arch_dir in "${dest}/apk-repo/${TARGET_ARCH}"/*/; do
+			[ -d "$arch_dir" ] || continue
+			if [ ! -f "${arch_dir}/packages.adb" ]; then
+				rm -rf "$arch_dir"
+			fi
+		done
+
+		log "Collected a matching apk repository ($(find "${dest}/apk-repo" -name '*.apk' | wc -l) packages in $(find "${dest}/apk-repo" -name 'packages.adb' | wc -l) feeds)"
 	fi
 
 	write_build_info "$dest"
