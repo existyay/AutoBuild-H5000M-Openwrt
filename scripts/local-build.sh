@@ -851,7 +851,14 @@ install_proxy_repos() {
 		https://github.com/Thaolga/openwrt-nekobox.git main \
 		sing-box mihomo
 	install_optional_external LUCIXRAY luci-app-xray  https://github.com/yichya/luci-app-xray.git master
-	install_optional_external DAED    luci-app-daed   https://github.com/QiuSimons/luci-app-daed.git kix
+	# Daed is deliberately NOT cloned.  Its daemon declares
+	# `PKG_BUILD_DEPENDS:=golang/host bpf-headers` and bpf-headers fails to
+	# build against this kernel configuration, which does not enable
+	# CONFIG_KERNEL_XDP_SOCKETS / DEBUG_INFO_BTF / BPF_EVENTS.  The failure
+	# is not survivable and Daed would not run even if it built, so offering
+	# it here would only break every build.  See docs/proxy-kmod-audit.md for
+	# the kernel options it needs; enabling them is a separate decision because
+	# they change the kernel ABI.
 	install_optional_external HIJPass luci-app-hijpass https://github.com/WROIATE/luci-app-hijpass.git main
 
 	return 0
@@ -1073,7 +1080,6 @@ EOF
 		luci-app-fchomo luci-i18n-fchomo-zh-cn mihomo \
 		luci-app-nekobox luci-theme-spectra \
 		luci-app-xray luci-app-xray-geodata luci-app-xray-status \
-		luci-app-daed luci-i18n-daed-zh-cn daed \
 		luci-app-hijpass luci-i18n-hijpass-zh-cn \
 		v2raya luci-app-v2raya
 
