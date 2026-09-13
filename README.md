@@ -1,10 +1,10 @@
 # AutoBuild-H5000M-Openwrt
 
-[![构建固件](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/build.yml/badge.svg)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/build.yml)
-[![仓库与主机检查](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/checks.yml/badge.svg)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/checks.yml)
-[![配置覆盖测试](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/coverage.yml/badge.svg)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/coverage.yml)
-[![最新版本](https://img.shields.io/github/v/release/existyay/AutoBuild-H5000M-Openwrt?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&color=blue)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest)
-[![许可证](https://img.shields.io/github/license/existyay/AutoBuild-H5000M-Openwrt?label=%E8%AE%B8%E5%8F%AF%E8%AF%81)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/blob/master/LICENSE)
+[![构建固件](https://img.shields.io/github/actions/workflow/status/existyay/AutoBuild-H5000M-Openwrt/build.yml?label=build)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/build.yml)
+[![仓库与主机检查](https://img.shields.io/github/actions/workflow/status/existyay/AutoBuild-H5000M-Openwrt/checks.yml?label=checks)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/checks.yml)
+[![配置覆盖测试](https://img.shields.io/github/actions/workflow/status/existyay/AutoBuild-H5000M-Openwrt/coverage.yml?label=coverage)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/coverage.yml)
+[![最新版本](https://img.shields.io/github/v/release/existyay/AutoBuild-H5000M-Openwrt?label=release&color=blue)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest)
+[![许可证](https://img.shields.io/github/license/existyay/AutoBuild-H5000M-Openwrt?label=license)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/blob/master/LICENSE)
 
 Hiveton H5000M（Airpi H5000M，MT7987A + MT7992）的**主线 OpenWrt** 固件自动编译工程。
 上游是 `openwrt/openwrt` main，每周一自动构建，也可手动触发。
