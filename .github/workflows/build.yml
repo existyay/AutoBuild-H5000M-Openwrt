@@ -1,4 +1,4 @@
-name: Build H5000M mainline OpenWrt
+name: 构建 H5000M 主线 OpenWrt 固件
 
 # Mainline OpenWrt (openwrt/openwrt main) for the Hiveton H5000M.
 # Weekly scheduled build + manual dispatch + tag releases.
@@ -8,89 +8,89 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: 'Create/update a GitHub Release with the images'
+        description: '构建完成后创建或更新 GitHub Release'
         type: boolean
         default: false
       pinned:
-        description: 'Build the pinned upstream revision instead of the branch head'
+        description: '使用固定的上游版本 而不是分支最新提交'
         type: boolean
         default: false
       runner_type:
-        description: 'Runner to use'
+        description: '运行器类型'
         type: choice
         options: [github-hosted, self-hosted]
         default: github-hosted
       run_config_coverage:
-        description: 'Also run the configuration coverage profiles'
+        description: '同时运行配置覆盖测试'
         type: boolean
         default: true
       coverage_profile_set:
-        description: 'Coverage profile set'
+        description: '覆盖测试档位'
         type: choice
         options: [quick, full]
         default: quick
       enable_wwand:
-        description: 'WWAN dialer: ddimension/wwand'
+        description: '5G 拨号器 ddimension wwand'
         type: boolean
         default: true
       enable_mt5700m:
-        description: 'WWAN dialer: luci-app-mt5700m (disables wwand)'
+        description: '5G 拨号器 luci-app-mt5700m 启用后 wwand 会被自动关闭'
         type: boolean
         default: false
       enable_fancontrol:
-        description: 'luci-app-h5000m-fancontrol'
+        description: 'H5000M 风扇温控'
         type: boolean
         default: true
       enable_netmode:
-        description: 'luci-app-h5000m-netmode'
+        description: 'H5000M 出口优先级'
         type: boolean
         default: true
       enable_upnp:
-        description: 'UPnP IGD'
+        description: 'UPnP IGD 端口映射'
         type: boolean
         default: true
       enable_theme_argon:
-        description: 'Argon LuCI theme (cloned from jerrykuku; not in any feed)'
+        description: 'Argon 主题 上游仓库克隆 不在任何 feed 中'
         type: boolean
         default: true
       enable_adblock:
-        description: 'Adblock'
+        description: 'Adblock 广告过滤'
+        type: boolean
+        default: true
+      enable_mosdns:
+        description: 'MosDNS 域名分流'
         type: boolean
         default: true
       enable_repo_packages:
-        description: 'Build the service packages (Docker, proxy stack, AdGuardHome) into the apk repo without installing them'
+        description: '把服务类软件包编译进 apk 仓库 但不安装进固件'
         type: boolean
         default: true
       publish_apk_repo:
-        description: 'Publish the built apk repository to GitHub Pages so the firmware source entry resolves (requires Pages enabled once in repo settings)'
+        description: '把 apk 仓库发布到 GitHub Pages 让固件内的软件源可用 需要在仓库设置里开启一次 Pages'
         type: boolean
         default: true
       apk_repo_url:
-        description: 'Base URL where artifacts/apk-repo/ is hosted, baked into the firmware so it can apk add the service packages. Leave empty to ship no extra source.'
+        description: 'apk 仓库的托管地址 会被写入固件 留空则固件不带额外软件源'
         type: string
         default: ''
       enable_dockerman:
-        description: 'DockerMan + dockerd'
+        description: 'Docker 容器支持'
         type: boolean
         default: false
       enable_nikki:
-        description: 'Nikki / mihomo-meta'
+        description: 'Nikki 代理'
         type: boolean
         default: false
       enable_openclash:
-        description: 'OpenClash'
-        type: boolean
-        default: false
-      enable_mosdns:
-        description: 'MosDNS'
+        description: 'OpenClash 代理'
         type: boolean
         default: false
       enable_homeproxy:
-        description: 'HomeProxy'
+        description: 'HomeProxy 代理'
         type: boolean
         default: false
       enable_adguardhome:
-        description: 'AdGuardHome'
+        description: 'AdGuardHome 广告过滤'
         type: boolean
         default: false
   push:
