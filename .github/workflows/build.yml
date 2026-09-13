@@ -10,7 +10,7 @@ on:
       publish_release:
         description: '构建完成后创建或更新 GitHub Release'
         type: boolean
-        default: false
+        default: true
       pinned:
         description: '使用固定的上游版本 而不是分支最新提交'
         type: boolean
@@ -299,11 +299,39 @@ jobs:
         timeout-minutes: 20
         run: ./scripts/local-build.sh --install-deps
 
+      - name: Resolve the upstream revision
+        id: upstream
+        run: |
+          set -euo pipefail
+          . configs/upstream.env
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.pinned }}" = "true" ]; then
+            rev="${OPENWRT_PINNED_REVISION}"
+          else
+            rev="$(git ls-remote "${OPENWRT_REPO_URL}" "refs/heads/${OPENWRT_REPO_BRANCH}" | cut -f1)"
+          fi
+          [ -n "$rev" ] || { echo "::error::could not resolve the upstream revision"; exit 1; }
+          echo "rev=${rev}" >> "$GITHUB_OUTPUT"
+          echo "upstream revision: ${rev}"
+
+      # The toolchain is the longest single phase of the build.  Restoring it
+      # skips that entirely.  Keyed on the revision with NO fallback prefix: a
+      # cached toolchain from a different revision would be stale, and a stale
+      # toolchain produces failures that look like anything but a cache problem.
+      - name: Restore toolchain
+        id: toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            openwrt/staging_dir/host
+            openwrt/staging_dir/toolchain-*
+          key: h5000m-toolchain-${{ steps.upstream.outputs.rev }}
+
       - name: Restore download cache
         uses: actions/cache@v6
         with:
           path: openwrt/dl
-          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
+          key: h5000m-dl-${{
+            hashFiles('feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
           restore-keys: h5000m-dl-
 
       - name: Restore ccache
@@ -317,6 +345,10 @@ jobs:
 
       - name: Build
         env:
+          # Keep ccache from growing past what the repository's 10 GB cache
+          # budget can hold alongside the toolchain and the downloads.
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPRESS: 'true'
           THREADS: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && '8' || '4' }}
           # `format('{0}', <bool>)` renders "true"/"false".  Without it the usual
           # `cond && input || default` fallback would rewrite a boolean input of
@@ -442,13 +474,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Download the apk repository
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: apk-repo
           path: apk-repo
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           # Turn Pages on if it is off.  Without this the step dies with
           # "Get Pages site failed" and — because the job is continue-on-error so
@@ -456,11 +488,53 @@ jobs:
           # pointing at a URL that 404s, which is worse than pointing nowhere.
           enablement: true
 
+      # A bare repository directory has no index.html, so the site root answers
+      # 404 and looks broken even though packages.adb is served correctly.  This
+      # page says what the directory is and how to point a router at it.
+      - name: Write an index page
+        run: |
+          set -euo pipefail
+          count="$(find apk-repo -maxdepth 1 -name '*.apk' | wc -l)"
+          size="$(du -sh apk-repo | cut -f1)"
+          cat > apk-repo/index.html <<EOF
+          <!doctype html>
+          <html lang="zh-CN">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>H5000M apk 软件包仓库</title>
+            <style>
+              body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+                     max-width: 46rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.7; }
+              code { background: #f4f4f5; padding: .15em .35em; border-radius: .25rem; }
+              pre  { background: #f4f4f5; padding: .8rem 1rem; border-radius: .4rem; overflow-x: auto; }
+              h1   { font-size: 1.5rem; }
+            </style>
+          </head>
+          <body>
+            <h1>Hiveton H5000M 主线 OpenWrt 软件包仓库</h1>
+            <p>这是固件自带的软件源，包含 <strong>${count}</strong> 个软件包，共 ${size}。
+               内核模块与固件同一次构建产出，因此 ABI 完全匹配。</p>
+            <p>索引地址：<a href="packages.adb">packages.adb</a></p>
+            <h2>在路由器上使用</h2>
+            <p>固件构建时已把这个地址写入 <code>/etc/apk/repositories.d/50-h5000m.list</code>，
+               通常无需手动配置。若需手工添加：</p>
+            <pre>echo 'https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/packages.adb' \\
+            >> /etc/apk/repositories.d/customfeeds.list
+          apk update
+          apk add luci-app-passwall</pre>
+            <p>可安装的代理面板包括 PassWall、PassWall2、HomeProxy、MosDNS、Nikki、
+               Momo、NeKoBox、v2rayA、OpenClash 以及各自的中文语言包。</p>
+          </body>
+          </html>
+          EOF
+          echo "index.html written ($(wc -c < apk-repo/index.html) bytes)"
+
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: apk-repo
 
       - name: Deploy to Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

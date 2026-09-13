@@ -1271,6 +1271,15 @@ configure_build() {
 	done
 	run_with_timeout "$CONFIG_TIMEOUT" make defconfig \
 		|| die "second make defconfig failed"
+
+	# ccache last, and after defconfig rather than in the seed, because its
+	# Kconfig is `bool "Use ccache" if DEVEL` and defconfig drops it whenever
+	# DEVEL is unset.  Turning DEVEL on instead would pull in debug information
+	# and cost more build time than the cache saves.  rules.mk only tests
+	# `ifneq ($(CONFIG_CCACHE),)`, so a value written after defconfig is enough.
+	# That is what makes the CI ccache cache actually fill: without it every run
+	# restored an empty directory and rebuilt everything.
+	config_set_symbol "CONFIG_CCACHE" "y"
 }
 
 # OpenWrt gates .config on $(STAGING_DIR_HOST)/.prereq-build, whose recipe runs
