@@ -258,7 +258,18 @@ jobs:
           haskell: true
           large-packages: true
           docker-images: true
-          swap-storage: false
+          # The build tree reaches roughly 40 GB.  The runner has 16 GB of RAM,
+          # so the swap file is not what keeps the build alive — but the ~4 GB it
+          # occupies is disk this build cannot spare.
+          swap-storage: true
+
+      - name: Report disk space
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
+        run: |
+          echo "=== free space after cleanup ==="
+          df -h / /mnt 2>/dev/null || df -h /
+          echo "=== largest free mount ==="
+          df -BG --output=avail,target / 2>/dev/null | tail -1
 
       - name: Install build dependencies
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
