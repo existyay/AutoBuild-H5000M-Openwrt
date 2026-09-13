@@ -286,14 +286,30 @@ install_deps() {
 			-o Acquire::https::Timeout=30
 		)
 		sudo -E apt-get "${apt_opts[@]}" update
-		sudo -E apt-get "${apt_opts[@]}" install -y --no-install-recommends \
-			build-essential ccache python3 python3-pyelftools libncurses-dev libssl-dev \
-			libgmp3-dev libmbedtls-dev zlib1g-dev autoconf automake libtool patch gawk \
-			gettext unzip file wget curl rsync zstd git bison flex gperf haveged \
-			libelf-dev libltdl-dev libmpc-dev libmpfr-dev libreadline-dev lld llvm \
-			ninja-build p7zip pkgconf python3-ply python3-setuptools qemu-utils re2c \
-			scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl vim xmlto \
-			xxd device-tree-compiler fastjar time
+		# Installed in groups, with a line printed before each.  When the CI
+		# install hung, the only thing the log could say was "still running" —
+		# there was no way to tell which package was responsible.  Now the last
+		# line printed before a timeout names the group, and a group can be
+		# bisected further without another blind 20-minute run.
+		local apt_groups=(
+			"build-essential ccache python3 python3-pyelftools"
+			"libncurses-dev libssl-dev libgmp3-dev libmbedtls-dev zlib1g-dev libelf-dev"
+			"autoconf automake libtool patch gawk gettext"
+			"unzip file wget curl rsync zstd git"
+			"bison flex gperf haveged"
+			"libltdl-dev libmpc-dev libmpfr-dev libreadline-dev"
+			"ninja-build p7zip pkgconf python3-ply python3-setuptools"
+			"lld llvm re2c scons squashfs-tools"
+			"qemu-utils subversion swig texinfo uglifyjs upx-ucl"
+			"vim xmlto xxd device-tree-compiler fastjar time"
+		)
+		local group
+		for group in "${apt_groups[@]}"; do
+			log "apt: installing ${group}"
+			# shellcheck disable=SC2086
+			sudo -E apt-get "${apt_opts[@]}" install -y --no-install-recommends $group \
+				|| die "apt-get failed for: ${group}"
+			done
 		return 0
 	fi
 
