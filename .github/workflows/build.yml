@@ -322,22 +322,41 @@ jobs:
       # empty directory" — which is exactly what happened the first time this
       # cache was added.  local-build.sh unpacks the archive after the clone.
       #
-      # Keyed on the revision with NO restore-keys fallback: an older toolchain
-      # would be stale, and a stale toolchain fails in ways that look like
-      # anything but a cache problem.
+      # Keyed on the configuration first, the revision second, and WITH a
+      # restore-keys fallback.
+      #
+      # Keying on the revision alone made this cache nearly useless: upstream
+      # main moves every day, so the key almost never matched — the one
+      # verification run after the cache was first written already missed,
+      # because main had advanced from b88dfb64 to 2ed2c210 in the meantime.
+      #
+      # What the toolchain actually depends on is the target configuration
+      # (toolchain versions, target and subtarget), not the day's revision, so
+      # that is what the key is built from.  Restoring a slightly older
+      # toolchain is safe: OpenWrt's stamps live in version-named directories
+      # under build_dir/toolchain-<target>_gcc-<ver>_musl/, tar preserves
+      # mtimes, and make rebuilds anything whose Makefile or patches are newer
+      # than its .built stamp.  A toolchain that is genuinely out of date
+      # therefore rebuilds itself instead of being used.
       - name: Restore toolchain
         id: toolchain
         uses: actions/cache@v6
         with:
           path: .toolchain-cache
-          key: h5000m-toolchain-${{ steps.upstream.outputs.rev }}
+          key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
+          restore-keys: |
+            h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-
 
       - name: Restore download cache
         uses: actions/cache@v6
         with:
           path: openwrt/dl
-          key: h5000m-dl-${{
-            hashFiles('feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
+          # Deliberately NOT keyed on the upstream revision.  Downloads are
+          # identified by name and hash, so a tarball fetched for one revision is
+          # exactly the same file in the next; adding the revision produced a
+          # second 3.1 GB entry per run for no benefit and pushed the repository
+          # towards its 10 GB cache ceiling.
+          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
           restore-keys: h5000m-dl-
 
       - name: Restore ccache
