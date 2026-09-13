@@ -150,9 +150,25 @@ jobs:
           # Fail loudly here rather than 40 minutes into a build.
           . configs/upstream.env
           url="https://raw.githubusercontent.com/openwrt/openwrt/${OPENWRT_REPO_BRANCH}/target/linux/mediatek/image/filogic.mk"
-          curl -fsSL "$url" | grep -q "Device/${OPENWRT_PROFILE}" \
-            || { echo "::error::${OPENWRT_PROFILE} is not defined in ${url}"; exit 1; }
-          echo "found Device/${OPENWRT_PROFILE} on ${OPENWRT_REPO_BRANCH}"
+
+          # Fetch into a variable rather than piping into `grep -q`.  With
+          # `set -o pipefail`, `grep -q` exits as soon as it matches, curl is
+          # killed by SIGPIPE, and the pipeline reports failure even though the
+          # match succeeded:
+          #
+          #   curl: (23) Failure writing output to destination
+          #   ##[error]hiveton_h5000m is not defined in ...
+          #
+          # which is what this step did on its first run against the real file.
+          devices="$(curl -fsSL "$url")" \
+            || { echo "::error::could not fetch ${url}"; exit 1; }
+          case "$devices" in
+            *"Device/${OPENWRT_PROFILE}"*)
+              echo "found Device/${OPENWRT_PROFILE} on ${OPENWRT_REPO_BRANCH}" ;;
+            *)
+              echo "::error::${OPENWRT_PROFILE} is not defined in ${url}"
+              exit 1 ;;
+          esac
 
       - name: Verify tree patches still apply upstream
         run: |
