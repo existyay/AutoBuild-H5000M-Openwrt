@@ -260,8 +260,24 @@ git_clone_retry() {
 install_deps() {
 	if command -v apt-get >/dev/null 2>&1; then
 		log "Installing build dependencies with apt-get"
-		sudo apt-get update
-		sudo apt-get install -y --no-install-recommends \
+
+		# Non-interactive, or apt hangs.  `-y` answers apt's own questions but
+		# not debconf's, so a package that wants an answer (tzdata's zone, a
+		# service restart, a config-file conflict) blocks for ever on a runner
+		# with no terminal.  Observed exactly that in CI: the install step sat
+		# in_progress for over thirty minutes on an install that normally takes
+		# five.  The dpkg options then make the remaining decisions instead of
+		# asking: keep existing config files, and do not use a pty.
+		export DEBIAN_FRONTEND=noninteractive
+		export DEBCONF_NONINTERACTIVE_SEEN=true
+		local apt_opts=(
+			-o Dpkg::Options::=--force-confold
+			-o Dpkg::Options::=--force-confdef
+			-o Dpkg::Use-Pty=0
+			-o Acquire::Retries=3
+		)
+		sudo -E apt-get "${apt_opts[@]}" update
+		sudo -E apt-get "${apt_opts[@]}" install -y --no-install-recommends \
 			build-essential ccache python3 python3-pyelftools libncurses-dev libssl-dev \
 			libgmp3-dev libmbedtls-dev zlib1g-dev autoconf automake libtool patch gawk \
 			gettext unzip file wget curl rsync zstd git bison flex gperf haveged \
