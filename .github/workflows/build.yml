@@ -449,6 +449,12 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # Turn Pages on if it is off.  Without this the step dies with
+          # "Get Pages site failed" and — because the job is continue-on-error so
+          # that a hosting problem cannot fail a good build — the firmware ships
+          # pointing at a URL that 404s, which is worse than pointing nowhere.
+          enablement: true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
