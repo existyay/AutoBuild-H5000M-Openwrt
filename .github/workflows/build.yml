@@ -346,6 +346,7 @@ jobs:
           key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
           restore-keys: |
             h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-
+            h5000m-toolchain-
 
       - name: Restore download cache
         uses: actions/cache@v6
