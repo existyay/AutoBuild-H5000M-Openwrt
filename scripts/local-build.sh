@@ -600,6 +600,63 @@ verify_wwand_feed() {
 	return 0
 }
 
+# Give every source file an mtime derived from its own content.
+#
+# OpenWrt decides whether a package needs rebuilding from a hash of each source
+# file's PATH AND MTIME — include/depends.mk:14 is
+#
+#   find_md5 = find ... -printf "%p%T@\n" | sort | $(MKHASH) md5
+#
+# and that hash ends up in the stamp FILENAME:
+#
+#   build_dir/target-*/acl-2.3.2/.prepared_207a5f72c3f1e3ec911e99787f4e10bd_6664...
+#
+# A fresh `git clone` stamps every file with the checkout time, so an identical
+# tree hashes differently on every clone, no cached stamp name ever matches, and
+# `make` rebuilds all 475 packages.  Measured directly: touching a package
+# directory moved its hash from 713e06ce... to 8f65ac22..., and no stamp with the
+# new name existed.  This is why caching the build tree has never helped —
+# including the toolchain cache, which was 996 MB of dead weight.
+#
+# Deriving the mtime from the content fixes both directions: identical content
+# gives an identical mtime so the cached stamp is found, and changed content
+# gives a different mtime so the package rebuilds.  Verified on a throwaway
+# package: stable across re-clones, different when a byte changes, and the
+# original hash returns when the byte is changed back.
+#
+# The timestamp is mapped into 2000-2019 so it stays behind the stamps the build
+# writes, rather than landing in the future where it would look newer than
+# everything.
+normalize_source_mtimes() {
+	[ -d "$SRC" ] || return 0
+
+	local scope=(
+		-not -path '*/.git/*'
+		-not -path "${SRC}/build_dir/*"
+		-not -path "${SRC}/staging_dir/*"
+		-not -path "${SRC}/bin/*"
+		-not -path "${SRC}/tmp/*"
+		-not -path "${SRC}/dl/*"
+	)
+
+	local count
+	count="$(find "$SRC" -type f "${scope[@]}" 2>/dev/null | wc -l)"
+	[ "$count" -gt 0 ] || return 0
+
+	log "Normalizing mtimes of ${count} source files (content-derived, for cache reuse)"
+	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null \
+		| xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 sh -c '
+			for f do
+				h=$(sha1sum "$f" 2>/dev/null | cut -c1-8) || continue
+				[ -n "$h" ] || continue
+				# 2000-01-01 + (hash mod 20 years), always in the past.
+				touch -d "@$(( 946684800 + 16#$h % 630720000 ))" "$f" 2>/dev/null || true
+			done
+		' _ || warn "Some source mtimes could not be normalized"
+
+	return 0
+}
+
 # Restore a previously cached toolchain, if one was handed to us.
 #
 # The CI caches the toolchain because building it is the longest single phase.
@@ -1707,6 +1764,10 @@ main() {
 	install_board_plugins
 	install_theme
 	install_external_packages
+
+	# After every source tree is in place: feeds, board plugins, theme and the
+	# external package clones all add directories that the build hashes.
+	normalize_source_mtimes
 	install_proxy_repos
 	configure_build
 	verify_config
