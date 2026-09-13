@@ -657,6 +657,29 @@ normalize_source_mtimes() {
 	return 0
 }
 
+# Restore the cached build tree, if the CI fetched one from GitHub Packages.
+#
+# This is the part that actually saves hours: build_dir/target-* holds one build
+# directory per package along with the .built stamps, so packages whose sources
+# did not change are simply not rebuilt.  It only works because
+# normalize_source_mtimes runs too — see the note there.
+seed_cached_build_state() {
+	local archive="${BUILD_CACHE_ARCHIVE:-}"
+
+	[ -n "$archive" ] || return 0
+	[ -f "$archive" ] || { log "No cached build state at ${archive}"; return 0; }
+
+	log "Seeding build state from cache ($(du -h "$archive" | cut -f1))"
+	mkdir -p "${SRC}"
+	if tar -I zstd -xf "$archive" -C "${SRC}" 2>/dev/null \
+		|| tar -xf "$archive" -C "${SRC}"; then
+		log "Build cache applied; unchanged packages should be skipped"
+	else
+		warn "Could not unpack the cached build state; everything will rebuild"
+	fi
+	return 0
+}
+
 # Restore a previously cached toolchain, if one was handed to us.
 #
 # The CI caches the toolchain because building it is the longest single phase.
@@ -1758,6 +1781,7 @@ main() {
 
 	prepare_source
 	seed_cached_toolchain
+	seed_cached_build_state
 	prepare_feeds
 	apply_patches
 	install_local_packages

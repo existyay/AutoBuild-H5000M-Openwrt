@@ -75,3 +75,4 @@ Thumbs.db
 .idea/
 skills-lock.json
 .toolchain-cache/
+.buildcache/

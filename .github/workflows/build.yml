@@ -74,6 +74,11 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build firmware
+    permissions:
+      contents: write
+      # Push the build cache to GitHub Packages (ghcr.io).  Public packages are
+      # free and, unlike actions/cache, have no 10 GB per-repository ceiling.
+      packages: write
     # No `needs:` — the checks now live in checks.yml, so each workflow runs on
     # its own.  local-build.sh still runs check_environment and verify_config
     # within the first few minutes of this job, which is where a broken
@@ -176,6 +181,35 @@ jobs:
           key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
           restore-keys: h5000m-dl-
 
+      # The build tree is the expensive part: 40 GB of per-package build
+      # directories and their .built stamps.  actions/cache cannot hold it —
+      # 10 GB per repository — so it goes to ghcr.io, which has no such ceiling
+      # and is free for public packages.  Only worth doing at all because the
+      # source mtimes are normalised: OpenWrt keys its stamps on a hash of path
+      # plus mtime, so without that every stamp would miss on a fresh clone.
+      - name: Install oras
+        uses: oras-project/setup-oras@v2
+
+      - name: Restore build cache from GitHub Packages
+        id: buildcache
+        continue-on-error: true
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image="$(echo "${IMAGE}" | tr '[:upper:]' '[:lower:]')/buildcache"
+          tag="$(sha256sum configs/h5000m.config feeds.conf.default | sha256sum | cut -c1-16)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir -p .buildcache
+          if oras pull "${image}:${tag}" -o .buildcache 2>/dev/null; then
+            echo "restored $(du -sh .buildcache | cut -f1) from ${image}:${tag}"
+          else
+            echo "no build cache at ${image}:${tag} yet — this run will create it"
+          fi
+
       - name: Restore ccache
         uses: actions/cache@v6
         with:
@@ -192,6 +226,7 @@ jobs:
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPRESS: 'true'
           TOOLCHAIN_CACHE_ARCHIVE: ${{ github.workspace }}/.toolchain-cache/toolchain.tar.zst
+          BUILD_CACHE_ARCHIVE: ${{ github.workspace }}/.buildcache/build-cache.tar.zst
           THREADS: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && '8' || '4' }}
           # `format('{0}', <bool>)` renders "true"/"false".  Without it the usual
           # `cond && input || default` fallback would rewrite a boolean input of
@@ -267,6 +302,33 @@ jobs:
             tar -I 'zstd -1' -cf ../.toolchain-cache/toolchain.tar.zst "${dirs[@]}"
           )
           echo "packed $(du -h .toolchain-cache/toolchain.tar.zst | cut -f1)"
+
+      # Pack and push the build tree.  Split into two blobs so a failure to
+      # upload one does not lose the other, and so the layers can be reused
+      # independently by the registry.
+      - name: Save build cache to GitHub Packages
+        if: success()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p .buildcache
+          (
+            cd openwrt
+            shopt -s nullglob
+            dirs=(build_dir/target-* build_dir/hostpkg build_dir/host
+                  staging_dir/target-* staging_dir/hostpkg)
+            keep=()
+            for d in "${dirs[@]}"; do [ -e "$d" ] && keep+=("$d"); done
+            [ "${#keep[@]}" -gt 0 ] || { echo "::warning::nothing to cache"; exit 0; }
+            echo "packing: ${keep[*]}"
+            tar -I 'zstd -1' -cf ../.buildcache/build-cache.tar.zst "${keep[@]}"
+          )
+          size="$(du -h .buildcache/build-cache.tar.zst | cut -f1)"
+          echo "packed ${size}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" \
+            .buildcache/build-cache.tar.zst
+          echo "pushed to ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
 
       - name: Collect build info
         if: always()
