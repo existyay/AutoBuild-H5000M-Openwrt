@@ -1589,7 +1589,18 @@ main() {
 	cd "$ROOT_DIR"
 	: > "$LOG_FILE"
 
-	is_true "$INSTALL_DEPS" && install_deps
+	if is_true "$INSTALL_DEPS"; then
+		install_deps
+		check_environment
+		log "Build dependencies installed."
+		# Stop here.  This used to fall through, so `--install-deps` installed
+		# the packages and then carried on into prepare_source, feeds, patches
+		# and the whole build — which is why the CI step named "Install build
+		# dependencies" was observed running "Building toolchain", and why it
+		# took over thirty minutes instead of three.  A flag that says it
+		# installs dependencies should do exactly that and return.
+		exit 0
+	fi
 	check_environment
 	resolve_modem_stack
 	show_features
