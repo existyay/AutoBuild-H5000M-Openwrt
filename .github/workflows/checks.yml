@@ -1,0 +1,135 @@
+name: 仓库与主机检查
+
+# Mainline OpenWrt (openwrt/openwrt main) for the Hiveton H5000M.
+# Checks live in their own workflow so the badge reflects them and nothing
+# else.  GitHub badges are per workflow, and shields.io's ?job= parameter is
+# ignored — a bogus job name still renders "passing" — so a single workflow with
+# several jobs can only ever show one badge.
+on:
+  schedule:
+    - cron: '0 4 * * 1'   # Mondays 04:00 UTC (Beijing 12:00)
+  push:
+    tags:
+      - 'openwrt-*'
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cheap gate: does this host have what the configuration stage needs, and is
+  # the repository internally consistent?
+  # ---------------------------------------------------------------------------
+  check:
+    name: Repository and host checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install configuration-stage dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gawk unzip wget curl rsync zstd git patch python3
+
+      - name: Check build host
+        run: ./scripts/check-deps.sh
+
+      - name: Shell syntax check
+        run: |
+          for f in scripts/*.sh; do
+            bash -n "$f" || exit 1
+          done
+          echo "all scripts parse"
+
+      - name: ShellCheck (errors only)
+        run: |
+          # -S error: fail on real bugs (unbound variables, bad expansions) but
+          # not on style.  This is the class of bug that `local a="$1" b="${a}"`
+          # is: every argument is expanded before any of them is assigned.
+          shellcheck -S error scripts/*.sh
+
+      - name: Verify target support upstream
+        run: |
+          set -euo pipefail
+          # The whole project rests on openwrt/openwrt carrying this device.
+          # Fail loudly here rather than 40 minutes into a build.
+          . configs/upstream.env
+          url="https://raw.githubusercontent.com/openwrt/openwrt/${OPENWRT_REPO_BRANCH}/target/linux/mediatek/image/filogic.mk"
+
+          # Fetch into a variable rather than piping into `grep -q`.  With
+          # `set -o pipefail`, `grep -q` exits as soon as it matches, curl is
+          # killed by SIGPIPE, and the pipeline reports failure even though the
+          # match succeeded:
+          #
+          #   curl: (23) Failure writing output to destination
+          #   ##[error]hiveton_h5000m is not defined in ...
+          #
+          # which is what this step did on its first run against the real file.
+          devices="$(curl -fsSL "$url")" \
+            || { echo "::error::could not fetch ${url}"; exit 1; }
+          case "$devices" in
+            *"Device/${OPENWRT_PROFILE}"*)
+              echo "found Device/${OPENWRT_PROFILE} on ${OPENWRT_REPO_BRANCH}" ;;
+            *)
+              echo "::error::${OPENWRT_PROFILE} is not defined in ${url}"
+              exit 1 ;;
+          esac
+
+      - name: Verify tree patches still apply upstream
+        run: |
+          set -euo pipefail
+          . configs/upstream.env
+          git clone --depth 1 --branch "${OPENWRT_REPO_BRANCH}" \
+            "${OPENWRT_REPO_URL}" /tmp/upstream-check
+          status=0
+          for p in patches/*.patch; do
+            echo "--- $p"
+            # Absolute: `git -C` changes the working directory, so a relative
+            # patch path is looked up inside the clone instead of this checkout,
+            # and git reports "can't open patch ... No such file or directory"
+            # for a patch that is sitting right there.
+            p="$(realpath "$p")"
+            if git -C /tmp/upstream-check apply --check "$p"; then
+              echo "    applies"
+            elif git -C /tmp/upstream-check apply --reverse --check "$p"; then
+              echo "    already applied upstream"
+            else
+              echo "::error::patch $(basename "$p") no longer applies to ${OPENWRT_REPO_BRANCH}"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Verify the board plugin repositories still exist
+        run: |
+          set -euo pipefail
+          # These three are cloned straight from their upstreams into package/ at
+          # build time, so a rename, a force-push to a different default branch,
+          # or a deletion would only surface deep inside a build.  Check here.
+          fail=0
+          for repo in \
+            FAN789/luci-app-h5000m-fancontrol \
+            FAN789/luci-app-h5000m-netmode \
+            FAN789/luci-app-mt5700m \
+            ddimension/openwrt-repo
+          do
+            code="$(curl -s -o /dev/null -w '%{http_code}' \
+              -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${repo}")"
+            if [ "$code" = "200" ]; then
+              echo "ok   ${repo}"
+            else
+              echo "::error::${repo} is not reachable (HTTP ${code})"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # ---------------------------------------------------------------------------
+  # Configuration coverage: every ENABLE_* profile must still produce a valid
+  # .config.  Independent of the firmware build, so a config regression does not
+  # stop a release.
+  # ---------------------------------------------------------------------------

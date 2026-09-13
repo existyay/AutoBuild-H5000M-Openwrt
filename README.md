@@ -1,5 +1,15 @@
 # AutoBuild-H5000M-Openwrt
 
+[![构建固件](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/build.yml/badge.svg)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/build.yml)
+[![仓库与主机检查](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/checks.yml/badge.svg)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/checks.yml)
+[![配置覆盖测试](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/coverage.yml/badge.svg)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/workflows/coverage.yml)
+[![最新版本](https://img.shields.io/github/v/release/existyay/AutoBuild-H5000M-Openwrt?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC&color=blue)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest)
+[![许可证](https://img.shields.io/github/license/existyay/AutoBuild-H5000M-Openwrt?label=%E8%AE%B8%E5%8F%AF%E8%AF%81)](https://github.com/existyay/AutoBuild-H5000M-Openwrt/blob/master/LICENSE)
+
+> 徽章分属三个独立工作流。GitHub 的徽章是工作流级的，而 shields.io 的 `?job=`
+> 参数并不生效 —— 填入不存在的 job 名仍会显示 passing —— 所以一个工作流里有多个
+> job 时只能显示一个徽章，这才把它们拆开。
+
 Hiveton H5000M（Airpi H5000M，MediaTek MT7987A / MT7992 Filogic 860 + Wi-Fi 7）
 的**主线 OpenWrt** 自动编译工程。
 

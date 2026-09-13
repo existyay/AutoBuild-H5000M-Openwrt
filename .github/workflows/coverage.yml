@@ -1,0 +1,63 @@
+name: 配置覆盖测试
+
+# Mainline OpenWrt (openwrt/openwrt main) for the Hiveton H5000M.
+# Coverage profiles, on their own so they get their own badge.
+on:
+  schedule:
+    - cron: '0 4 * * 1'   # Mondays 04:00 UTC (Beijing 12:00)
+  push:
+    tags:
+      - 'openwrt-*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      coverage_profile_set:
+        description: '覆盖测试档位'
+        type: choice
+        options: [quick, full]
+        default: quick
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Configuration coverage: every ENABLE_* profile must still produce a valid
+  # .config.  Independent of the firmware build, so a config regression does not
+  # stop a release.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Configuration coverage
+    # No `needs:` — this workflow is the coverage run, so there is nothing to
+    # wait for and no switch to consult.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache gawk unzip wget curl rsync zstd git patch python3 \
+            libncurses-dev libssl-dev zlib1g-dev
+
+      - name: Run configuration coverage
+        env:
+          PROFILE_SET: ${{ github.event_name == 'workflow_dispatch' && inputs.coverage_profile_set || 'quick' }}
+        run: ./scripts/coverage-test.sh "${PROFILE_SET}"
+
+      - name: Upload coverage logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-logs
+          path: |
+            coverage-*.log
+            artifacts-coverage/enabled-packages.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # The firmware build.
+  # ---------------------------------------------------------------------------
