@@ -38,7 +38,7 @@ MARKER_OFFLOAD='/etc/h5000m-offload-applied'
 # /etc/h5000m-defaults.conf at build time, so the SSID, key, country and the
 # offload switches are build inputs rather than constants.  The fallbacks keep
 # the script working if that file is ever missing.
-H5000M_WIFI_SSID='H5000M'
+H5000M_WIFI_SSID='openwrt'
 H5000M_WIFI_KEY=''
 H5000M_WIFI_COUNTRY='CN'
 H5000M_WIFI_ENCRYPTION='none'

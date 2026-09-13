@@ -111,7 +111,7 @@ ENABLE_PROXY_REPOS="${ENABLE_PROXY_REPOS:-true}"
 # in and picks a country, which reads as "WiFi does not work" on a 5G CPE.  The
 # defaults below turn both radios on with one shared SSID.  CHANGE THE KEY
 # before flashing anything you care about.
-H5000M_WIFI_SSID="${H5000M_WIFI_SSID:-H5000M}"
+H5000M_WIFI_SSID="${H5000M_WIFI_SSID:-openwrt}"
 # No password by default.  Encryption is `none` and there is no key, so the
 # first boot brings up an open network: a fresh device is reachable without
 # anyone having to know a credential that is printed nowhere.  Owners are
