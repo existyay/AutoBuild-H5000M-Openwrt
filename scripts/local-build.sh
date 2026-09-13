@@ -270,11 +270,20 @@ install_deps() {
 		# asking: keep existing config files, and do not use a pty.
 		export DEBIAN_FRONTEND=noninteractive
 		export DEBCONF_NONINTERACTIVE_SEEN=true
+		# The timeouts matter as much as the non-interactive flags.  Without
+		# them a stalled connection — most often an IPv6 route that accepts the
+		# SYN and then goes nowhere — makes apt wait indefinitely rather than
+		# fail, which is what turned a five-minute install into a 30+ minute
+		# hang in CI.  ForceIPv4 removes the cause; the timeouts bound it if it
+		# happens anyway.
 		local apt_opts=(
 			-o Dpkg::Options::=--force-confold
 			-o Dpkg::Options::=--force-confdef
 			-o Dpkg::Use-Pty=0
 			-o Acquire::Retries=3
+			-o Acquire::ForceIPv4=true
+			-o Acquire::http::Timeout=30
+			-o Acquire::https::Timeout=30
 		)
 		sudo -E apt-get "${apt_opts[@]}" update
 		sudo -E apt-get "${apt_opts[@]}" install -y --no-install-recommends \

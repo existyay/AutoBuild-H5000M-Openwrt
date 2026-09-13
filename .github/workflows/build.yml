@@ -294,6 +294,9 @@ jobs:
 
       - name: Install build dependencies
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
+        # A hang here must not consume the whole 350-minute job budget.  The apt
+        # call has its own timeouts now; this is the backstop.
+        timeout-minutes: 20
         run: ./scripts/local-build.sh --install-deps
 
       - name: Restore download cache
