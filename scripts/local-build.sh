@@ -411,12 +411,30 @@ resolve_modem_stack() {
 
 # ---------------------------------------------------------------- source -----
 prepare_source() {
-	local rev
+	local rev staging
 
 	if [ ! -d "${SRC}/.git" ]; then
 		log "Cloning ${REPO_URL} (${REPO_BRANCH})"
-		git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$SRC" \
+
+		# Clone beside the target and merge, rather than cloning into it.  CI
+		# restores its caches before this runs, and two of them live inside the
+		# source tree — openwrt/dl and openwrt/.ccache — so $SRC already exists
+		# and is not empty.  `git clone` refuses that destination outright:
+		#
+		#   fatal: destination path '.../openwrt' already exists and is not an
+		#   empty directory.
+		#
+		# which is why the very first CI build worked and every later one failed:
+		# only the first had no cache to restore.  Merging keeps the caches.
+		staging="${SRC}.clone.$$"
+		rm -rf "$staging"
+		git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$staging" \
 			|| die "Unable to clone ${REPO_URL}"
+
+		mkdir -p "$SRC"
+		( cd "$staging" && tar -cf - . ) | ( cd "$SRC" && tar -xf - ) \
+			|| die "Could not move the fresh checkout into ${SRC}"
+		rm -rf "$staging"
 	fi
 
 	if [ "${OPENWRT_TRACK}" = "pinned" ]; then
