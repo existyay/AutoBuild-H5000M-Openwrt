@@ -313,17 +313,23 @@ jobs:
           echo "rev=${rev}" >> "$GITHUB_OUTPUT"
           echo "upstream revision: ${rev}"
 
-      # The toolchain is the longest single phase of the build.  Restoring it
-      # skips that entirely.  Keyed on the revision with NO fallback prefix: a
-      # cached toolchain from a different revision would be stale, and a stale
-      # toolchain produces failures that look like anything but a cache problem.
+      # The toolchain is the longest single phase of the build, so it is cached.
+      #
+      # It is cached as an ARCHIVE outside the source tree, not as
+      # openwrt/staging_dir itself: caching that path makes the restore create
+      # openwrt/ before anything else runs, after which prepare_source's
+      # `git clone` dies with "destination path already exists and is not an
+      # empty directory" — which is exactly what happened the first time this
+      # cache was added.  local-build.sh unpacks the archive after the clone.
+      #
+      # Keyed on the revision with NO restore-keys fallback: an older toolchain
+      # would be stale, and a stale toolchain fails in ways that look like
+      # anything but a cache problem.
       - name: Restore toolchain
         id: toolchain
         uses: actions/cache@v6
         with:
-          path: |
-            openwrt/staging_dir/host
-            openwrt/staging_dir/toolchain-*
+          path: .toolchain-cache
           key: h5000m-toolchain-${{ steps.upstream.outputs.rev }}
 
       - name: Restore download cache
@@ -349,6 +355,7 @@ jobs:
           # budget can hold alongside the toolchain and the downloads.
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPRESS: 'true'
+          TOOLCHAIN_CACHE_ARCHIVE: ${{ github.workspace }}/.toolchain-cache/toolchain.tar.zst
           THREADS: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && '8' || '4' }}
           # `format('{0}', <bool>)` renders "true"/"false".  Without it the usual
           # `cond && input || default` fallback would rewrite a boolean input of
@@ -392,6 +399,38 @@ jobs:
           echo "apk repository URL for the firmware: ${H5000M_APK_REPO_URL}"
 
           ./scripts/local-build.sh "${args[@]}"
+
+      # Both halves are required, and this is the part that is easy to get
+      # wrong: OpenWrt's completion markers (.built, .prepared) live in
+      # build_dir/toolchain-*/, NOT in staging_dir/.  Caching only the installed
+      # toolchain would restore the binaries and still rebuild the whole thing,
+      # because make looks at the stamps.
+      #
+      #   build_dir/toolchain-*      ~4.0 GB, the stamps and build trees
+      #   staging_dir/host           ~0.3 GB, host tools and their .prepared
+      #   staging_dir/toolchain-*    ~0.4 GB, the installed cross toolchain
+      #
+      # zstd -1 because this runs on every build and the cache action compresses
+      # again anyway; the goal is a fast archive, not a small one.
+      - name: Pack the toolchain for the cache
+        if: success()
+        run: |
+          set -euo pipefail
+          mkdir -p .toolchain-cache
+          # The globs must expand INSIDE openwrt/.  Expanding them from the
+          # repository root matches nothing, and with nullglob set the patterns
+          # then vanish silently — an earlier version of this step cached only
+          # staging_dir/host, the one literal path in the list, and reported
+          # success while caching almost nothing.
+          (
+            cd openwrt
+            shopt -s nullglob
+            dirs=(build_dir/toolchain-* staging_dir/host staging_dir/toolchain-*)
+            [ "${#dirs[@]}" -gt 0 ] || { echo "::warning::no toolchain to cache"; exit 0; }
+            echo "caching: ${dirs[*]}"
+            tar -I 'zstd -1' -cf ../.toolchain-cache/toolchain.tar.zst "${dirs[@]}"
+          )
+          echo "packed $(du -h .toolchain-cache/toolchain.tar.zst | cut -f1)"
 
       - name: Collect build info
         if: always()

@@ -564,6 +564,35 @@ verify_wwand_feed() {
 	return 0
 }
 
+# Restore a previously cached toolchain, if one was handed to us.
+#
+# The CI caches the toolchain because building it is the longest single phase.
+# It arrives as an archive rather than as openwrt/staging_dir directly: caching
+# that directory makes the cache restore create openwrt/ before anything else
+# runs, and prepare_source's `git clone` then fails with "destination path
+# already exists and is not an empty directory".  Extracting after the clone
+# avoids that, and the archive is keyed on the upstream revision so a stale
+# toolchain is never used.
+seed_cached_toolchain() {
+	local archive="${TOOLCHAIN_CACHE_ARCHIVE:-}"
+
+	[ -n "$archive" ] || return 0
+	[ -f "$archive" ] || { log "No cached toolchain at ${archive}"; return 0; }
+
+	log "Seeding toolchain from cache ($(du -h "$archive" | cut -f1))"
+	# Unpacked at the source root: the archive holds build_dir/toolchain-* as
+	# well as staging_dir/*, and both are needed.  The stamps that make `make`
+	# skip the toolchain live in build_dir, not in staging_dir.
+	mkdir -p "${SRC}"
+	if tar -I zstd -xf "$archive" -C "${SRC}" 2>/dev/null \
+		|| tar -xf "$archive" -C "${SRC}"; then
+		log "Toolchain cache applied; the toolchain build should be skipped"
+	else
+		warn "Could not unpack the cached toolchain; building it from scratch"
+	fi
+	return 0
+}
+
 # --------------------------------------------------------------- patches -----
 apply_patches() {
 	local patch_file name paths applied=0
@@ -1615,6 +1644,7 @@ main() {
 	show_features
 
 	prepare_source
+	seed_cached_toolchain
 	prepare_feeds
 	apply_patches
 	install_local_packages
