@@ -39,9 +39,9 @@ MARKER_OFFLOAD='/etc/h5000m-offload-applied'
 # offload switches are build inputs rather than constants.  The fallbacks keep
 # the script working if that file is ever missing.
 H5000M_WIFI_SSID='H5000M'
-H5000M_WIFI_KEY='77778888'
+H5000M_WIFI_KEY=''
 H5000M_WIFI_COUNTRY='CN'
-H5000M_WIFI_ENCRYPTION='sae-mixed'
+H5000M_WIFI_ENCRYPTION='none'
 H5000M_WIFI_HTMODE_2G='EHT40'
 H5000M_WIFI_HTMODE_5G='EHT160'
 H5000M_FLOW_OFFLOAD='1'
@@ -95,8 +95,18 @@ configure_wireless() {
 		uci -q delete "${iface}.bss_transition"
 		uci -q set "${iface}.ssid=${H5000M_WIFI_SSID}"
 		uci -q set "${iface}.encryption=${H5000M_WIFI_ENCRYPTION}"
-		uci -q set "${iface}.key=${H5000M_WIFI_KEY}"
-		uci -q set "${iface}.ieee80211w=1"
+
+		# An open network has no key and no management-frame protection: leaving
+		# an empty `key` option behind, or asking for PMF on an unencrypted
+		# interface, makes hostapd reject the whole AP configuration rather than
+		# simply ignoring the extra options.
+		if [ "${H5000M_WIFI_ENCRYPTION}" = 'none' ] || [ -z "${H5000M_WIFI_KEY}" ]; then
+			uci -q delete "${iface}.key"
+			uci -q delete "${iface}.ieee80211w"
+		else
+			uci -q set "${iface}.key=${H5000M_WIFI_KEY}"
+			uci -q set "${iface}.ieee80211w=1"
+		fi
 		uci -q set "${iface}.ieee80211k=1"
 		uci -q set "${iface}.disabled=0"
 	done

@@ -78,8 +78,15 @@ ENABLE_ADBLOCK="${ENABLE_ADBLOCK:-true}"
 ENABLE_DOCKERMAN="${ENABLE_DOCKERMAN:-false}"
 ENABLE_NIKKI="${ENABLE_NIKKI:-false}"
 ENABLE_OPENCLASH="${ENABLE_OPENCLASH:-false}"
-ENABLE_MOSDNS="${ENABLE_MOSDNS:-false}"
-ENABLE_HOMEPROXY="${ENABLE_HOMEPROXY:-false}"
+# Built into the image by default, matching the workflow.  A default that
+# differs between a local build and CI produces two different firmwares from the
+# same commit, which is worse than either choice on its own.
+ENABLE_MOSDNS="${ENABLE_MOSDNS:-true}"
+# Built into the image by default.  Unlike the other proxy front-ends, which are
+# compiled into the apk repository as =m so a user can install them later, this
+# one is on: it needs no separate core package to be useful and is the front-end
+# this device is expected to ship with.
+ENABLE_HOMEPROXY="${ENABLE_HOMEPROXY:-true}"
 ENABLE_ADGUARDHOME="${ENABLE_ADGUARDHOME:-false}"
 
 # Build the service packages into the apk repository even when they are not
@@ -105,9 +112,14 @@ ENABLE_PROXY_REPOS="${ENABLE_PROXY_REPOS:-true}"
 # defaults below turn both radios on with one shared SSID.  CHANGE THE KEY
 # before flashing anything you care about.
 H5000M_WIFI_SSID="${H5000M_WIFI_SSID:-H5000M}"
-H5000M_WIFI_KEY="${H5000M_WIFI_KEY:-77778888}"
+# No password by default.  Encryption is `none` and there is no key, so the
+# first boot brings up an open network: a fresh device is reachable without
+# anyone having to know a credential that is printed nowhere.  Owners are
+# expected to set their own; the first-boot script never overwrites an SSID that
+# has already been changed.
+H5000M_WIFI_KEY="${H5000M_WIFI_KEY:-}"
 H5000M_WIFI_COUNTRY="${H5000M_WIFI_COUNTRY:-CN}"
-H5000M_WIFI_ENCRYPTION="${H5000M_WIFI_ENCRYPTION:-sae-mixed}"
+H5000M_WIFI_ENCRYPTION="${H5000M_WIFI_ENCRYPTION:-none}"
 H5000M_WIFI_HTMODE_2G="${H5000M_WIFI_HTMODE_2G:-EHT40}"
 H5000M_WIFI_HTMODE_5G="${H5000M_WIFI_HTMODE_5G:-EHT160}"
 
@@ -384,7 +396,13 @@ show_features() {
 	log "Target        : ${TARGET_BOARD}/${TARGET_SUBTARGET} profile=${TARGET_PROFILE}"
 	log "Board stack   : fancontrol=${ENABLE_FANCONTROL} netmode=${ENABLE_NETMODE} wwand=${ENABLE_WWAND} mt5700m=${ENABLE_MT5700M}"
 	log "UI            : argon=${ENABLE_THEME_ARGON}"
-	log "First boot    : wifi=${H5000M_WIFI_SSID}/${H5000M_WIFI_COUNTRY} offload=sw:${H5000M_FLOW_OFFLOAD}/hw:${H5000M_FLOW_OFFLOAD_HW}"
+	# Say plainly whether the default network is open — "encryption=none" is
+	# easy to miss in a build log and this is a security-relevant default.
+	if [ "${H5000M_WIFI_ENCRYPTION}" = 'none' ]; then
+		log "First boot    : wifi=${H5000M_WIFI_SSID}/${H5000M_WIFI_COUNTRY} OPEN NETWORK (no password) offload=sw:${H5000M_FLOW_OFFLOAD}/hw:${H5000M_FLOW_OFFLOAD_HW}"
+	else
+		log "First boot    : wifi=${H5000M_WIFI_SSID}/${H5000M_WIFI_COUNTRY} ${H5000M_WIFI_ENCRYPTION} offload=sw:${H5000M_FLOW_OFFLOAD}/hw:${H5000M_FLOW_OFFLOAD_HW}"
+	fi
 	log "apk source    : ${H5000M_APK_REPO_URL:-(none)}"
 	log "Optional      : upnp=${ENABLE_UPNP} adblock=${ENABLE_ADBLOCK} dockerman=${ENABLE_DOCKERMAN}"
 	log "Repo extras   : build=${ENABLE_REPO_PACKAGES} (services are =m unless their switch is on)"
@@ -1516,12 +1534,32 @@ build_apk_repository() {
 		return 0
 	fi
 
-	# --allow-untrusted is required because these packages carry no signature
-	# the host trusts.  The index is metadata only; apk still verifies whatever
-	# the target is configured to verify at install time.
+	# Sign the index with this build's key.  Every device built from this tree
+	# trusts the matching public key, because OpenWrt installs it at
+	# /etc/apk/keys/public-key.pem — and that file is byte-identical to
+	# ${SRC}/public-key.pem.  Without this, `apk update` on the device prints
+	#
+	#   WARNING: updating <url>: UNTRUSTED signature
+	#
+	# Verified both ways against the firmware's own apk: unsigned gives that
+	# warning, signed gives "OK: N distinct packages available".
+	#
+	# --allow-untrusted still applies to the .apk files themselves, which carry
+	# no signature this host trusts; the index is what the target verifies.
+	sign_args=()
+	if [ -f "${SRC}/private-key.pem" ]; then
+		sign_args=(--sign-key "${SRC}/private-key.pem")
+	else
+		warn "No ${SRC}/private-key.pem; the index will be unsigned and devices will warn about an untrusted signature"
+	fi
+
 	# shellcheck disable=SC2046
-	"$apk_tool" mkndx --allow-untrusted -o "${repo}/packages.adb" $(find "$repo" -maxdepth 1 -name '*.apk') \
+	"$apk_tool" mkndx --allow-untrusted "${sign_args[@]}" -o "${repo}/packages.adb" $(find "$repo" -maxdepth 1 -name '*.apk') \
 		|| die "apk mkndx failed — the repository would be unreadable"
+
+	if [ "${#sign_args[@]}" -gt 0 ]; then
+		log "Signed ${repo}/packages.adb with the build key"
+	fi
 
 	log "Built apk repository: ${count} packages, $(du -sh "$repo" | cut -f1)"
 	return 0
