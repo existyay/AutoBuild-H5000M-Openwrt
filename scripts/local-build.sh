@@ -1177,10 +1177,18 @@ install_proxy_repos() {
 		https://github.com/immortalwrt/packages.git master \
 		net/3proxy
 
+	# Prune against openwrt-passwall-packages as well as against the official
+	# feeds.  Checking only the feeds left nine names defined twice in the tree —
+	# chinadns-ng, dns2socks, ipt2socks, naiveproxy, shadow-tls,
+	# shadowsocksr-libev, simple-obfs, tcping, v2ray-plugin and xray-plugin all
+	# already come from the PassWall checkout — and a tree with two definitions
+	# of the same package does not build.
 	clone_and_prune luci-app-ssr-plus \
 		https://github.com/fw876/helloworld.git dev \
 		dnsproxy microsocks v2ray-core xray-core mihomo mosdns v2raya \
-		shadowsocks-rust hysteria sing-box
+		shadowsocks-rust hysteria sing-box \
+		chinadns-ng dns2socks ipt2socks naiveproxy shadow-tls \
+		shadowsocksr-libev simple-obfs tcping v2ray-plugin xray-plugin
 
 	clone_and_prune openwrt-nekobox \
 		https://github.com/Thaolga/openwrt-nekobox.git main \
