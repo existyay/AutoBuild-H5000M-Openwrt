@@ -28,8 +28,17 @@ apply_settings() {
 	EOT
 
 	if [ "${bbr}" = '1' ]; then
-		grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null \
-			&& sysctl -qw net.ipv4.tcp_congestion_control=bbr 2>/dev/null
+		# The module has to be loaded before bbr appears in the available list;
+		# without kmod-tcp-bbr installed there is nothing to load and the
+		# sysctl below silently does nothing, which is how the page ended up
+		# reporting "cubic" on a device where BBR had been switched on.
+		modprobe tcp_bbr 2>/dev/null
+		if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+			sysctl -qw net.ipv4.tcp_congestion_control=bbr 2>/dev/null \
+				|| log "could not switch to bbr"
+		else
+			log "bbr is not available (kmod-tcp-bbr missing?); staying on $(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)"
+		fi
 	else
 		sysctl -qw net.ipv4.tcp_congestion_control=cubic 2>/dev/null
 	fi

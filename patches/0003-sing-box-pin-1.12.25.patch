@@ -1,0 +1,33 @@
+From: AutoBuild-H5000M-Openwrt <noreply@example.invalid>
+Subject: [PATCH] sing-box: pin to 1.12.25 so the LuCI front-ends can drive it
+
+sing-box 1.13.0 removed the legacy inbound fields. HomeProxy still emits
+them on master and dev, so the daemon refuses to start with:
+
+  FATAL decode config at /var/run/homeproxy/sing-box-c.json: inbounds[1]:
+  legacy inbound fields are deprecated in sing-box 1.11.0 and removed in 1.13.0
+
+PassWall2 fails the same way. 1.12.25 is the last release accepting them.
+The enabled tags are clash_api and gvisor; 1.12.25 supports both.
+
+---
+ feeds/packages/net/sing-box/Makefile | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/feeds/packages/net/sing-box/Makefile
++++ b/feeds/packages/net/sing-box/Makefile
+@@ -1,12 +1,12 @@
+ include $(TOPDIR)/rules.mk
+ 
+ PKG_NAME:=sing-box
+-PKG_VERSION:=1.14.0
++PKG_VERSION:=1.12.25
+ PKG_RELEASE:=1
+ 
+ PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
+ PKG_SOURCE_URL:=https://codeload.github.com/SagerNet/sing-box/tar.gz/v$(PKG_VERSION)?
+-PKG_HASH:=87baf6852e37941cbe40bdd94bec81c957c88a56751cecd6bbf0e6108bc69398
++PKG_HASH:=881435f07b5ab8170ccf3cb69e87130759521dc0ed1ae4bfeacbe7772a93a158
+ 
+ PKG_LICENSE:=GPL-3.0-or-later
+ PKG_LICENSE_FILES:=LICENSE

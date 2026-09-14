@@ -47,9 +47,12 @@ return view.extend({
 				var rows = [
 					[ '软件流量卸载', on(d.fw_flow_offloading) ],
 					[ '硬件流量卸载', on(d.fw_flow_offloading_hw) ],
-					[ 'PPE 卸载驱动', d.ppe_loaded === '1' ? '已加载' : '未加载' ],
+					[ 'PPE 卸载驱动',
+						d.ppe_state === 'module' ? '模块已加载'
+						: d.ppe_state === 'builtin' ? '内建于内核'
+						: '无法判定' ],
 					[ '拥塞控制', (d.tcp_congestion_control || '未知') + (d.bbr_active === '1' ? '（BBR 生效中）' : '') ],
-					[ '流表条目', d.flow_entries || '0' ]
+					[ '已卸载连接', d.flow_entries || '0' ]
 				];
 				statusBox.replaceChildren(
 					E('h3', {}, '当前状态'),
@@ -61,7 +64,8 @@ return view.extend({
 					})),
 					E('p', { 'class': 'cbi-section-descr' },
 						'这些值来自内核与防火墙的实际状态，而不是配置里的期望值。' +
-						'硬件卸载依赖 PPE 驱动；若它显示未加载，硬件卸载不会生效。')
+						'硬件卸载依赖 PPE。本设备上它内建于内核，因此显示「内建于内核」是正常的；' +
+						'只有在显示「无法判定」且没有任何已卸载连接时，才说明硬件卸载没有生效。')
 				);
 			});
 		};

@@ -7,7 +7,7 @@ PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=AutoBuild-H5000M-Openwrt
 
 LUCI_TITLE:=H5000M network acceleration (mainline flow offload)
-LUCI_DEPENDS:=+luci-base +firewall4
+LUCI_DEPENDS:=+luci-base +firewall4 +kmod-tcp-bbr +kmod-nf-flow +kmod-nft-offload
 LUCI_PKGARCH:=all
 
 define Package/luci-app-h5000m-accel/conffiles
