@@ -1518,6 +1518,15 @@ EOF
 
 	# Repository only, hence the empty switch — see the note on the block above.
 	#
+	# shadowsocks-libev is deliberately NOT here.  It is not a declared
+	# dependency of luci-app-ssr-plus (its INCLUDE_Shadowsocks_NONE_Client
+	# default means no Shadowsocks client is pulled in at all), and in CI it
+	# failed to compile while compiling cleanly here — the parallel build
+	# swallows the sub-make output, so the log showed only "failed to build"
+	# with no reason, and it blocked the entire firmware.  An optional package
+	# that cannot be diagnosed is not worth stopping the build for; SSR-Plus
+	# itself, its LuCI app and the cores it actually needs are unaffected.
+	#
 	# SSR-Plus uses `select`, not `depends`, for the cores its INCLUDE_* options
 	# cover.  A select forces its target to =y even when the selecting package is
 	# only =m, so leaving those options at their aarch64 defaults would install
@@ -1532,7 +1541,7 @@ EOF
 		luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn \
 		chinadns-ng dns2socks dns2tcp ipt2socks redsocks2 shadowsocksr-libev \
 		simple-obfs tcping shadow-tls tuic-client v2ray-plugin xray-plugin \
-		gn lua-neturl naiveproxy shadowsocks-libev \
+		gn lua-neturl naiveproxy \
 		3proxy v2ray-geoip v2ray-geosite \
 		shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir
 
