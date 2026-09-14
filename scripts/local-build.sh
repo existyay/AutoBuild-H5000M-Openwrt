@@ -698,7 +698,23 @@ seed_cached_build_state() {
 	local archive="${BUILD_CACHE_ARCHIVE:-}"
 
 	[ -n "$archive" ] || return 0
-	[ -f "$archive" ] || { log "No cached build state at ${archive}"; return 0; }
+
+	# If the exact path is missing, look around before giving up.  A cache that
+	# is downloaded and then silently unused is the worst outcome: it costs the
+	# transfer and saves nothing.  This is how the oras title bug above went
+	# unnoticed for a whole run.
+	if [ ! -f "$archive" ]; then
+		local found
+		found="$(find "$(dirname "$archive")" "$(dirname "$(dirname "$archive")")" \
+			-name "$(basename "$archive")" -type f 2>/dev/null | head -1)"
+		if [ -n "$found" ]; then
+			warn "Build cache was not at ${archive}; using ${found}"
+			archive="$found"
+		else
+			log "No cached build state at ${archive}"
+			return 0
+		fi
+	fi
 
 	log "Seeding build state from cache ($(du -h "$archive" | cut -f1))"
 	mkdir -p "${SRC}"
@@ -1694,6 +1710,15 @@ build_apk_repository() {
 
 	if [ "${#sign_args[@]}" -gt 0 ]; then
 		log "Signed ${repo}/packages.adb with the build key"
+	fi
+
+	# Ship the public key with the repository.  The publish job runs on a fresh
+	# runner with only this artifact — it has no openwrt/ tree to look in — so
+	# the key has to travel inside the artifact.  Devices flashed before the key
+	# was fixed fetch it from the same place as the index.
+	if [ -f "${SRC}/public-key.pem" ]; then
+		cp -f "${SRC}/public-key.pem" "${repo}/public-key.pem"
+		log "Repository public key: ${repo}/public-key.pem"
 	fi
 
 	log "Built apk repository: ${count} packages, $(du -sh "$repo" | cut -f1)"

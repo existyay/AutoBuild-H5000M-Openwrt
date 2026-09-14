@@ -343,8 +343,16 @@ jobs:
           size="$(du -h .buildcache/build-cache.tar.zst | cut -f1)"
           echo "packed ${size}"
           echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-          oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" \
-            .buildcache/build-cache.tar.zst
+          # Push from INSIDE .buildcache.  oras takes the blob's title from the
+          # path it is given, so `oras push image .buildcache/x.tar.zst` stores
+          # the title as ".buildcache/x.tar.zst" — and `oras pull -o .buildcache`
+          # then writes it to .buildcache/.buildcache/x.tar.zst, where the build
+          # does not look.  That is exactly what happened: 15 GB was pulled on
+          # every run and never used, and the log said
+          #   restored 15G from ...buildcache:cfde3dbe...
+          #   No cached build state at .../.buildcache/build-cache.tar.zst
+          # A bare file name makes the title a bare file name.
+          ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst )
           echo "pushed to ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
 
       - name: Collect build info
@@ -485,18 +493,19 @@ jobs:
       # Publish the public key next to the index.  A device flashed before the
       # key was fixed carries a different key, and copying this one into
       # /etc/apk/keys/ is what lets it trust the repository without reflashing.
-      - name: Publish the signing public key
+      - name: Check the signing public key is published
         run: |
           set -euo pipefail
-          key="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name public-key.pem -path '*staging*' 2>/dev/null | head -1)"
-          if [ -z "${key}" ]; then
-            key="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name public-key.pem 2>/dev/null | head -1)"
-          fi
-          if [ -n "${key}" ]; then
-            cp "${key}" apk-repo/public-key.pem
-            echo "published $(wc -c < apk-repo/public-key.pem) byte public key from ${key}"
+          # The key is produced by the build and uploaded inside the apk-repo
+          # artifact.  This job has no openwrt/ tree, so looking for it here —
+          # which an earlier version did — always failed, and the site went out
+          # without the key while every device kept reporting an untrusted
+          # signature.
+          if [ -s apk-repo/public-key.pem ]; then
+            echo "public key present: $(wc -c < apk-repo/public-key.pem) bytes"
           else
-            echo "::warning::no public-key.pem found; devices flashed earlier cannot be given the new key from here"
+            echo "::error::apk-repo/public-key.pem is missing; devices flashed from an earlier build cannot be given the key and will keep seeing an untrusted signature"
+            exit 1
           fi
 
       - name: Write an index page
