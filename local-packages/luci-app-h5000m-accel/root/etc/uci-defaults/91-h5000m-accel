@@ -1,0 +1,8 @@
+#!/bin/sh
+# Apply once on first boot so the settings in /etc/config take effect even if
+# nobody ever opens the LuCI page.
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+/usr/sbin/h5000m-accel apply >/dev/null 2>&1
+
+exit 0

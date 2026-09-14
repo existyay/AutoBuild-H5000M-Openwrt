@@ -1,0 +1,21 @@
+{
+	"admin/network": {
+		"title": "Network",
+		"order": 30,
+		"action": {
+			"type": "firstchild"
+		}
+	},
+	"admin/network/h5000m_accel": {
+		"title": "Network Acceleration",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "h5000m/accel"
+		},
+		"depends": {
+			"acl": [ "luci-app-h5000m-accel" ],
+			"uci": { "h5000m_accel": true }
+		}
+	}
+}

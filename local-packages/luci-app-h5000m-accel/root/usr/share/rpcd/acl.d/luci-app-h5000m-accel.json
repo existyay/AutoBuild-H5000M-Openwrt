@@ -1,0 +1,19 @@
+{
+	"luci-app-h5000m-accel": {
+		"description": "Grant access to H5000M network acceleration settings",
+		"read": {
+			"file": {
+				"/usr/sbin/h5000m-accel-status": [ "exec" ],
+				"/proc/sys/net/ipv4/tcp_congestion_control": [ "read" ],
+				"/proc/net/nf_conntrack": [ "read" ]
+			},
+			"uci": [ "h5000m_accel", "firewall" ]
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/h5000m-accel": [ "exec" ]
+			},
+			"uci": [ "h5000m_accel" ]
+		}
+	}
+}

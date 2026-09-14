@@ -1177,6 +1177,7 @@ EOF
 
 	cat >> "$out" <<'EOF'
 CONFIG_PACKAGE_h5000m-integration=y
+CONFIG_PACKAGE_luci-app-h5000m-accel=y
 EOF
 }
 
@@ -1389,7 +1390,7 @@ build_required_packages() {
 	is_true "$ENABLE_WWAND"      && REQUIRED_PACKAGES+=(wwand wwand-qmi wwand-ncm wwand-mbim luci-app-wwand luci-proto-wwand)
 	is_true "$ENABLE_MT5700M"    && REQUIRED_PACKAGES+=(luci-app-mt5700m ubus-at-daemon sms-tool_q)
 	is_true "$ENABLE_THEME_ARGON" && REQUIRED_PACKAGES+=(luci-theme-argon luci-app-argon-config)
-	REQUIRED_PACKAGES+=(h5000m-integration)
+	REQUIRED_PACKAGES+=(h5000m-integration luci-app-h5000m-accel)
 
 	# Optional switches are verified too, and for a specific reason: `make
 	# defconfig` exits 0 even when a requested package does not exist, it just

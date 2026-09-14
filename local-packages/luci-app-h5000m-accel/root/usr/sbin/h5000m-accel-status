@@ -1,0 +1,40 @@
+#!/bin/sh
+# Report what the kernel is actually doing, not what the config asks for.
+# The LuCI page shows these values, so a setting that failed to take effect is
+# visible instead of merely assumed.
+
+conf_get() { uci -q get "h5000m_accel.settings.$1" 2>/dev/null || echo ''; }
+
+fw_get() {
+	uci -q get "firewall.@defaults[0].$1" 2>/dev/null || echo ''
+}
+
+echo "flow_offload=$(conf_get flow_offload)"
+echo "flow_offload_hw=$(conf_get flow_offload_hw)"
+echo "bbr=$(conf_get bbr)"
+
+# Effective firewall state — this is what decides whether offload happens.
+echo "fw_flow_offloading=$(fw_get flow_offloading)"
+echo "fw_flow_offloading_hw=$(fw_get flow_offloading_hw)"
+
+# Effective congestion control.
+cc="$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo unknown)"
+echo "tcp_congestion_control=${cc}"
+case "${cc}" in
+	bbr) echo "bbr_active=1" ;;
+	*)   echo "bbr_active=0" ;;
+esac
+
+# The PPE driver behind hardware offload.  Its absence is why hardware offload
+# does nothing on a kernel that does not provide it.
+if grep -qE '^mtk_ppe|^mtk_eth' /proc/modules 2>/dev/null || [ -d /sys/module/mtk_ppe ]; then
+	echo "ppe_loaded=1"
+else
+	echo "ppe_loaded=0"
+fi
+
+# Flowtable entries in use — the honest indicator of whether offload is running.
+entries="$(cat /proc/net/nf_conntrack 2>/dev/null | grep -c 'FLOW' 2>/dev/null || echo 0)"
+echo "flow_entries=${entries}"
+
+exit 0
