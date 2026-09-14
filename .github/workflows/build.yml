@@ -105,6 +105,27 @@ jobs:
           # occupies is disk this build cannot spare.
           swap-storage: true
 
+      # Bind-mount the workspace at a short path and build from there.
+      #
+      # OpenWrt's rules.mk exports TMPDIR into the build tree, and Python's
+      # multiprocessing.forkserver puts its AF_UNIX socket in TMPDIR.  Unix
+      # socket paths are limited to 108 bytes.  The CI workspace is
+      # /home/runner/work/<repo>/<repo>/openwrt — the repository name repeats, so
+      # the prefix alone is 75 characters — and the socket path reached 145.  The
+      # Rust host build died with "OSError: AF_UNIX path too long" for that
+      # reason alone, and only in CI: a local checkout sits at a much shorter
+      # path.  rules.mk exports TMPDIR itself, so setting it in the environment
+      # does not help; the paths have to be short.
+      - name: Build from a short path
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /o
+          sudo mount --bind "${GITHUB_WORKSPACE}" /o
+          ln -sfn /o "${GITHUB_WORKSPACE}/short-path"
+          echo "workspace is now reachable at /o ($(echo -n /o/openwrt | wc -c) chars for the source tree)"
+          ls /o | head -5
+
       - name: Report disk space
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
         run: |
@@ -249,6 +270,9 @@ jobs:
           fi
 
       - name: Build
+        # Run from /o, the short bind mount created above.  The script derives
+        # everything from its own location, so this is what shortens $SRC.
+        working-directory: /o
         env:
           # Keep ccache from growing past what the repository's 10 GB cache
           # budget can hold alongside the toolchain and the downloads.
@@ -387,6 +411,7 @@ jobs:
         if: failure()
         continue-on-error: true
         timeout-minutes: 25
+        working-directory: /o
         run: |
           set -uo pipefail
           echo "=== last 200 lines of the build log ==="

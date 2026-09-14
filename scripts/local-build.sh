@@ -1338,6 +1338,20 @@ CONFIG_PACKAGE_h5000m-integration=y
 CONFIG_PACKAGE_luci-app-h5000m-accel=y
 CONFIG_PACKAGE_kmod-tcp-bbr=y
 
+# nftables fullcone expression — the KERNEL half only, and =m so it is built and
+# available from the repository but not installed.
+#
+# Not installed on purpose: the module alone changes nothing.  A rule using
+# `fullcone` needs nftables userspace to know the expression, and firewall4 has
+# no option that emits one.  Shipping a loaded module for a feature that cannot
+# be switched on would only make the state confusing.
+#
+# It is built so it stays verified against the kernel: the upstream source is
+# from 2022, written against the pre-rework nftables expression API, and needed
+# two signature fixes for 6.18 — dump gained `bool reset`, validate lost its
+# `data` argument.
+CONFIG_PACKAGE_kmod-nft-fullcone=m
+
 # Transparent-proxy nftables modules.  PassWall2 warns without them:
 #   Warning: nftables transparent proxy is missing basic dependency
 #   kmod-nft-socket!

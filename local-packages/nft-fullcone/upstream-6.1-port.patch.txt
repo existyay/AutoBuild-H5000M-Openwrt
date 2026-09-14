@@ -1,0 +1,26 @@
+From: AutoBuild-H5000M-Openwrt <noreply@example.invalid>
+Subject: use get_random_u32(), which replaced prandom_u32() in 6.1
+
+prandom_u32() was removed; get_random_u32() is the drop-in replacement.  This
+is the only change upstream's own 010-fix-kernel-6.1.patch makes, and it is the
+whole of the 6.1 port.
+--- a/nf_nat_fullcone.c
++++ b/nf_nat_fullcone.c
+@@ -854,7 +854,7 @@ static uint16_t find_appropriate_port6(st
+ 		/* for now we do the same thing for both --random and --random-fully */
+ 
+ 		/* select a random starting point */
+-		start = (uint16_t) (prandom_u32() % (u32) range_size);
++		start = (uint16_t) (get_random_u32() % (u32) range_size);
+ 	} else {
+ 
+ 		if ((original_port >= min && original_port <= min + range_size - 1)
+@@ -927,7 +927,7 @@ static uint16_t find_appropriate_port(st
+ 		/* for now we do the same thing for both --random and --random-fully */
+ 
+ 		/* select a random starting point */
+-		start = (uint16_t) (prandom_u32() % (u32) range_size);
++		start = (uint16_t) (get_random_u32() % (u32) range_size);
+ 	} else {
+ 
+ 		if ((original_port >= min && original_port <= min + range_size - 1)
