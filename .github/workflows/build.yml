@@ -206,6 +206,19 @@ jobs:
           mkdir -p .buildcache
           if oras pull "${image}:${tag}" -o .buildcache 2>/dev/null; then
             echo "restored $(du -sh .buildcache | cut -f1) from ${image}:${tag}"
+            # Verify before the build trusts it.  A cache that is present but
+            # damaged is worse than no cache at all: it costs the transfer and
+            # then fails late.
+            if [ -f .buildcache/build-cache.sha256 ]; then
+              if ( cd .buildcache && sha256sum -c build-cache.sha256 ); then
+                echo "cache checksum OK"
+              else
+                echo "::warning::build cache checksum FAILED — discarding it and building from scratch"
+                rm -rf .buildcache
+              fi
+            else
+              echo "::warning::no checksum sidecar; cannot verify the build cache"
+            fi
           else
             echo "no build cache at ${image}:${tag} yet — this run will create it"
           fi
@@ -352,7 +365,12 @@ jobs:
           #   restored 15G from ...buildcache:cfde3dbe...
           #   No cached build state at .../.buildcache/build-cache.tar.zst
           # A bare file name makes the title a bare file name.
-          ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst )
+          # A sidecar checksum, pushed alongside.  Without it a truncated
+          # transfer is only discovered after six minutes of tar failing with
+          # "premature end", and the run silently rebuilds everything: 15 GB
+          # moved for nothing and no indication of why.
+          ( cd .buildcache && sha256sum build-cache.tar.zst > build-cache.sha256 )
+          ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst build-cache.sha256 )
           echo "pushed to ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
 
       - name: Collect build info

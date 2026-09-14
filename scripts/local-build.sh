@@ -717,9 +717,20 @@ seed_cached_build_state() {
 	fi
 
 	log "Seeding build state from cache ($(du -h "$archive" | cut -f1))"
+
+	# Test the compressed stream before spending minutes unpacking it into the
+	# tree.  A truncated archive fails with "premature end" part-way through,
+	# which leaves a half-populated build_dir behind and makes the real cause
+	# hard to see.
+	if command -v zstd >/dev/null 2>&1; then
+		if ! zstd -t "$archive" >/dev/null 2>&1; then
+			warn "Cached build state at ${archive} is truncated or corrupt (zstd -t failed); ignoring it"
+			return 0
+		fi
+	fi
+
 	mkdir -p "${SRC}"
-	if tar -I zstd -xf "$archive" -C "${SRC}" 2>/dev/null \
-		|| tar -xf "$archive" -C "${SRC}"; then
+	if tar -I zstd -xf "$archive" -C "${SRC}"; then
 		log "Build cache applied; unchanged packages should be skipped"
 	else
 		warn "Could not unpack the cached build state; everything will rebuild"
