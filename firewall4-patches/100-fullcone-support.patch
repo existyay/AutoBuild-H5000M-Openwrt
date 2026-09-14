@@ -1,0 +1,24 @@
+--- a/root/usr/share/firewall4/templates/zone-masq.uc
++++ b/root/usr/share/firewall4/templates/zone-masq.uc
+@@ -10,4 +10,8 @@
+ 	{{ fw4.ipproto(family) }} daddr != {{ fw4.set(map(daddrs[1], fw4.cidr)) }} {%+ endif -%}
+ {%+ for (let a in (daddrs ? daddrs[2] : [])): -%}
+ 	{{ fw4.ipproto(family) }} daddr & {{ a.mask }} {{ a.invert ? '!=' : '==' }} {{ a.addr }} {%+ endfor -%}
++{% if (fw4.default_option("fullcone")): %}
++fullcone comment "!fw4: Fullcone NAT {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
++{% else: %}
+ masquerade comment "!fw4: Masquerade {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
++{% endif %}
+--- a/root/usr/share/firewall4/templates/ruleset.uc
++++ b/root/usr/share/firewall4/templates/ruleset.uc
+@@ -293,6 +293,10 @@
+ 
+ 	chain dstnat {
+ 		type nat hook prerouting priority dstnat; policy accept;
++{% if (fw4.default_option("fullcone")): %}
++		meta nfproto ipv4 fullcone comment "!fw4: Fullcone NAT inbound restore (IPv4)"
++		meta nfproto ipv6 fullcone comment "!fw4: Fullcone NAT inbound restore (IPv6)"
++{% endif %}
+ {% fw4.includes('chain-prepend', 'dstnat') %}
+ {% for (let zone in fw4.zones()): %}
+ {%  if (zone.dflags.dnat): %}

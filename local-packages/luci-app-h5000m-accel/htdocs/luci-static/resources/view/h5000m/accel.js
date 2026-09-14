@@ -68,7 +68,10 @@ return view.extend({
 							: '（内核未提供 BBR）') ],
 					[ '已卸载连接', d.flow_entries || '0' ],
 					[ '流表模块', (d.fw4_offload_kmod === '2' || d.fw4_offload_kmod === '1')
-						? '已加载' : '未加载' ]
+						? '已加载' : '未加载' ],
+					[ 'Full-cone NAT', d.fullcone === '1'
+						? '模块已加载，防火墙已按 fullcone 生成规则'
+						: '模块未加载 —— 开关打开也不会生效' ]
 				];
 
 				var notes = [
@@ -125,6 +128,16 @@ return view.extend({
 		o.rmempty = false;
 		o.default = '1';
 		o.depends('profile', 'custom');
+
+		o = s.option(form.Flag, 'fullcone', 'Full-cone NAT',
+			'用 fullcone 取代 masquerade，并在 dstnat 链加入站恢复规则。' +
+			'<br />UDP 的 NAT 类型变为 Full Cone，对 P2P、部分游戏和语音联机有帮助。' +
+			'<br /><strong>这需要三样东西同时存在</strong>：内核模块 nft_fullcone、' +
+			'打过 fullcone 补丁的 nftables 与 libnftnl、以及打过补丁的 firewall4。' +
+			'本固件三者都已包含；若状态栏显示模块未加载，则开关不会产生任何效果。' +
+			'<br />其它协议不受影响，行为与 masquerade 相同。');
+		o.rmempty = false;
+		o.default = '1';
 
 		o = s.option(form.Flag, 'bbr', 'BBR 拥塞控制',
 			'改善高丢包、长肥管道下的 TCP 吞吐。内核未提供 BBR 时会自动跳过并记录日志。');

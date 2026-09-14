@@ -1183,11 +1183,22 @@ fix_mirror_hashes() {
 # level: nftables' source is downloaded into build_dir at build time, so it is
 # not part of the checked-out tree that apply_patches() operates on.
 install_nftables_patches() {
+	local fwdir="${SRC}/package/network/config/firewall4/patches"
 	local libdir="${SRC}/package/libs/libnftnl/patches"
 	local dir="${SRC}/package/network/utils/nftables/patches"
 	local f
 
 	[ -d "$dir" ] || { warn "No nftables patches directory; fullcone will not be available to nft"; return 0; }
+
+	# firewall4 last: it is the layer that actually emits the rules.  Without it
+	# nft knows the `fullcone` keyword and nothing ever writes one.
+	mkdir -p "$fwdir"
+	shopt -s nullglob
+	for f in "${ROOT_DIR}"/firewall4-patches/*.patch; do
+		cp -f "$f" "${fwdir}/$(basename "$f")"
+		log "  installed firewall4 patch $(basename "$f")"
+	done
+	shopt -u nullglob
 
 	# libnftnl first: it is the layer beneath.  nftables' own fullcone code
 	# refers to NFTNL_EXPR_FULLCONE_* constants, and without them the nftables
