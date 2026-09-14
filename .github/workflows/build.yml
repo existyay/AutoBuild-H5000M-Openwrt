@@ -345,7 +345,13 @@ jobs:
           (
             cd openwrt
             shopt -s nullglob
-            dirs=(build_dir/target-* build_dir/hostpkg build_dir/host
+            # NOT build_dir/host: rust's HOST_BUILD_DIR is
+            # build_dir/host/rustc-<ver>-src, and restoring a host build tree
+            # that was captured at a different moment is the most likely reason
+            # `package/feeds/packages/rust [host]` began failing 72 seconds into
+            # the build — far too fast for LLVM to have been compiling.  The
+            # host tools are cheap next to that risk.
+            dirs=(build_dir/target-* build_dir/hostpkg
                   staging_dir/target-* staging_dir/hostpkg)
             keep=()
             for d in "${dirs[@]}"; do [ -e "$d" ] && keep+=("$d"); done
@@ -372,6 +378,24 @@ jobs:
           ( cd .buildcache && sha256sum build-cache.tar.zst > build-cache.sha256 )
           ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst build-cache.sha256 )
           echo "pushed to ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
+
+      # OpenWrt's parallel build swallows the sub-make output, so a failure
+      # leaves only "package/X failed to build" with no reason — which is all
+      # the rust host failure ever showed.  Re-run the failing target serially
+      # with V=s so the actual error is in the log.
+      - name: Diagnose a failed build
+        if: failure()
+        continue-on-error: true
+        timeout-minutes: 25
+        run: |
+          set -uo pipefail
+          echo "=== last 200 lines of the build log ==="
+          tail -200 build.log 2>/dev/null || echo "(no build.log)"
+          for pkg in package/feeds/packages/rust/host/compile; do
+            echo
+            echo "=== re-running ${pkg} with V=s ==="
+            timeout 1200 make -C openwrt -j1 "${pkg}" V=s 2>&1 | tail -120
+          done
 
       - name: Collect build info
         if: always()
