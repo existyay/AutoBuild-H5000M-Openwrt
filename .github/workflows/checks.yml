@@ -85,6 +85,7 @@ jobs:
           git clone --depth 1 --branch "${OPENWRT_REPO_BRANCH}" \
             "${OPENWRT_REPO_URL}" /tmp/upstream-check
           status=0
+          checked=0
           for p in patches/*.patch; do
             echo "--- $p"
             # Absolute: `git -C` changes the working directory, so a relative
@@ -92,6 +93,27 @@ jobs:
             # and git reports "can't open patch ... No such file or directory"
             # for a patch that is sitting right there.
             p="$(realpath "$p")"
+
+            # Only patches against the OpenWrt tree itself can be checked here.
+            # Some of ours target feed packages — 0003-sing-box-pin targets
+            # feeds/packages/net/sing-box/Makefile — and this job clones the tree
+            # without installing any feed, so those files do not exist and the
+            # check reported "no longer applies to main" for a patch that was
+            # perfectly fine.  Skip them, and say so, rather than fail.
+            missing=0
+            while IFS= read -r target; do
+              case "$target" in
+                feeds/*|package/feeds/*)
+                  echo "    skipped: $target lives in a feed, which this check does not install"
+                  missing=1
+                  break
+                  ;;
+              esac
+            done < <(git apply --numstat "$p" 2>/dev/null | awk '{print $3}')
+
+            [ "$missing" = "1" ] && continue
+
+            checked=$((checked + 1))
             if git -C /tmp/upstream-check apply --check "$p"; then
               echo "    applies"
             elif git -C /tmp/upstream-check apply --reverse --check "$p"; then
@@ -101,6 +123,7 @@ jobs:
               status=1
             fi
           done
+          echo "checked ${checked} tree patch(es)"
           exit $status
 
       - name: Verify the board plugin repositories still exist
