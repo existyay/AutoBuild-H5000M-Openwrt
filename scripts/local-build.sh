@@ -87,6 +87,13 @@ ENABLE_MOSDNS="${ENABLE_MOSDNS:-true}"
 # one is on: it needs no separate core package to be useful and is the front-end
 # this device is expected to ship with.
 ENABLE_HOMEPROXY="${ENABLE_HOMEPROXY:-true}"
+
+# Mesh.  lean's luci-app-easymesh is not the OpenWrt easymesh daemon — mainline
+# dropped that package.  Its LUCI_DEPENDS are kmod-cfg80211, batctl-default,
+# kmod-batman-adv and dawn, i.e. a DAWN + batman-adv mesh, all of which ARE in
+# the official feeds.  So this is a front-end to software mainline already has,
+# not a port of something removed.
+ENABLE_EASYMESH="${ENABLE_EASYMESH:-true}"
 ENABLE_ADGUARDHOME="${ENABLE_ADGUARDHOME:-false}"
 
 # Build the service packages into the apk repository even when they are not
@@ -955,6 +962,14 @@ install_board_plugins() {
 			|| failed=1
 	fi
 
+	if is_true "$ENABLE_EASYMESH"; then
+		# Only this one directory is wanted out of coolsnowwolf/luci.
+		clone_only_paths luci-easymesh \
+			https://github.com/coolsnowwolf/luci.git master \
+			applications/luci-app-easymesh \
+			|| failed=1
+	fi
+
 	if is_true "$ENABLE_MT5700M"; then
 		clone_external luci-app-mt5700m \
 			https://github.com/FAN789/luci-app-mt5700m.git main \
@@ -1065,6 +1080,56 @@ clone_and_prune() {
 	return 0
 }
 
+# Clone a monorepo and keep only the named paths, which are relative to the
+# repository root.
+#
+# luci-app-ssr-plus lives in fw876/helloworld and luci-app-easymesh only in
+# coolsnowwolf/luci; neither is published as a standalone repository, and both
+# carry far more than we want.
+#
+# Paths, not bare directory names: coolsnowwolf/luci keeps its apps under
+# applications/, so matching on the top-level name alone deleted applications/
+# entirely and left a tree with no package in it at all — which is what the
+# first version did, silently, because pruning files is not something it does.
+clone_only_paths() {
+	local name="$1" url="$2" branch="$3"; shift 3
+	local dest="${SRC}/package/${name}"
+	local entry sub keep found
+
+	install_optional_external "$name" "$name" "$url" "$branch" || return 1
+
+	shopt -s nullglob
+
+	# Level one: which top-level directories survive at all.
+	for entry in "${dest}"/*; do
+		[ -d "$entry" ] || continue
+		found=0
+		for keep in "$@"; do
+			[ "${keep%%/*}" = "$(basename "$entry")" ] && found=1
+		done
+		[ "$found" -eq 1 ] || rm -rf "$entry"
+	done
+
+	# Level two: inside each survivor, drop the siblings that were not asked for.
+	for keep in "$@"; do
+		case "$keep" in
+			*/*) ;;
+			*) continue ;;
+		esac
+		local parent="${dest}/${keep%%/*}" want="${keep#*/}"
+		[ -d "$parent" ] || continue
+		for sub in "${parent}"/*; do
+			[ -d "$sub" ] || continue
+			[ "$(basename "$sub")" = "$want" ] || rm -rf "$sub"
+		done
+	done
+
+	shopt -u nullglob
+
+	log "  kept in ${name}: $*"
+	return 0
+}
+
 # Proxy frontends, plus the cores the official feeds do not carry.  Everything is
 # emitted as `=m`: built into the apk repository, not installed into the image, so
 # a user picks with `apk add` and the frontend pulls its backend and helpers in.
@@ -1097,6 +1162,18 @@ install_proxy_repos() {
 	# official feed; mihomo would duplicate fcshark's.  Keep one of each defined
 	# in the tree — fcshark's mihomo, the official sing-box — and let NeKoBox
 	# depend on them.
+	# SSR-Plus.  It is Lua-based, so mainline LuCI needs luci-compat for the page
+	# to appear at all; that is emitted below alongside the app.
+	#
+	# fw876/helloworld is the canonical source (lean uses it too — there is no
+	# luci-app-ssr-plus in coolsnowwolf/lede or coolsnowwolf/luci).  The
+	# repository is a monorepo of two dozen cores, several of which the official
+	# feeds already provide, so the duplicates are pruned by name.
+	clone_and_prune luci-app-ssr-plus \
+		https://github.com/fw876/helloworld.git dev \
+		dnsproxy microsocks v2ray-core xray-core mihomo mosdns v2raya \
+		shadowsocks-rust hysteria sing-box
+
 	clone_and_prune openwrt-nekobox \
 		https://github.com/Thaolga/openwrt-nekobox.git main \
 		sing-box mihomo
@@ -1206,6 +1283,14 @@ EOF
 CONFIG_PACKAGE_h5000m-integration=y
 CONFIG_PACKAGE_luci-app-h5000m-accel=y
 CONFIG_PACKAGE_kmod-tcp-bbr=y
+
+# Transparent-proxy nftables modules.  PassWall2 warns without them:
+#   Warning: nftables transparent proxy is missing basic dependency
+#   kmod-nft-socket!
+# and the redirect/tproxy rules it installs do nothing.  kmod-nft-nat and
+# kmod-nft-core are already pulled in by firewall4.
+CONFIG_PACKAGE_kmod-nft-socket=y
+CONFIG_PACKAGE_kmod-nft-tproxy=y
 EOF
 }
 
@@ -1298,6 +1383,20 @@ EOF
 	# so the two do not collide.
 	# ip-full conflicts with the ip-tiny the base image pulls in.
 	printf 'CONFIG_PACKAGE_ip-tiny=n\n' >> "$out"
+
+	# Mesh: the front-end plus the DAWN / batman-adv stack it drives.  DAWN is a
+	# decentralised WiFi controller and batman-adv carries the mesh links; both
+	# are in the official feeds.  luci-compat is what lets the Lua-era pages
+	# (this one and SSR-Plus) render at all under mainline's JS LuCI.
+	emit_service "$ENABLE_EASYMESH" \
+		luci-app-easymesh dawn batctl-default kmod-batman-adv kmod-cfg80211 \
+		luci-compat
+
+	emit_service "$ENABLE_REPO_PACKAGES" \
+		luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn \
+		chinadns-ng dns2socks dns2tcp ipt2socks redsocks2 shadowsocksr-libev \
+		simple-obfs tcping shadow-tls tuic-client v2ray-plugin xray-plugin \
+		gn lua-neturl naiveproxy shadowsocks-libev
 
 	emit_service "$ENABLE_HOMEPROXY" \
 		luci-app-homeproxy sing-box kmod-nft-tproxy \
@@ -1418,7 +1517,9 @@ build_required_packages() {
 	is_true "$ENABLE_WWAND"      && REQUIRED_PACKAGES+=(wwand wwand-qmi wwand-ncm wwand-mbim luci-app-wwand luci-proto-wwand)
 	is_true "$ENABLE_MT5700M"    && REQUIRED_PACKAGES+=(luci-app-mt5700m ubus-at-daemon sms-tool_q)
 	is_true "$ENABLE_THEME_ARGON" && REQUIRED_PACKAGES+=(luci-theme-argon luci-app-argon-config)
-	REQUIRED_PACKAGES+=(h5000m-integration luci-app-h5000m-accel kmod-tcp-bbr)
+	REQUIRED_PACKAGES+=(h5000m-integration luci-app-h5000m-accel kmod-tcp-bbr
+		kmod-nft-socket kmod-nft-tproxy)
+	is_true "$ENABLE_REPO_PACKAGES" && REQUIRED_PACKAGES+=(luci-app-ssr-plus chinadns-ng)
 
 	# Optional switches are verified too, and for a specific reason: `make
 	# defconfig` exits 0 even when a requested package does not exist, it just
@@ -1435,6 +1536,9 @@ build_required_packages() {
 	# configuration that drops them builds a HomeProxy that cannot start, and
 	# `make defconfig` drops requests silently rather than failing.
 	is_true "$ENABLE_HOMEPROXY"   && REQUIRED_PACKAGES+=(luci-app-homeproxy ucode-mod-math ip-full kmod-tun)
+	# Mesh and SSR-Plus.  Both are Lua-era LuCI apps, so luci-compat is not
+	# optional: without it the pages do not render under mainline's JS LuCI.
+	is_true "$ENABLE_EASYMESH"    && REQUIRED_PACKAGES+=(luci-app-easymesh dawn batctl-default kmod-batman-adv luci-compat)
 	is_true "$ENABLE_ADGUARDHOME" && REQUIRED_PACKAGES+=(adguardhome luci-app-adguardhome)
 	is_true "$ENABLE_UPNP"        && REQUIRED_PACKAGES+=(luci-app-upnp miniupnpd-nftables)
 	is_true "$ENABLE_ADBLOCK"     && REQUIRED_PACKAGES+=(adblock luci-app-adblock)

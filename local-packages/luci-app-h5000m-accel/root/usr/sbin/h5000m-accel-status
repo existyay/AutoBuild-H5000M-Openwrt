@@ -32,10 +32,16 @@ esac
 #
 # Three states, because "unknown" is the honest answer when the kernel does not
 # say: module, builtin, unknown.
+#
+# The platform driver is named "mtk_soc_eth" (mtk_eth_soc.c: .name =
+# "mtk_soc_eth"), which does NOT contain the substring "mtk_eth" — an earlier
+# pattern of 'mtk_ppe|mtk_eth|mtk_wed' therefore never matched and the page
+# reported "cannot determine" on a device where the driver was present all
+# along.
 ppe='unknown'
 if [ -d /sys/module/mtk_ppe ] || grep -q '^mtk_ppe' /proc/modules 2>/dev/null; then
 	ppe='module'
-elif ls /sys/bus/platform/drivers/ 2>/dev/null | grep -qiE 'mtk_ppe|mtk_eth|mtk_wed'; then
+elif ls /sys/bus/platform/drivers/ /sys/bus/platform/devices/ 2>/dev/null | grep -qiE 'mtk_ppe|mtk_soc_eth|mtk_wed'; then
 	ppe='builtin'
 fi
 echo "ppe_state=${ppe}"
