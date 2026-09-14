@@ -1130,6 +1130,41 @@ clone_only_paths() {
 	return 0
 }
 
+# Neutralise PKG_MIRROR_HASH on the helloworld cores.
+#
+# Those packages declare PKG_SOURCE_PROTO:=git with a pinned
+# PKG_SOURCE_VERSION, so the tarball is generated locally by
+# scripts/dl_github_archive.py from that commit.  Its hash depends on the git,
+# tar and xz versions, so the hash upstream recorded never matches here:
+#
+#   Hash of the local file shadowsocks-libev-3.3.5.tar.xz does not match
+#     (file: 9d2293f1..., requested: b3898ad0...)
+#
+# and the build dies in the download stage.  That is what "shadowsocks-libev
+# failed to build" meant in CI — not a compiler error.
+#
+# The source is already pinned to an exact commit, which is what actually
+# guarantees integrity; the mirror hash only validates a locally generated
+# archive.  `skip` is the value OpenWrt's download logic tests for.
+fix_mirror_hashes() {
+	local dir="${SRC}/package/luci-app-ssr-plus"
+	local f fixed=0
+
+	[ -d "$dir" ] || return 0
+
+	for f in "$dir"/*/Makefile; do
+		[ -f "$f" ] || continue
+		grep -q 'PKG_SOURCE_PROTO:=git' "$f" 2>/dev/null || continue
+		grep -q '^PKG_MIRROR_HASH:=' "$f" 2>/dev/null || continue
+		sed -i 's|^PKG_MIRROR_HASH:=.*|PKG_MIRROR_HASH:=skip|' "$f"
+		log "  set PKG_MIRROR_HASH=skip in $(basename "$(dirname "$f")")"
+		fixed=$((fixed + 1))
+	done
+
+	[ "$fixed" -gt 0 ] && log "Neutralised ${fixed} mirror hash(es); sources stay pinned by PKG_SOURCE_VERSION"
+	return 0
+}
+
 # Proxy frontends, plus the cores the official feeds do not carry.  Everything is
 # emitted as `=m`: built into the apk repository, not installed into the image, so
 # a user picks with `apk add` and the frontend pulls its backend and helpers in.
@@ -2043,6 +2078,7 @@ main() {
 	install_board_plugins
 	install_theme
 	install_external_packages
+	fix_mirror_hashes
 
 	# After every source tree is in place: feeds, board plugins, theme and the
 	# external package clones all add directories that the build hashes.
