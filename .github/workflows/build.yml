@@ -219,6 +219,22 @@ jobs:
           key: h5000m-ccache-${{ github.run_id }}
           restore-keys: h5000m-ccache-
 
+      # The same signing key for every build.  secrets cannot be used in an
+      # `if:`, so the step always runs and decides from the environment.
+      - name: Install the apk signing key
+        env:
+          KEY: ${{ secrets.H5000M_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KEY}" ]; then
+            mkdir -p .signing
+            printf '%s\n' "${KEY}" > .signing/private-key.pem
+            chmod 0600 .signing/private-key.pem
+            echo "signing key installed ($(wc -c < .signing/private-key.pem) bytes)"
+          else
+            echo "::warning::H5000M_SIGNING_KEY is not set, so this build signs the package index with a key of its own. Devices flashed from a different build will report an untrusted signature and refuse the repository."
+          fi
+
       - name: Build
         env:
           # Keep ccache from growing past what the repository's 10 GB cache
@@ -227,6 +243,7 @@ jobs:
           CCACHE_COMPRESS: 'true'
           TOOLCHAIN_CACHE_ARCHIVE: ${{ github.workspace }}/.toolchain-cache/toolchain.tar.zst
           BUILD_CACHE_ARCHIVE: ${{ github.workspace }}/.buildcache/build-cache.tar.zst
+          H5000M_SIGNING_KEY_FILE: ${{ github.workspace }}/.signing/private-key.pem
           THREADS: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && '8' || '4' }}
           # `format('{0}', <bool>)` renders "true"/"false".  Without it the usual
           # `cond && input || default` fallback would rewrite a boolean input of
@@ -465,6 +482,23 @@ jobs:
       # A bare repository directory has no index.html, so the site root answers
       # 404 and looks broken even though packages.adb is served correctly.  This
       # page says what the directory is and how to point a router at it.
+      # Publish the public key next to the index.  A device flashed before the
+      # key was fixed carries a different key, and copying this one into
+      # /etc/apk/keys/ is what lets it trust the repository without reflashing.
+      - name: Publish the signing public key
+        run: |
+          set -euo pipefail
+          key="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name public-key.pem -path '*staging*' 2>/dev/null | head -1)"
+          if [ -z "${key}" ]; then
+            key="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name public-key.pem 2>/dev/null | head -1)"
+          fi
+          if [ -n "${key}" ]; then
+            cp "${key}" apk-repo/public-key.pem
+            echo "published $(wc -c < apk-repo/public-key.pem) byte public key from ${key}"
+          else
+            echo "::warning::no public-key.pem found; devices flashed earlier cannot be given the new key from here"
+          fi
+
       - name: Write an index page
         run: |
           set -euo pipefail

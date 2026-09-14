@@ -76,3 +76,10 @@ Thumbs.db
 skills-lock.json
 .toolchain-cache/
 .buildcache/
+
+# Signing keys must never be committed.  The CI installs one from a repository
+# secret; a local build generates its own.
+*.pem
+private-key.pem
+public-key.pem
+.signing/

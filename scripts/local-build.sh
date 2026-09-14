@@ -657,6 +657,37 @@ normalize_source_mtimes() {
 	return 0
 }
 
+# Install a fixed apk signing key, if one was handed to us.
+#
+# OpenWrt signs the package index with $(TOPDIR)/private-key.pem and installs the
+# matching public key at /etc/apk/keys/public-key.pem in the image.  Left alone,
+# every build generates a FRESH pair, and that breaks the published repository:
+# the index on GitHub Pages is overwritten by each build and signed with that
+# build's key, so a device flashed from an earlier build sees
+#
+#   WARNING: updating <url>: UNTRUSTED signature
+#
+# with the packages then unavailable.  Reproduced against the live Pages index
+# with the firmware's own apk.
+#
+# Given one key for every build, the public key ships in every image and matches
+# the index, so any device trusts any build's repository.
+install_signing_key() {
+	local src="${H5000M_SIGNING_KEY_FILE:-}"
+
+	[ -n "$src" ] || return 0
+	[ -f "$src" ] || { warn "H5000M_SIGNING_KEY_FILE=${src} does not exist; signing with a per-build key"; return 0; }
+
+	cp -f "$src" "${SRC}/private-key.pem"
+	chmod 0600 "${SRC}/private-key.pem"
+	if openssl ec -in "${SRC}/private-key.pem" -pubout -out "${SRC}/public-key.pem" 2>/dev/null; then
+		log "Installed the fixed apk signing key (public key derived and shipped in the image)"
+	else
+		warn "Could not derive the public key; the image would not trust the index"
+	fi
+	return 0
+}
+
 # Restore the cached build tree, if the CI fetched one from GitHub Packages.
 #
 # This is the part that actually saves hours: build_dir/target-* holds one build
@@ -1221,7 +1252,27 @@ EOF
 	emit_service "$ENABLE_NIKKI"     nikki mihomo-meta luci-app-nikki
 	emit_service "$ENABLE_OPENCLASH" luci-app-openclash
 	emit_service "$ENABLE_MOSDNS"    mosdns luci-app-mosdns
-	emit_service "$ENABLE_HOMEPROXY" luci-app-homeproxy sing-box kmod-nft-tproxy
+	# ucode-mod-math is a HARD requirement that upstream does not declare.
+	# luci-app-homeproxy's LUCI_DEPENDS lists ucode-mod-digest but not math, even
+	# though root/etc/homeproxy/scripts/generate_client.uc line 11 does
+	# `import { isnan } from 'math'`.  Without it the daemon dies on startup:
+	#
+	#   Syntax error: Unable to resolve path for module 'math'
+	#   Error: failed to generate client configuration.
+	#
+	# Reported from a real device.  ucode-mod-math has no dependencies of its own,
+	# so there is nothing to hold it back.
+	#
+	# ip-full and kmod-tun are what the LuCI page itself asks for before TUN mode
+	# can be switched on ("you need to install ip-full and kmod-tun").  ip-full
+	# replaces ip-tiny, which the base image selects; ip-tiny is turned off below
+	# so the two do not collide.
+	# ip-full conflicts with the ip-tiny the base image pulls in.
+	printf 'CONFIG_PACKAGE_ip-tiny=n\n' >> "$out"
+
+	emit_service "$ENABLE_HOMEPROXY" \
+		luci-app-homeproxy sing-box kmod-nft-tproxy \
+		ucode-mod-math ip-full kmod-tun
 
 	# AdGuardHome and its LuCI app are in the official feeds, so this needs no
 	# clone at all.
@@ -1351,7 +1402,10 @@ build_required_packages() {
 	is_true "$ENABLE_NIKKI"       && REQUIRED_PACKAGES+=(nikki mihomo-meta luci-app-nikki)
 	is_true "$ENABLE_OPENCLASH"   && REQUIRED_PACKAGES+=(luci-app-openclash)
 	is_true "$ENABLE_MOSDNS"      && REQUIRED_PACKAGES+=(mosdns luci-app-mosdns)
-	is_true "$ENABLE_HOMEPROXY"   && REQUIRED_PACKAGES+=(luci-app-homeproxy)
+	# The ucode module and the two TUN packages are listed here too: a
+	# configuration that drops them builds a HomeProxy that cannot start, and
+	# `make defconfig` drops requests silently rather than failing.
+	is_true "$ENABLE_HOMEPROXY"   && REQUIRED_PACKAGES+=(luci-app-homeproxy ucode-mod-math ip-full kmod-tun)
 	is_true "$ENABLE_ADGUARDHOME" && REQUIRED_PACKAGES+=(adguardhome luci-app-adguardhome)
 	is_true "$ENABLE_UPNP"        && REQUIRED_PACKAGES+=(luci-app-upnp miniupnpd-nftables)
 	is_true "$ENABLE_ADBLOCK"     && REQUIRED_PACKAGES+=(adblock luci-app-adblock)
@@ -1780,6 +1834,7 @@ main() {
 	show_features
 
 	prepare_source
+	install_signing_key
 	seed_cached_toolchain
 	seed_cached_build_state
 	prepare_feeds
