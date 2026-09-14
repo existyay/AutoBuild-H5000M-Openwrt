@@ -1168,6 +1168,53 @@ fix_mirror_hashes() {
 	return 0
 }
 
+# Patch the nftables userspace with fullcone support.
+#
+# The `fullcone` expression the kernel module registers is invisible to nftables
+# unless the userspace parser knows it, so a rule using it cannot even be
+# written, let alone take effect.  Upstream nftables has no such support.
+#
+# The patch is the single commit from fullcone-nat-nftables/
+# nftables-1.0.2-with-fullcone rebased onto the 1.1.6 that mainline ships: 200
+# lines across seven files, 9 of its 13 hunks applying as-is and 4 needing only
+# the surrounding context updated.
+#
+# It goes into the package's own patches/ directory, not patches/ at the top
+# level: nftables' source is downloaded into build_dir at build time, so it is
+# not part of the checked-out tree that apply_patches() operates on.
+install_nftables_patches() {
+	local libdir="${SRC}/package/libs/libnftnl/patches"
+	local dir="${SRC}/package/network/utils/nftables/patches"
+	local f
+
+	[ -d "$dir" ] || { warn "No nftables patches directory; fullcone will not be available to nft"; return 0; }
+
+	# libnftnl first: it is the layer beneath.  nftables' own fullcone code
+	# refers to NFTNL_EXPR_FULLCONE_* constants, and without them the nftables
+	# build stops with "'NFTNL_EXPR_FULLCONE_FLAGS' undeclared" — which is
+	# exactly how the missing layer announced itself.
+	# libnftnl ships without a patches/ directory, so create it.  OpenWrt picks
+	# up any patches/ directory next to a package Makefile at build time.
+	mkdir -p "$libdir"
+	if [ -d "$libdir" ]; then
+		shopt -s nullglob
+		for f in "${ROOT_DIR}"/libnftnl-patches/*.patch; do
+			cp -f "$f" "${libdir}/$(basename "$f")"
+			log "  installed libnftnl patch $(basename "$f")"
+		done
+		shopt -u nullglob
+	fi
+
+	shopt -s nullglob
+	for f in "${ROOT_DIR}"/nftables-patches/*.patch; do
+		cp -f "$f" "${dir}/$(basename "$f")"
+		log "  installed nftables patch $(basename "$f")"
+	done
+	shopt -u nullglob
+
+	return 0
+}
+
 # Proxy frontends, plus the cores the official feeds do not carry.  Everything is
 # emitted as `=m`: built into the apk repository, not installed into the image, so
 # a user picks with `apk add` and the frontend pulls its backend and helpers in.
@@ -1350,7 +1397,7 @@ CONFIG_PACKAGE_kmod-tcp-bbr=y
 # from 2022, written against the pre-rework nftables expression API, and needed
 # two signature fixes for 6.18 — dump gained `bool reset`, validate lost its
 # `data` argument.
-CONFIG_PACKAGE_kmod-nft-fullcone=m
+CONFIG_PACKAGE_kmod-nft-fullcone=y
 
 # Transparent-proxy nftables modules.  PassWall2 warns without them:
 #   Warning: nftables transparent proxy is missing basic dependency
@@ -2097,6 +2144,7 @@ main() {
 	install_theme
 	install_external_packages
 	fix_mirror_hashes
+	install_nftables_patches
 
 	# After every source tree is in place: feeds, board plugins, theme and the
 	# external package clones all add directories that the build hashes.
