@@ -74,7 +74,11 @@ ENABLE_MT5700M="${ENABLE_MT5700M:-false}"
 
 # ------------------------------------------------------- optional services ---
 ENABLE_UPNP="${ENABLE_UPNP:-true}"
-ENABLE_ADBLOCK="${ENABLE_ADBLOCK:-true}"
+# Not built in by default.  Adblock and HomeProxy are both useful and both
+# available from this project's apk repository, so they ship as =m and the owner
+# decides — the image stays smaller and nothing is installed that was not asked
+# for.  Turn either on with ENABLE_ADBLOCK=true / ENABLE_HOMEPROXY=true.
+ENABLE_ADBLOCK="${ENABLE_ADBLOCK:-false}"
 ENABLE_DOCKERMAN="${ENABLE_DOCKERMAN:-false}"
 ENABLE_NIKKI="${ENABLE_NIKKI:-false}"
 ENABLE_OPENCLASH="${ENABLE_OPENCLASH:-false}"
@@ -82,11 +86,10 @@ ENABLE_OPENCLASH="${ENABLE_OPENCLASH:-false}"
 # differs between a local build and CI produces two different firmwares from the
 # same commit, which is worse than either choice on its own.
 ENABLE_MOSDNS="${ENABLE_MOSDNS:-true}"
-# Built into the image by default.  Unlike the other proxy front-ends, which are
-# compiled into the apk repository as =m so a user can install them later, this
-# one is on: it needs no separate core package to be useful and is the front-end
-# this device is expected to ship with.
-ENABLE_HOMEPROXY="${ENABLE_HOMEPROXY:-true}"
+# Repository only, like the other proxy front-ends: built into the apk
+# repository as =m, not installed into the image.  It is in the list a user sees
+# after `apk update`, and `apk add luci-app-homeproxy` pulls its core.
+ENABLE_HOMEPROXY="${ENABLE_HOMEPROXY:-false}"
 
 # Mesh.  lean's luci-app-easymesh is not the OpenWrt easymesh daemon — mainline
 # dropped that package.  Its LUCI_DEPENDS are kmod-cfg80211, batctl-default,
@@ -1372,13 +1375,11 @@ CONFIG_PACKAGE_luci-app-argon-config=y
 EOF
 	fi
 
-	if is_true "$ENABLE_ADBLOCK"; then
-		cat >> "$out" <<'EOF'
-CONFIG_PACKAGE_adblock=y
-CONFIG_PACKAGE_luci-app-adblock=y
-CONFIG_PACKAGE_luci-i18n-adblock-zh-cn=y
-EOF
-	fi
+	# Adblock is NOT here.  It used to be, as an unconditional =y behind this
+	# switch — which meant turning the switch off removed it from the build
+	# entirely instead of leaving it in the repository.  It is emitted through
+	# emit_service below, which gives =m when the switch is off and =y when it is
+	# on, so the package is always built and the owner chooses.
 
 	# ------------------------------------------------ services: image or repo ---
 	# These are the "extras" — a Docker stack, a proxy stack, AdGuardHome.  They
@@ -1470,6 +1471,9 @@ EOF
 	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=n\n' >> "$out"
 	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Kcptun=n\n' >> "$out"
 	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=n\n' >> "$out"
+
+	emit_service "$ENABLE_ADBLOCK" \
+		adblock luci-app-adblock luci-i18n-adblock-zh-cn
 
 	emit_service "$ENABLE_HOMEPROXY" \
 		luci-app-homeproxy sing-box kmod-nft-tproxy \

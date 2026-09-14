@@ -31,7 +31,7 @@ on:
       enable_adblock:
         description: 'Adblock 广告过滤'
         type: boolean
-        default: true
+        default: false
       apk_repo_url:
         description: 'apk 仓库的托管地址 会被写入固件 留空则固件不带额外软件源'
         type: string
@@ -269,14 +269,14 @@ jobs:
           ENABLE_MT5700M: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_mt5700m) || 'false' }}
           ENABLE_UPNP: 'true'
           ENABLE_THEME_ARGON: 'true'
-          ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'true' }}
+          ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'false' }}
           ENABLE_REPO_PACKAGES: 'true'
           H5000M_APK_REPO_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.apk_repo_url || '' }}
           ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
           ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
           ENABLE_OPENCLASH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_openclash) || 'false' }}
           ENABLE_MOSDNS: 'true'
-          ENABLE_HOMEPROXY: 'true'
+          ENABLE_HOMEPROXY: 'false'
           ENABLE_ADGUARDHOME: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adguardhome) || 'false' }}
         run: |
           set -euo pipefail

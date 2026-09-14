@@ -70,9 +70,9 @@ v2rayA、OpenClash** 以及各自的中文语言包。内核模块与固件同�
 | **出口优先级** `luci-app-h5000m-netmode` | 有线 / 无线 / 5G 的出口选择与切换 |
 | **5G 拨号** `ddimension/wwand` | 5G 模组拨号，带 LuCI 面板 |
 | **MosDNS** | 域名分流，开箱已装 |
-| **HomeProxy** | 代理前端，开箱已装 |
+| HomeProxy / Adblock | 已在软件源中，`apk add luci-app-homeproxy` / `luci-app-adblock` 安装；**默认不装进固件** |
 | Argon 主题 | LuCI 主题 |
-| UPnP IGD / Adblock / ttyd | 端口映射 / 广告过滤 / 网页终端 |
+| UPnP IGD / ttyd | 端口映射 / 网页终端 |
 
 硬件加速用的是**主线自己的 PPE 卸载**（fw4 的 `flow_offloading_hw`），首次启动已自动
 开启。它与 ImmortalWrt 上的 TurboACC / MTK HNAT 是**两套不同的东西**，后者在主线这个
@@ -107,6 +107,7 @@ Fork 本仓库，在 **Actions → 构建 H5000M 主线 OpenWrt 固件 → Run w
 | `H5000M_WIFI_SSID` | `openwrt` | 首启 SSID |
 | `H5000M_WIFI_KEY` / `_ENCRYPTION` | 空 / `none` | 默认开放网络 |
 | `H5000M_APK_REPO_URL` | 空 | 软件源基址；留空则固件不带额外源 |
+| `ENABLE_ADBLOCK` / `ENABLE_HOMEPROXY` | `false` | 关闭时编进软件源（`=m`），打开时装进固件（`=y`） |
 | `ENABLE_DOCKERMAN` / `ENABLE_NIKKI` / `ENABLE_OPENCLASH` / `ENABLE_ADGUARDHOME` | `false` | 可选服务 |
 | `THREADS` | CPU 核数 | 并行度 |
 
