@@ -39,7 +39,10 @@ include $(INCLUDE_DIR)/package.mk
 define KernelPackage/nft-fullcone
   SUBMENU:=Netfilter Extensions
   TITLE:=nftables fullcone expression support
-  DEPENDS:=@IPV6 +kmod-nft-core +kmod-nf-conntrack +kmod-nf-conntrack6
+  # kmod-nf-conntrack6 is gone from modern kernels — IPv6 conntrack was merged
+  # into kmod-nf-conntrack — so depending on it only produced
+  # "has a dependency on 'kmod-nf-conntrack6', which does not exist".
+  DEPENDS:=@IPV6 +kmod-nft-core +kmod-nf-conntrack
   FILES:=$(PKG_BUILD_DIR)/nft_fullcone.$(LINUX_KMOD_SUFFIX)
   KCONFIG:=CONFIG_NFT_FULLCONE
   AUTOLOAD:=$(call AutoProbe,nft_fullcone)
