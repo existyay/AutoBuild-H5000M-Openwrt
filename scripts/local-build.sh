@@ -318,7 +318,7 @@ install_deps() {
 			"bison flex gperf haveged"
 			"libltdl-dev libmpc-dev libmpfr-dev libreadline-dev"
 			"ninja-build p7zip pkgconf python3-ply python3-setuptools"
-			"lld llvm re2c scons squashfs-tools"
+			"lld llvm clang re2c scons squashfs-tools"
 			"qemu-utils subversion swig texinfo uglifyjs upx-ucl"
 			"vim xmlto xxd device-tree-compiler fastjar time"
 		)
@@ -1169,6 +1169,14 @@ install_proxy_repos() {
 	# luci-app-ssr-plus in coolsnowwolf/lede or coolsnowwolf/luci).  The
 	# repository is a monorepo of two dozen cores, several of which the official
 	# feeds already provide, so the duplicates are pruned by name.
+	# SSR-Plus defaults INCLUDE_Http_Proxy to y on aarch64, and that option
+	# does `select PACKAGE_3proxy`.  Mainline has no 3proxy at all, so without
+	# it the build stops on a missing dependency.  immortalwrt/packages carries
+	# it; only that one directory is taken.
+	clone_only_paths luci-ssr-plus-3proxy \
+		https://github.com/immortalwrt/packages.git master \
+		net/3proxy
+
 	clone_and_prune luci-app-ssr-plus \
 		https://github.com/fw876/helloworld.git dev \
 		dnsproxy microsocks v2ray-core xray-core mihomo mosdns v2raya \
@@ -1392,11 +1400,33 @@ EOF
 		luci-app-easymesh dawn batctl-default kmod-batman-adv kmod-cfg80211 \
 		luci-compat
 
-	emit_service "$ENABLE_REPO_PACKAGES" \
+	# Repository only, hence the empty switch — see the note on the block above.
+	#
+	# SSR-Plus uses `select`, not `depends`, for the cores its INCLUDE_* options
+	# cover.  A select forces its target to =y even when the selecting package is
+	# only =m, so leaving those options at their aarch64 defaults would install
+	# mihomo, 3proxy, chinadns-ng and v2ray-geoip into the image — and
+	# dnsmasq-full, which replaces the dnsmasq the base image ships — while the
+	# app itself stayed in the repository.  Dependencies in the image and the
+	# package that needs them in the repository is the worst of both.
+	#
+	# They are therefore turned off and the cores are emitted here as =m
+	# alongside every other proxy core, so `apk add` finds them all.
+	emit_service "" \
 		luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn \
 		chinadns-ng dns2socks dns2tcp ipt2socks redsocks2 shadowsocksr-libev \
 		simple-obfs tcping shadow-tls tuic-client v2ray-plugin xray-plugin \
-		gn lua-neturl naiveproxy shadowsocks-libev
+		gn lua-neturl naiveproxy shadowsocks-libev \
+		3proxy v2ray-geoip v2ray-geosite \
+		shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir
+
+	# The INCLUDE_* switches themselves.  Off, so the selects above cannot fire.
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Http_Proxy=n\n' >> "$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ChinaDNS_NG=n\n' >> "$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=n\n' >> "$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=n\n' >> "$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Kcptun=n\n' >> "$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=n\n' >> "$out"
 
 	emit_service "$ENABLE_HOMEPROXY" \
 		luci-app-homeproxy sing-box kmod-nft-tproxy \
@@ -1503,7 +1533,8 @@ EOF
 }
 
 build_required_packages() {
-	REQUIRED_PACKAGES=(
+	REQUIRED_PACKAGES=()
+	REPO_PACKAGES=(
 		luci
 		luci-base
 		luci-ssl
@@ -1519,7 +1550,7 @@ build_required_packages() {
 	is_true "$ENABLE_THEME_ARGON" && REQUIRED_PACKAGES+=(luci-theme-argon luci-app-argon-config)
 	REQUIRED_PACKAGES+=(h5000m-integration luci-app-h5000m-accel kmod-tcp-bbr
 		kmod-nft-socket kmod-nft-tproxy)
-	is_true "$ENABLE_REPO_PACKAGES" && REQUIRED_PACKAGES+=(luci-app-ssr-plus chinadns-ng)
+	is_true "$ENABLE_REPO_PACKAGES" && REPO_PACKAGES+=(luci-app-ssr-plus chinadns-ng)
 
 	# Optional switches are verified too, and for a specific reason: `make
 	# defconfig` exits 0 even when a requested package does not exist, it just
@@ -1612,6 +1643,14 @@ configure_build() {
 	# That is what makes the CI ccache cache actually fill: without it every run
 	# restored an empty directory and rebuilt everything.
 	config_set_symbol "CONFIG_CCACHE" "y"
+
+	# SSR-Plus is a repository package, like every other proxy front-end, but
+	# defconfig promotes it to =y on its own.  A =y app pulls nothing, so the
+	# image would grow by an app whose cores are only in the repository — the
+	# front-end installed with no backend, which is the one combination that
+	# helps nobody.  Forced back to =m after the final defconfig, the same way
+	# the feed and ccache symbols above are.
+	config_set_symbol "CONFIG_PACKAGE_luci-app-ssr-plus" "m"
 }
 
 # OpenWrt gates .config on $(STAGING_DIR_HOST)/.prereq-build, whose recipe runs
@@ -1638,12 +1677,23 @@ config_symbol_is_set() {
 	grep -q "^CONFIG_PACKAGE_$1=y$" "$SRC/.config"
 }
 
+# Repository packages are legitimately =m, so the =y test above would report them
+# as dropped.  =m proves the symbol survived defconfig just as well; what it does
+# not prove is that the package is installed, which is exactly the distinction
+# between the two lists.
+config_symbol_present() {
+	grep -qE "^CONFIG_PACKAGE_$1=[ym]$" "$SRC/.config"
+}
+
 verify_config() {
 	local pkg missing=()
 
 	build_required_packages
 	for pkg in "${REQUIRED_PACKAGES[@]}"; do
 		config_symbol_is_set "$pkg" || missing+=("$pkg")
+	done
+	for pkg in "${REPO_PACKAGES[@]:-}"; do
+		config_symbol_present "$pkg" || missing+=("$pkg")
 	done
 
 	if [ "${#missing[@]}" -gt 0 ]; then
