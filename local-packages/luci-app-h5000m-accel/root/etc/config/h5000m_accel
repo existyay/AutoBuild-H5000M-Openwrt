@@ -1,5 +1,12 @@
 
 config accel 'settings'
+	# performance | compat | custom
+	#
+	# performance turns on software offload, PPE hardware offload and BBR.
+	# compat leaves the hardware path off, which is the setting to fall back to
+	# if a specific application misbehaves with offloaded connections.
+	# custom uses the three switches below as written.
+	option profile 'performance'
 	option flow_offload '1'
 	option flow_offload_hw '1'
 	option bbr '1'

@@ -4,11 +4,9 @@
 # visible instead of merely assumed.
 
 conf_get() { uci -q get "h5000m_accel.settings.$1" 2>/dev/null || echo ''; }
+fw_get()   { uci -q get "firewall.@defaults[0].$1" 2>/dev/null || echo ''; }
 
-fw_get() {
-	uci -q get "firewall.@defaults[0].$1" 2>/dev/null || echo ''
-}
-
+echo "profile=$(conf_get profile)"
 echo "flow_offload=$(conf_get flow_offload)"
 echo "flow_offload_hw=$(conf_get flow_offload_hw)"
 echo "bbr=$(conf_get bbr)"
@@ -24,32 +22,72 @@ case "${cc}" in
 	bbr) echo "bbr_active=1" ;;
 	*)   echo "bbr_active=0" ;;
 esac
+echo "bbr_available=$(grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && echo 1 || echo 0)"
 
-# The PPE behind hardware offload.  On this target it is NOT a module:
-# CONFIG_NET_MEDIATEK_SOC=y, so it is linked into the kernel and never appears in
-# /proc/modules or /sys/module.  An earlier version checked only those two and
-# therefore always reported "not loaded" on a device where it was working.
+# --- PPE, the hardware behind hardware offload -------------------------------
 #
-# Three states, because "unknown" is the honest answer when the kernel does not
-# say: module, builtin, unknown.
-#
-# The platform driver is named "mtk_soc_eth" (mtk_eth_soc.c: .name =
-# "mtk_soc_eth"), which does NOT contain the substring "mtk_eth" — an earlier
-# pattern of 'mtk_ppe|mtk_eth|mtk_wed' therefore never matched and the page
+# On this target the driver is NOT a module: CONFIG_NET_MEDIATEK_SOC=y, so it
+# never appears in /proc/modules or /sys/module.  A built-in platform driver
+# still registers under /sys/bus/platform/drivers/, and the name there is
+# "mtk_soc_eth" (mtk_eth_soc.c: .name = "mtk_soc_eth") — which does NOT contain
+# the substring "mtk_eth", so matching on that found nothing and the page
 # reported "cannot determine" on a device where the driver was present all
 # along.
-ppe='unknown'
-if [ -d /sys/module/mtk_ppe ] || grep -q '^mtk_ppe' /proc/modules 2>/dev/null; then
-	ppe='module'
-elif ls /sys/bus/platform/drivers/ /sys/bus/platform/devices/ 2>/dev/null | grep -qiE 'mtk_ppe|mtk_soc_eth|mtk_wed'; then
-	ppe='builtin'
+#
+# Several signals are checked and the one that matched is reported, so the page
+# can say why it believes what it believes instead of just asserting a state.
+ppe_state='unknown'
+ppe_signal=''
+
+for sig in mtk_ppe mtk_soc_eth mtk_wed; do
+	if [ -e "/sys/module/${sig}" ] || [ -d "/sys/bus/platform/drivers/${sig}" ]; then
+		ppe_state='present'
+		ppe_signal="$sig"
+		break
+	fi
+done
+
+if [ "$ppe_state" = 'unknown' ] && grep -qE '^mtk_ppe|^mtk_soc_eth' /proc/modules 2>/dev/null; then
+	ppe_state='present'
+	ppe_signal='module list'
 fi
-echo "ppe_state=${ppe}"
+
+# Last resort: a netdev whose driver is the MediaTek ethernet one.
+if [ "$ppe_state" = 'unknown' ]; then
+	for n in /sys/class/net/*/device/driver; do
+		[ -e "$n" ] || continue
+		if readlink "$n" 2>/dev/null | grep -qE 'mtk_soc_eth|mtk_ppe'; then
+			ppe_state='present'
+			ppe_signal="netdev $(basename "$(dirname "$(dirname "$n")")")"
+			break
+		fi
+	done
+fi
+
+# /sys/bus/platform/devices is where a built-in driver's bound devices show up;
+# used only to distinguish "driver present" from "driver present and bound".
+if [ "$ppe_state" = 'present' ] && ls /sys/bus/platform/devices/ 2>/dev/null | grep -qiE 'mtk_ppe|mtk_soc_eth'; then
+	ppe_signal="${ppe_signal} (bound)"
+fi
+
+echo "ppe_state=${ppe_state}"
+echo "ppe_signal=${ppe_signal:-none}"
 
 # Offloaded connections.  NF_FLOW_TABLE_PROCFS is not set in this kernel, so
 # there is no /proc/net/stat/nf_flowtable to read; conntrack marks offloaded
 # entries with OFFLOAD instead.
 entries="$(grep -c 'OFFLOAD' /proc/net/nf_conntrack 2>/dev/null || echo 0)"
 echo "flow_entries=${entries}"
+
+# Full-cone NAT.  Mainline OpenWrt has no nft-fullcone package and the kernel
+# carries no full-cone conntrack support, so this is reported as unavailable
+# rather than offered as a switch that would do nothing.
+if [ -d /sys/module/nft_fullcone ] || grep -q '^nft_fullcone' /proc/modules 2>/dev/null; then
+	echo "fullcone=1"
+else
+	echo "fullcone=0"
+fi
+
+echo "fw4_offload_kmod=$(ls /sys/module/nf_flow_table /sys/module/nft_flow_offload 2>/dev/null | wc -l)"
 
 exit 0

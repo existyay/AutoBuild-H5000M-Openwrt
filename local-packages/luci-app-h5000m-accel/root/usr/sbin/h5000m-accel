@@ -13,9 +13,32 @@ log() { logger -t h5000m-accel "$@" 2>/dev/null || true; }
 apply_settings() {
 	local offload hw bbr
 
-	offload="$(uci -q get ${CONF}.settings.flow_offload || echo 1)"
-	hw="$(uci -q get ${CONF}.settings.flow_offload_hw || echo 1)"
-	bbr="$(uci -q get ${CONF}.settings.bbr || echo 1)"
+	# The profile decides the three switches unless it is 'custom'.  A preset is
+	# what makes this page usable — getting offload right means knowing that
+	# hardware offload without software offload does nothing, and that BBR needs
+	# its module — without hiding the individual switches for anyone who wants
+	# them.
+	profile="$(uci -q get ${CONF}.settings.profile || echo performance)"
+	case "$profile" in
+		performance) offload=1; hw=1; bbr=1 ;;
+		compat)      offload=1; hw=0; bbr=0 ;;
+		*)           # custom: read the switches, defaulting to the safe value
+			offload="$(uci -q get ${CONF}.settings.flow_offload || echo 1)"
+			hw="$(uci -q get ${CONF}.settings.flow_offload_hw || echo 0)"
+			bbr="$(uci -q get ${CONF}.settings.bbr || echo 0)"
+			;;
+	esac
+
+	# Keep the stored switches in step with the preset, so the page shows what is
+	# actually in force instead of a stale custom value.
+	if [ "$profile" != 'custom' ]; then
+		uci -q batch <<-EOT
+			set ${CONF}.settings.flow_offload='${offload}'
+			set ${CONF}.settings.flow_offload_hw='${hw}'
+			set ${CONF}.settings.bbr='${bbr}'
+			commit ${CONF}
+		EOT
+	fi
 
 	# `uci batch` strips the quoting correctly; `uci set "x='1'"` would store the
 	# literal '1' and config_get_bool would not recognise it.
@@ -43,7 +66,7 @@ apply_settings() {
 		sysctl -qw net.ipv4.tcp_congestion_control=cubic 2>/dev/null
 	fi
 
-	log "applied: flow_offloading=${offload} flow_offloading_hw=${hw} bbr=${bbr}"
+	log "applied: profile=${profile} flow_offloading=${offload} flow_offloading_hw=${hw} bbr=${bbr}"
 	return 0
 }
 
