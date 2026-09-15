@@ -1232,6 +1232,60 @@ fix_mirror_hashes() {
 	return 0
 }
 
+# Make sure the cached archives whose hash we just neutralised are at least
+# readable, and drop the ones that are not.
+#
+# `skip` means "this hash cannot be reproduced on this machine", NOT "do not look
+# at the file at all".  Treating it as the latter hid a corrupt download-cache
+# entry for three builds: a truncated shadowsocks-libev-3.3.5.tar.xz sailed
+# through the checks, and the build failed at extraction with
+#
+#   xzcat: dl/shadowsocks-libev-3.3.5.tar.xz: File format not recognized
+#   tar: This does not look like a tar archive
+#
+# reported only as "ERROR: package/luci-app-ssr-plus/shadowsocks-libev failed to
+# build."  The archive came from the restored dl cache; with no hash check there
+# was nothing to notice it was broken.
+#
+# Deleting it is enough: `make download` runs after this and regenerates the
+# tarball from the pinned commit through OpenWrt's rawgit method.  A file that
+# does not even list is never worth keeping, so this cannot lose anything.
+verify_cached_sources() {
+	local dir f name src dropped=0
+
+	shopt -s nullglob
+	for dir in "${CLONED_PACKAGE_DIRS[@]}"; do
+		[ -d "$dir" ] || continue
+		while IFS= read -r f; do
+			[ -f "$f" ] || continue
+			# Only the packages whose hash was neutralised are in scope; for
+			# the rest OpenWrt still verifies the checksum itself.
+			grep -q '^PKG_MIRROR_HASH:=skip$' "$f" 2>/dev/null || continue
+
+			name="$(sed -n 's/^PKG_NAME:=//p' "$f" | head -1)"
+			[ -n "$name" ] || name="$(basename "$dir")"
+
+			# PKG_SOURCE is always built from PKG_NAME, so the archive name
+			# starts with it — measured across all eight packages, including
+			# the ones written as $(PKG_SOURCE_SUBDIR).tar.xz.
+			for src in "$SRC"/dl/"$name"-*; do
+				[ -f "$src" ] || continue
+				if tar -tf "$src" >/dev/null 2>&1; then
+					continue
+				fi
+				warn "cached source $(basename "$src") is unreadable; deleting it so the download stage regenerates it"
+				rm -f "$src"
+				dropped=$((dropped + 1))
+			done
+		done < <(find "$dir" -mindepth 1 -maxdepth 4 \
+			-not -path '*/.git/*' -name Makefile 2>/dev/null | sort)
+	done
+	shopt -u nullglob
+
+	[ "$dropped" -gt 0 ] && log "Dropped ${dropped} unreadable cached source archive(s)"
+	return 0
+}
+
 # Patch the nftables userspace with fullcone support.
 #
 # The `fullcone` expression the kernel module registers is invisible to nftables
@@ -2407,6 +2461,10 @@ main() {
 	# clones, so those trees kept their checkout mtimes and never hashed the
 	# same way twice.
 	fix_mirror_hashes
+	# Right after the hashes are neutralised, and therefore before `make
+	# download`: a bad cached archive has to be gone by then for the download
+	# stage to regenerate it.
+	verify_cached_sources
 	normalize_source_mtimes
 	configure_build
 	verify_config
