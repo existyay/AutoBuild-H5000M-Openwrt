@@ -1248,10 +1248,10 @@ ERROR: package/luci-app-ssr-plus/shadowsocks-libev failed to build.
   把 `"$DIR"/error.txt` 这种字面量放进数组，即使文件不在也会留在数组里，
   后面的 `read` 就会炸。要么用 `*` 通配，要么显式判存在。
 
-### 那三次失败的真正原因：缓存里的 tarball 是坏的，而 `skip` 把校验关掉了
+### 那三次失败的真正原因：`PKG_MIRROR_HASH:=skip` 是一个会伪装成成功的值
 
 诊断通路修好之后，**一次 42 分钟的运行**就给出了答案（用 `PREBUILD_PACKAGES` 把
-shadowsocks-libev 提到最前面编，这样不必等到第 160 分钟）：
+shadowsocks-libev 提到最前面编，不必等到第 160 分钟）：
 
 ```
 --- last 60 lines of logs/package/luci-app-ssr-plus/shadowsocks-libev/compile.txt ---
@@ -1261,27 +1261,62 @@ tar: Exiting with failure status due to previous errors
 make[2]: *** [Makefile:134: .../.prepared_a98f21d3020cd8...] Error 1
 ```
 
-流程是这样的：**构建缓存里恢复出来的 `dl/shadowsocks-libev-3.3.5.tar.xz` 是损坏的**
-（多半来自更早某次被中断的下载），而为了修 `PKG_MIRROR_HASH` 不匹配，我把它置成了
-`skip` —— 那是唯一会检查这个文件的机制。于是坏文件一路走到解包才炸，对外只剩一行
-`ERROR: package/... failed to build.`。
+`dl/shadowsocks-libev-3.3.5.tar.xz` 里装的**不是归档，而是某个镜像 404 的响应体**。
+一切的起点是我为修 `PKG_MIRROR_HASH` 不匹配而写的那行 `PKG_MIRROR_HASH:=skip`。
 
-**`skip` 的语义是"这个哈希在本机复现不出来"，不是"完全不要看这个文件"。**
-OpenWrt 的 `include/download.mk` 确实认这个值（`[ "$MIRROR_HASH" = "skip" ]`），
-但那只跳过了**哈希比对**，文件本身有没有坏仍然没人管。
+`skip` 在 OpenWrt 里是个**半成品值**。`scripts/download.pl` 开头是：
 
-修法：新增 `verify_cached_sources()`，对所有被置为 `skip` 的包，用 `tar -tf` 证明 dl 里
-同名归档至少**可读**，读不了的直接删掉。删掉就够了 —— `make download` 在这之后运行，
-会按 `PKG_SOURCE_VERSION` 用 rawgit 方式重新生成。该检查排在 `fix_mirror_hashes`
-之后、`prefetch_and_toolchain` 之前，正是为了赶在下载阶段之前。归档名以 `PKG_NAME`
-开头（已对全部 8 个包核对，含写成 `$(PKG_SOURCE_SUBDIR).tar.xz` 的），所以用
-`dl/<PKG_NAME>-*` 匹配；不在 `skip` 范围内的包不受影响，它们的校验仍由 OpenWrt 自己做。
+```perl
+my $hash_cmd = hash_cmd();                        # 长度 4 → 返回 undef
+$hash_cmd or ($file_hash eq "skip") or die ...    # 不 die，继续往下走
+```
 
-这里还有一个更一般的教训：**"关掉校验"和"改成另一种校验"是两回事。**
-如果一定要绕过上游记录的哈希，就应该至少保留一个能发现文件损坏的检查
-（这里是"能不能列出内容"）。否则缓存里任何一个坏文件都会伪装成编译错误，
-而且是在离原因很远的地方、以一句没有信息的话出现。
+长度不是 32/64 的哈希拿不到 `hash_cmd`，而 `skip` 被特批放行。于是 download.pl
+带着**空的 `hash_cmd`** 继续执行，后果有两层：
 
+1. `if (-f $target/$filename) { $hash_cmd and do { ... exit 0 ... } }`
+   —— "文件已存在且可用"这个**短路分支整个被跳过**，所以一个坏文件永远不会被换掉；
+2. 它转去 OpenWrt 源码镜像找这个归档，而镜像上不可能有由第三方 git commit 生成的
+   tarball：
+
+   ```
+   curl ... https://mirrors.tuna.../shadowsocks-libev-3.3.5.tar.xz
+   curl: (22) The requested URL returned error: 404
+   Download failed.
+   ```
+
+   404 的响应体被当成归档写进 `dl/`，下载阶段**报告成功**（download.pl 退出 0），
+   `||` 后面的 git 回退链路根本没有机会运行。构建于是带着一个假归档继续走，
+   直到 `Build/Prepare` 解包时才炸 —— 而那里只会说 "failed to build"。
+
+**正确的修法是删掉整行，而不是改成 `skip`。** MIRROR_HASH 于是退回默认的 `x`，
+download.pl 执行到那句守卫时**立刻 die**（`Cannot find appropriate hash command`），
+回退链路这才真正生效：
+
+```
+download.pl ... "x" || ( dl_github_archive.py ... || ( git clone 固定 commit 并本地打包 ) )
+```
+
+用真实 `make download V=s` 验证过：删掉本地归档后重新下载，日志显示
+`Checking out files from the git repository...` → `Packing checkout...`，
+产出 1544928 字节、`tar -tf` 可读的归档；**没有任何镜像请求，也没有 404 响应体**。
+
+`wrap_mirror` 的选择条件是
+`$(if $(MIRROR),$(filter-out x,$(MIRROR_HASH)))` —— `x` 让它走纯 git 分支，
+任何别的值（包括 `skip`）都会把它推到 download.pl 那条路上。
+
+配套加了 `verify_cached_sources()`：对"git 源且没有任何可用哈希"的包，用 `tar -tf`
+证明 `dl/` 里同名归档至少可读，读不了的直接删除（那个 153 字节的 404 响应体就是这么
+清掉的）。它排在 `fix_mirror_hashes` 之后、`prefetch_and_toolchain` 之前，正是为了
+赶在下载阶段之前把坏文件清干净。归档名以 `PKG_NAME` 开头（已对全部 8 个包核对，含写成
+`$(PKG_SOURCE_SUBDIR).tar.xz` 的），所以用 `dl/<PKG_NAME>-*` 匹配。
+
+**教训：“半关掉校验”比关掉更危险。** `skip` 让哈希比对消失，同时让 download.pl 的
+"文件已存在"短路和失败退出**都失效** —— 每一步都报告成功，错误被推迟到很远的地方，
+以一句与原因无关的话出现。宁可让工具**立刻死掉**（`x` 的效果），也不要给它一个
+看似合理、实则破坏了它内部状态机的值。
+
+### 结论
 ### 结论
 
 | 路径 | 结论 |
