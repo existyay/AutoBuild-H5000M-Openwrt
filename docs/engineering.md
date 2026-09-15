@@ -1117,13 +1117,102 @@ htmode，以及两个 flow offload 开关（**硬件卸载根本没打开**）�
 > 注意：该脚本验证的是 `artifacts/` 里的 rootfs 打包，所以**在重新构建固件之前，
 > 它会对已出货的镜像持续报这个 bug** —— 这正是它应有的行为。
 
+### 四层 fullcone 链路：静态审查全部通过，运行时验证抓出 5 个缺陷
+
+nftables 时代实现 fullcone 需要四层同时正确，缺任何一层都不是"编译失败"，而是**静默
+不生效**或**规则集加载失败**：
+
+| 层 | 作用 | 载体 |
+| --- | --- | --- |
+| ① 内核模块 | 注册 `fullcone` 表达式 | `local-packages/nft-fullcone/`（`nft_fullcone.ko`） |
+| ② libnftnl | 常量 `NFTNL_EXPR_FULLCONE_*` + 序列化 | `libnftnl-patches/` |
+| ③ nftables | `fullcone` 关键字、语法、netlink 编解码 | `nftables-patches/` |
+| ④ firewall4 | 真正把 `masquerade` 换成 `fullcone` | `firewall4-patches/` |
+
+**静态证据一开始全部"通过"**：三份补丁 `patch --dry-run` 干净、`nftables` 编译通过、
+`parser_bison.c`（bison 生成物）里确实有 `fullcone` 规则、`config` 校验 37 个符号全绿。
+看起来可以出货了。
+
+**运行时验证推翻了其中的两项，并顺带发现了另外三处。** 五处缺陷里**只有一处会导致
+编译失败**，其余四处都会安静地做出一个"看起来装好了、实际不工作"的固件：
+
+1. **libnftnl 补丁的新文件块缺 `@@` 头**（`--- /dev/null` 后直接就是内容）。
+   `patch` 会**只检查两个已有文件、完全跳过新文件**，并以 `exit 0` 报告成功 —— 所以
+   `src/expr/fullcone.c` 从未被创建，而 `--dry-run` 说"通过"。
+   *修*：补上 `@@ -0,0 +1,167 @@`。
+
+2. **新文件没有接进构建系统**。*修*：给 `src/Makefile.am` / `src/Makefile.in` 的
+   `libnftnl_la_SOURCES` 加项，并给 `am_libnftnl_la_OBJECTS` 加 `expr/fullcone.lo`
+   （automake 的对象列表不派生自 SOURCES，缺它就不会编译），再补 dirstamp 依赖行。
+
+3. **`.set` 回调是旧签名**。`fullcone.c` 写的是 5 参数
+   `(e, type, data, data_len, byteorder)`，libnftnl 1.3.1 是 4 参数。
+   *修*：去掉 `byteorder`。
+
+4. **firewall4 的 `parse_defaults()` 是白名单**。它只拷贝 `spec` 里列出的键，
+   其它键仅打印 `specifies unknown option 'fullcone'` 就丢弃。所以
+   `fw4.default_option("fullcone")` 恒为 `null`，两个模板**一条规则都不会生成**。
+   *修*：在 `fw4.uc` 的 `parse_defaults` 里加 `fullcone: [ "bool", "0" ]`。
+
+5. **`{% else: %}` 是语法错误**。ucode 模板的 `else` **不带冒号**（同目录
+   `zone-verdict.uc` / `redirect.uc` 都是 `{% else -%}`）。这一处是唯一会炸的：
+   模板编译失败 → `fw4` 起不来 → **整个防火墙不加载**（连带 NAT）。
+   *修*：改成 `{% else %}`。
+
+**验证手段与边界**（都无需 root，也无需真机）：
+
+* **①**：`make package/nft-fullcone/compile` → `nft_fullcone.ko`（229 KB），
+  `modinfo` 显示 `alias: nft-expr-fullcone`。
+* **②**：交叉编译一个探针，**静态**链接目标 `libnftnl.a`，在 `qemu-aarch64-static`
+  下跑真实 aarch64 代码：
+
+  ```
+  OK    nftnl_expr_alloc("fullcone") succeeded
+  OK    NFTNL_EXPR_FULLCONE_FLAGS accepted
+  OK    bogus expression name rejected      ← 证明查表是真的，不是恒返回
+  ```
+
+  这一步是错误的补丁**唯一**会露馅的地方：修复前后 `libnftables.so` 都能链接成功，
+  只是链接时留下一个未定义的 `expr_ops_fullcone`。
+
+* **③**：`nftables` 全量重建通过、`nm -D` 无 `fullcone` 未定义引用、
+  库中存在 `fullcone` 字节。**没能做到运行时语法探针** —— 见下面的 qemu 限制。
+* **④**：用构建出来的**宿主机 ucode**（`staging_dir/hostpkg/bin/ucode`，注意需要
+  `-T` 才是模板模式）直接渲染被补丁改过的模板：
+
+  ```
+  fullcone=0 → meta nfproto ip masquerade comment "!fw4: Masquerade ip wan traffic"
+  fullcone=1 → meta nfproto ip fullcone    comment "!fw4: Fullcone NAT ip wan traffic"
+  ```
+
+  并且断言**关闭态与原模板输出逐字节一致** —— 这排除了补丁引入多余/缺失换行、
+  破坏既有规则串接的可能（模板的空格控制 `{%-` `-%}` 很容易在这一步出错）。
+  `fw4.uc` 另用 `ucode -c` 做语法编译检查。
+
+**qemu-user 的两条硬边界**（踩到就会浪费很多时间，记下来）：
+
+* **开了 `pack-relative-relocs` 的动态链接目标程序跑不起来**。OpenWrt 的
+  `TARGET_LDFLAGS` 默认带 `-z pack-relative-relocs`，产物里有 `DT_RELR` 段，
+  qemu-user 下 musl 的加载器报
+  `Error relocating /lib/libxxx.so: unsupported relocation type 6`。
+  **静态链接可以绕过**（`-static` 后 `qemu-aarch64-static` 直接能跑）；
+  此前 `strings src/nft | grep fullcone` 得到 0 也是因为看错了文件 ——
+  `src/nft` 只是 libtool 包装脚本，解析器在 `libnftables.so` 里，而那时它是**旧产物**。
+* **qemu-user 建不出 `NETLINK_NETFILTER` 套接字**（`socket()` 直接 `EPROTONOSUPPORT`）。
+  所以 `libnftables` 的完整路径（parse → evaluate → netlink）无法在仿真下走通，
+  ③ 只能停在"语法表里确实有、链接无缺失"这一层。
+
 ### 结论
 
 | 路径 | 结论 |
 | --- | --- |
 | Renode 全系统 | 平台能生成，**引导不进用户态**；且关键外设无法仿真 —— 对本项目无实用价值 |
 | qemu-user + 真实 uci | **有效**，可验证首启脚本、uci 写入、守卫与幂等性；已抓到一个真实 bug |
+| qemu-user + 静态链接的目标库 | **有效**，可直接调用真实 aarch64 代码（本次抓出 libnftnl 三处缺陷） |
+| 宿主机 ucode 渲染模板 | **有效**，可逐字节比对模板改动前后的输出（本次抓出 firewall4 两处缺陷） |
+| qemu-user + 动态链接 / netlink | **不可用** —— `DT_RELR` 与 `NETLINK_NETFILTER` 都不支持 |
 | 真机 | **仍然必需** —— 无线起不起、5G 能否附着、风扇曲线、硬件卸载是否真的生效，只有真机能答 |
+
 
 ---
 

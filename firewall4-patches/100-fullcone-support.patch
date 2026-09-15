@@ -1,17 +1,8 @@
---- a/root/usr/share/firewall4/templates/zone-masq.uc
-+++ b/root/usr/share/firewall4/templates/zone-masq.uc
-@@ -10,4 +10,8 @@
- 	{{ fw4.ipproto(family) }} daddr != {{ fw4.set(map(daddrs[1], fw4.cidr)) }} {%+ endif -%}
- {%+ for (let a in (daddrs ? daddrs[2] : [])): -%}
- 	{{ fw4.ipproto(family) }} daddr & {{ a.mask }} {{ a.invert ? '!=' : '==' }} {{ a.addr }} {%+ endfor -%}
-+{% if (fw4.default_option("fullcone")): %}
-+fullcone comment "!fw4: Fullcone NAT {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
-+{% else: %}
- masquerade comment "!fw4: Masquerade {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
-+{% endif %}
+diff --git a/root/usr/share/firewall4/templates/ruleset.uc b/root/usr/share/firewall4/templates/ruleset.uc
+index 2bec4d9..c1069a6 100644
 --- a/root/usr/share/firewall4/templates/ruleset.uc
 +++ b/root/usr/share/firewall4/templates/ruleset.uc
-@@ -293,6 +293,10 @@
+@@ -293,6 +293,10 @@ table inet fw4 {
  
  	chain dstnat {
  		type nat hook prerouting priority dstnat; policy accept;
@@ -22,3 +13,34 @@
  {% fw4.includes('chain-prepend', 'dstnat') %}
  {% for (let zone in fw4.zones()): %}
  {%  if (zone.dflags.dnat): %}
+diff --git a/root/usr/share/firewall4/templates/zone-masq.uc b/root/usr/share/firewall4/templates/zone-masq.uc
+index c3e66d8..6ca6cee 100644
+--- a/root/usr/share/firewall4/templates/zone-masq.uc
++++ b/root/usr/share/firewall4/templates/zone-masq.uc
+@@ -10,4 +10,8 @@ meta nfproto {{ fw4.nfproto(family) }} {%+ if (saddrs && saddrs[0]): -%}
+ 	{{ fw4.ipproto(family) }} daddr != {{ fw4.set(map(daddrs[1], fw4.cidr)) }} {%+ endif -%}
+ {%+ for (let a in (daddrs ? daddrs[2] : [])): -%}
+ 	{{ fw4.ipproto(family) }} daddr & {{ a.mask }} {{ a.invert ? '!=' : '==' }} {{ a.addr }} {%+ endfor -%}
++{% if (fw4.default_option("fullcone")): %}
++fullcone comment "!fw4: Fullcone NAT {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
++{% else %}
+ masquerade comment "!fw4: Masquerade {{ fw4.nfproto(family, true) }} {{ zone.name }} traffic"
++{% endif %}
+diff --git a/root/usr/share/ucode/fw4.uc b/root/usr/share/ucode/fw4.uc
+index 690deb0..b914435 100644
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -1972,6 +1972,13 @@ return {
+ 			flow_offloading: [ "bool", "0" ],
+ 			flow_offloading_hw: [ "bool", "0" ],
+ 
++			/* Without this entry the option is not unknown-but-harmless:
++			 * parse_options() only copies keys it is told about and warns
++			 * "specifies unknown option 'fullcone'" for the rest, so
++			 * default_option("fullcone") would return null and the two
++			 * templates above would emit nothing at all -- silently. */
++			fullcone: [ "bool", "0" ],
++
+ 			auto_includes: [ "bool", "1" ]
+ 		});
+ 

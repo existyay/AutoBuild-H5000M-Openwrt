@@ -1,6 +1,8 @@
+diff --git a/include/libnftnl/expr.h b/include/libnftnl/expr.h
+index 1c07b54..cf57de9 100644
 --- a/include/libnftnl/expr.h
 +++ b/include/libnftnl/expr.h
-@@ -21,6 +21,7 @@
+@@ -21,6 +21,7 @@ void nftnl_expr_free(const struct nftnl_expr *expr);
  
  bool nftnl_expr_is_set(const struct nftnl_expr *expr, uint16_t type);
  int nftnl_expr_set(struct nftnl_expr *expr, uint16_t type, const void *data, uint32_t data_len);
@@ -8,7 +10,7 @@
  #define nftnl_expr_set_data nftnl_expr_set
  void nftnl_expr_set_u8(struct nftnl_expr *expr, uint16_t type, uint8_t data);
  void nftnl_expr_set_u16(struct nftnl_expr *expr, uint16_t type, uint16_t data);
-@@ -269,10 +270,19 @@
+@@ -269,9 +270,18 @@ enum {
  	NFTNL_EXPR_MASQ_FLAGS		= NFTNL_EXPR_BASE,
  	NFTNL_EXPR_MASQ_REG_PROTO_MIN,
  	NFTNL_EXPR_MASQ_REG_PROTO_MAX,
@@ -17,20 +19,21 @@
  	__NFTNL_EXPR_MASQ_MAX
  };
  
- enum {
++enum {
 +	NFTNL_EXPR_FULLCONE_FLAGS	= NFTNL_EXPR_BASE,
 +	NFTNL_EXPR_FULLCONE_REG_PROTO_MIN,
 +	NFTNL_EXPR_FULLCONE_REG_PROTO_MAX,
 +	__NFTNL_EXPR_FULLCONE_MAX
 +};
 +
-+enum {
+ enum {
  	NFTNL_EXPR_REDIR_REG_PROTO_MIN	= NFTNL_EXPR_BASE,
  	NFTNL_EXPR_REDIR_REG_PROTO_MAX,
- 	NFTNL_EXPR_REDIR_FLAGS,
+diff --git a/include/linux/netfilter/nf_tables.h b/include/linux/netfilter/nf_tables.h
+index 7c0c915..3044649 100644
 --- a/include/linux/netfilter/nf_tables.h
 +++ b/include/linux/netfilter/nf_tables.h
-@@ -1499,17 +1499,37 @@
+@@ -1499,16 +1499,36 @@ enum nft_tproxy_attributes {
   * @NFTA_MASQ_FLAGS: NAT flags (see NF_NAT_RANGE_* in linux/netfilter/nf_nat.h) (NLA_U32)
   * @NFTA_MASQ_REG_PROTO_MIN: source register of proto range start (NLA_U32: nft_registers)
   * @NFTA_MASQ_REG_PROTO_MAX: source register of proto range end (NLA_U32: nft_registers)
@@ -48,7 +51,7 @@
  };
  #define NFTA_MASQ_MAX		(__NFTA_MASQ_MAX - 1)
  
- /**
++/**
 + * enum nft_fullcone_attributes - nf_tables fullcone expression attributes
 + *
 + * @NFTA_FULLCONE_FLAGS: NAT flags (see NF_NAT_RANGE_* in linux/netfilter/nf_nat.h) (NLA_U32)
@@ -64,12 +67,56 @@
 +};
 +#define NFTA_FULLCONE_MAX	(__NFTA_FULLCONE_MAX - 1)
 +
-+/**
+ /**
   * enum nft_redir_attributes - nf_tables redirect expression netlink attributes
   *
-  * @NFTA_REDIR_REG_PROTO_MIN: source register of proto range start (NLA_U32: nft_registers)
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 1c38d00..d486718 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -34,6 +34,7 @@ libnftnl_la_SOURCES = utils.c		\
+ 		      expr/exthdr.c	\
+ 		      expr/flow_offload.c \
+ 		      expr/fib.c	\
++		      expr/fullcone.c	\
+ 		      expr/fwd.c	\
+ 		      expr/last.c	\
+ 		      expr/limit.c	\
+diff --git a/src/Makefile.in b/src/Makefile.in
+index d3c956f..ee9f37c 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -137,7 +137,7 @@ am__dirstamp = $(am__leading_dot)dirstamp
+ am_libnftnl_la_OBJECTS = utils.lo batch.lo flowtable.lo common.lo \
+ 	gen.lo table.lo trace.lo chain.lo object.lo rule.lo set.lo \
+ 	set_elem.lo str_array.lo ruleset.lo udata.lo expr.lo \
+-	expr_ops.lo expr/bitwise.lo expr/byteorder.lo expr/cmp.lo \
++	expr_ops.lo expr/fullcone.lo expr/bitwise.lo expr/byteorder.lo expr/cmp.lo \
+ 	expr/range.lo expr/connlimit.lo expr/counter.lo expr/ct.lo \
+ 	expr/data_reg.lo expr/dup.lo expr/exthdr.lo \
+ 	expr/flow_offload.lo expr/fib.lo expr/fwd.lo expr/last.lo \
+@@ -439,6 +439,7 @@ libnftnl_la_SOURCES = utils.c		\
+ 		      expr/exthdr.c	\
+ 		      expr/flow_offload.c \
+ 		      expr/fib.c	\
++		      expr/fullcone.c	\
+ 		      expr/fwd.c	\
+ 		      expr/last.c	\
+ 		      expr/limit.c	\
+@@ -551,6 +552,7 @@ expr/$(am__dirstamp):
+ expr/$(DEPDIR)/$(am__dirstamp):
+ 	@$(MKDIR_P) expr/$(DEPDIR)
+ 	@: >>expr/$(DEPDIR)/$(am__dirstamp)
++expr/fullcone.lo: expr/$(am__dirstamp) expr/$(DEPDIR)/$(am__dirstamp)
+ expr/bitwise.lo: expr/$(am__dirstamp) expr/$(DEPDIR)/$(am__dirstamp)
+ expr/byteorder.lo: expr/$(am__dirstamp) expr/$(DEPDIR)/$(am__dirstamp)
+ expr/cmp.lo: expr/$(am__dirstamp) expr/$(DEPDIR)/$(am__dirstamp)
+diff --git a/src/expr/fullcone.c b/src/expr/fullcone.c
+new file mode 100644
+index 0000000..533741a
 --- /dev/null
 +++ b/src/expr/fullcone.c
+@@ -0,0 +1,166 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +/*
 + * (C) 2022 wongsyrone
@@ -93,8 +140,7 @@
 +};
 +
 +static int nftnl_expr_fullcone_set(struct nftnl_expr *e, uint16_t type,
-+				   const void *data, uint32_t data_len,
-+				   uint32_t byteorder)
++				   const void *data, uint32_t data_len)
 +{
 +	struct nftnl_expr_fullcone *fullcone = nftnl_expr_data(e);
 +
@@ -237,3 +283,23 @@
 +	.build		= nftnl_expr_fullcone_build,
 +	.output		= nftnl_expr_fullcone_snprintf,
 +};
+diff --git a/src/expr_ops.c b/src/expr_ops.c
+index b85f472..7bcd032 100644
+--- a/src/expr_ops.c
++++ b/src/expr_ops.c
+@@ -13,6 +13,7 @@ extern struct expr_ops expr_ops_ct;
+ extern struct expr_ops expr_ops_dup;
+ extern struct expr_ops expr_ops_exthdr;
+ extern struct expr_ops expr_ops_fwd;
++extern struct expr_ops expr_ops_fullcone;
+ extern struct expr_ops expr_ops_immediate;
+ extern struct expr_ops expr_ops_inner;
+ extern struct expr_ops expr_ops_last;
+@@ -58,6 +59,7 @@ static struct expr_ops *expr_ops[] = {
+ 	&expr_ops_dup,
+ 	&expr_ops_exthdr,
+ 	&expr_ops_fwd,
++	&expr_ops_fullcone,
+ 	&expr_ops_immediate,
+ 	&expr_ops_inner,
+ 	&expr_ops_last,
