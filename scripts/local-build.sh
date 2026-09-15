@@ -1223,20 +1223,43 @@ fix_mirror_hashes() {
 			[ -f "$f" ] || continue
 			grep -q '^PKG_SOURCE_PROTO:=git' "$f" 2>/dev/null || continue
 			grep -q '^PKG_MIRROR_HASH:=' "$f" 2>/dev/null || continue
-			# Under `set -e` the test must not be the last command of the
-			# loop body, so spell it as an if rather than `x && continue`.
-			if grep -q '^PKG_MIRROR_HASH:=skip$' "$f" 2>/dev/null; then
-				continue
-			fi
-			sed -i 's|^PKG_MIRROR_HASH:=.*|PKG_MIRROR_HASH:=skip|' "$f"
+			# Delete the line outright; do NOT set it to `skip`.
+			#
+			# `skip` looks like the obvious answer and is wrong.  include/
+			# download.mk treats any non-empty MIRROR_HASH as "fetch it via
+			# scripts/download.pl", and download.pl only trusts a hash whose
+			# length is 32 or 64 — `skip` is neither, so hash_cmd() is empty
+			# and its "does the file already satisfy us?" branch is skipped
+			# entirely.  It then goes to the OpenWrt source mirrors, which do
+			# not carry a tarball generated from a third-party git commit:
+			#
+			#   curl ... https://mirrors.tuna.../shadowsocks-libev-3.3.5.tar.xz
+			#   curl: (22) The requested URL returned error: 404
+			#   Download failed.
+			#
+			# and what lands in dl/ is the 404 body.  The shell then sees a
+			# file where it expected none, download.pl exits 0, the rawgit
+			# fallback never runs, and the build dies much later in
+			# Build/Prepare with
+			#
+			#   xzcat: dl/shadowsocks-libev-3.3.5.tar.xz: File format not recognized
+			#
+			# Removing the line instead leaves MIRROR_HASH as the default `x`,
+			# and wrap_mirror's guard — `$(if $(MIRROR),$(filter-out x,
+			# $(MIRROR_HASH)))` — is then false, so it takes the git branch
+			# directly: a clone of the pinned PKG_SOURCE_VERSION, packed
+			# locally.  No mirror, no download.pl, no 404 body.  `make
+			# download` still reports "hash is missing" through check_hash,
+			# which is a warning and not a failure.
+			sed -i '/^PKG_MIRROR_HASH:=/d' "$f"
 			rel="${f#"$dir"/}"
-			log "  $(basename "$dir")/${rel%/*}: PKG_MIRROR_HASH -> skip"
+			log "  $(basename "$dir")/${rel%/*}: PKG_MIRROR_HASH removed (source stays pinned by PKG_SOURCE_VERSION)"
 			fixed=$((fixed + 1))
 		done < <(find "$dir" -mindepth 1 -maxdepth 4 \
 			-not -path '*/.git/*' -name Makefile 2>/dev/null | sort)
 	done
 
-	[ "$fixed" -gt 0 ] && log "Neutralised ${fixed} mirror hash(es); sources stay pinned by PKG_SOURCE_VERSION"
+	[ "$fixed" -gt 0 ] && log "Stripped ${fixed} unreproducible mirror hash(es); those packages now clone from their pinned commit"
 	return 0
 }
 
@@ -1266,9 +1289,12 @@ verify_cached_sources() {
 		[ -d "$dir" ] || continue
 		while IFS= read -r f; do
 			[ -f "$f" ] || continue
-			# Only the packages whose hash was neutralised are in scope; for
-			# the rest OpenWrt still verifies the checksum itself.
-			grep -q '^PKG_MIRROR_HASH:=skip$' "$f" 2>/dev/null || continue
+			# Only git packages with no usable hash: OpenWrt cannot verify
+			# those, so nothing else will notice a bad file.  Everything else
+			# keeps its checksum and is OpenWrt's business.
+			grep -q '^PKG_SOURCE_PROTO:=git' "$f" 2>/dev/null || continue
+			grep -q '^PKG_MIRROR_HASH:=' "$f" 2>/dev/null && continue
+			grep -qE '^PKG_HASH:=' "$f" 2>/dev/null && continue
 
 			name="$(sed -n 's/^PKG_NAME:=//p' "$f" | head -1)"
 			[ -n "$name" ] || name="$(basename "$dir")"
