@@ -1292,9 +1292,20 @@ verify_cached_sources() {
 			# Only git packages with no usable hash: OpenWrt cannot verify
 			# those, so nothing else will notice a bad file.  Everything else
 			# keeps its checksum and is OpenWrt's business.
-			grep -q '^PKG_SOURCE_PROTO:=git' "$f" 2>/dev/null || continue
-			grep -q '^PKG_MIRROR_HASH:=' "$f" 2>/dev/null && continue
-			grep -qE '^PKG_HASH:=' "$f" 2>/dev/null && continue
+			#
+			# Written as `if`, not `x && continue`: every branch here is taken
+			# by most files, and a bare failing test as the last command of a
+			# loop body aborts the whole build under `set -e`.  That trap has
+			# bitten this script once already.
+			if ! grep -q '^PKG_SOURCE_PROTO:=git' "$f" 2>/dev/null; then
+				continue
+			fi
+			if grep -q '^PKG_MIRROR_HASH:=' "$f" 2>/dev/null; then
+				continue
+			fi
+			if grep -qE '^PKG_HASH:=' "$f" 2>/dev/null; then
+				continue
+			fi
 
 			name="$(sed -n 's/^PKG_NAME:=//p' "$f" | head -1)"
 			[ -n "$name" ] || name="$(basename "$dir")"
