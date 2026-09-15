@@ -11,7 +11,10 @@ config accel 'settings'
 	option flow_offload_hw '1'
 	option bbr '1'
 
-	# Full-cone NAT.  Needs the kernel module, the patched nftables and the
-	# patched firewall4; when all three are present this replaces masquerade in
-	# the srcnat rules and adds the inbound restore rule in dstnat.
+	# Full-cone NAT.  It takes four layers and this switch is only the last
+	# one: the kernel module registers the `fullcone` expression, libnftnl
+	# gives it a constant, nftables gives it a keyword, and firewall4 emits it
+	# in place of `masquerade` in srcnat plus the inbound restore rule in
+	# dstnat.  All four ship in this firmware; see docs/engineering.md for why
+	# "it compiles" is not the same as "it works".
 	option fullcone '1'

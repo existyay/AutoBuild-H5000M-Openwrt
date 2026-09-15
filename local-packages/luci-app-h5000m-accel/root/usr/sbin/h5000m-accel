@@ -3,8 +3,10 @@
 #
 # On mainline this device has no HNAT and no TurboACC: hardware acceleration is
 # the PPE driven through netfilter's flowtable, which fw4 exposes as
-# flow_offloading_hw.  This writes those two switches and, optionally, turns on
-# BBR.  It deliberately does not pretend to offer anything else.
+# flow_offloading_hw.  This writes those two switches, optionally turns on BBR,
+# and carries the fullcone switch through to firewall4 (which is where a
+# full-cone rule is actually emitted — the acceleration page only records the
+# intent).  It deliberately does not pretend to offer anything else.
 
 CONF=h5000m_accel
 
