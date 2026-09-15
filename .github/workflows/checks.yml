@@ -126,6 +126,93 @@ jobs:
           echo "checked ${checked} tree patch(es)"
           exit $status
 
+      # The three fullcone patches are not in patches/.  Their packages download
+      # their own source into build_dir, so install_nftables_patches() copies each
+      # one into that package's patches/ directory at build time — which means
+      # nothing here verified them against the source upstream actually ships.
+      #
+      # That gap is expensive: nftables 1.1.6 -> 1.1.7 would not be noticed until
+      # twenty minutes into a three-hour firmware build, and the failure would
+      # read as a compile error.  This mirrors what the build does, but in the
+      # cheap gate.
+      #
+      # The version and commit are read from the freshly cloned upstream tree, so
+      # this follows a bump automatically instead of pinning our own copy.
+      - name: Verify the fullcone patches still apply to the sources upstream ships
+        run: |
+          set -euo pipefail
+          SRC=/tmp/upstream-check
+
+          # Reuse the clone the previous step made; clone only if this step is
+          # ever run on its own.
+          if [ ! -d "$SRC" ]; then
+            git clone --depth 1 --branch "${OPENWRT_REPO_BRANCH}" \
+              "${OPENWRT_REPO_URL}" "$SRC"
+          fi
+          WORK=/tmp/fullcone-src
+          rm -rf "$WORK"; mkdir -p "$WORK"
+          status=0
+
+          check_tarball() { # <package dir under the tree> <patch>
+            local pkgdir="$1" patch="$2" name ver url file
+            patch="$(realpath "$patch")"
+            name=$(sed -n 's/^PKG_NAME:=//p' "$SRC/$pkgdir/Makefile" | head -1)
+            ver=$(sed -n 's/^PKG_VERSION:=//p' "$SRC/$pkgdir/Makefile" | head -1)
+            url=$(sed -n 's/^PKG_SOURCE_URL:=//p' "$SRC/$pkgdir/Makefile" | head -1)
+            file=$(sed -n 's/^PKG_SOURCE:=//p' "$SRC/$pkgdir/Makefile" | head -1)
+            url=${url//'$(PKG_NAME)'/$name}; url=${url//'$(PKG_VERSION)'/$ver}
+            file=${file//'$(PKG_NAME)'/$name}; file=${file//'$(PKG_VERSION)'/$ver}
+
+            echo "--- $(basename "$patch") against $name $ver"
+            if ! curl -fsSL --retry 3 --max-time 120 -o "$WORK/$file" "$url/$file"; then
+              echo "::error::cannot download $url/$file — upstream moved or renamed the source"
+              status=1; return 0
+            fi
+            mkdir -p "$WORK/$name"
+            tar -xf "$WORK/$file" -C "$WORK/$name" --strip-components=1
+            if ( cd "$WORK/$name" && patch -p1 --dry-run < "$patch" >/dev/null ); then
+              echo "    applies"
+            else
+              echo "::error::$(basename "$patch") no longer applies to $name $ver"
+              ( cd "$WORK/$name" && patch -p1 --dry-run < "$patch" 2>&1 | head -6 ) || true
+              status=1
+            fi
+          }
+
+          check_git() { # <package dir under the tree> <patch> <repo url>
+            local pkgdir="$1" patch="$2" repo="$3" name sha
+            patch="$(realpath "$patch")"
+            name=$(sed -n 's/^PKG_NAME:=//p' "$SRC/$pkgdir/Makefile" | head -1)
+            sha=$(sed -n 's/^PKG_SOURCE_VERSION:=//p' "$SRC/$pkgdir/Makefile" | head -1)
+            echo "--- $(basename "$patch") against $name ${sha:0:12}"
+            rm -rf "$WORK/$name"; mkdir -p "$WORK/$name"
+            git -C "$WORK/$name" init -q .
+            git -C "$WORK/$name" remote add origin "$repo"
+            if ! git -C "$WORK/$name" fetch -q --depth 1 origin "$sha"; then
+              echo "::error::cannot fetch $repo at $sha — upstream dropped that commit"
+              status=1; return 0
+            fi
+            git -C "$WORK/$name" checkout -q FETCH_HEAD
+            if ( cd "$WORK/$name" && patch -p1 --dry-run < "$patch" >/dev/null ); then
+              echo "    applies"
+            else
+              echo "::error::$(basename "$patch") no longer applies to $name ${sha:0:12}"
+              ( cd "$WORK/$name" && patch -p1 --dry-run < "$patch" 2>&1 | head -6 ) || true
+              status=1
+            fi
+          }
+
+          check_tarball package/libs/libnftnl          libnftnl-patches/100-fullcone-expression.patch
+          check_tarball package/network/utils/nftables nftables-patches/100-fullcone-expression.patch
+          check_git     package/network/config/firewall4 firewall4-patches/100-fullcone-support.patch \
+                        https://git.openwrt.org/project/firewall4.git
+
+          echo
+          if [ "$status" -ne 0 ]; then
+            echo "one or more fullcone patches no longer apply upstream"
+          fi
+          exit $status
+
       - name: Verify the board plugin repositories still exist
         run: |
           set -euo pipefail
