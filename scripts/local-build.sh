@@ -1575,14 +1575,17 @@ EOF
 
 	# Repository only, hence the empty switch — see the note on the block above.
 	#
-	# shadowsocks-libev is deliberately NOT here.  It is not a declared
-	# dependency of luci-app-ssr-plus (its INCLUDE_Shadowsocks_NONE_Client
-	# default means no Shadowsocks client is pulled in at all), and in CI it
-	# failed to compile while compiling cleanly here — the parallel build
-	# swallows the sub-make output, so the log showed only "failed to build"
-	# with no reason, and it blocked the entire firmware.  An optional package
-	# that cannot be diagnosed is not worth stopping the build for; SSR-Plus
-	# itself, its LuCI app and the cores it actually needs are unaffected.
+	# shadowsocks-libev is back in this list.  It was removed two commits ago as
+	# an undiagnosable CI blocker — "ERROR: package/luci-app-ssr-plus/
+	# shadowsocks-libev failed to build", with no reason in the log.  That
+	# failure was never a compile error: it was a PKG_MIRROR_HASH mismatch in
+	# the *download* stage, and the compile failed a few seconds later only
+	# because there was no source tree.  The real cause is fixed in
+	# fix_mirror_hashes, the download and compile stages both pass now, and a
+	# workaround kept for a problem that no longer exists is just a missing
+	# package.  HiJpass selects shadowsocks-libev-ss-local and -ss-server, so it
+	# was being built anyway; this only makes the repository carry the config
+	# helpers and the tools alongside them.
 	#
 	# SSR-Plus uses `select`, not `depends`, for the cores its INCLUDE_* options
 	# cover.  A select forces its target to =y even when the selecting package is
@@ -1598,7 +1601,7 @@ EOF
 		luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn \
 		chinadns-ng dns2socks dns2tcp ipt2socks redsocks2 shadowsocksr-libev \
 		simple-obfs tcping shadow-tls tuic-client v2ray-plugin xray-plugin \
-		gn lua-neturl naiveproxy \
+		gn lua-neturl naiveproxy shadowsocks-libev \
 		3proxy v2ray-geoip v2ray-geosite \
 		shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir
 
