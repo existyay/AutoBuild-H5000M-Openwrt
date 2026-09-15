@@ -404,22 +404,64 @@ jobs:
           echo "pushed to ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
 
       # OpenWrt's parallel build swallows the sub-make output, so a failure
-      # leaves only "package/X failed to build" with no reason — which is all
-      # the rust host failure ever showed.  Re-run the failing target serially
-      # with V=s so the actual error is in the log.
+      # leaves only "ERROR: package/X failed to build" with no reason at all.
+      # This step recovers the name of the package that actually failed and
+      # re-runs its download *and* compile serially with V=s, so the real error
+      # reaches the log.  See the comment inside for why both stages matter.
       - name: Diagnose a failed build
         if: failure()
         continue-on-error: true
-        timeout-minutes: 25
+        timeout-minutes: 40
         working-directory: /o
         run: |
           set -uo pipefail
-          echo "=== last 200 lines of the build log ==="
-          tail -200 build.log 2>/dev/null || echo "(no build.log)"
-          for pkg in package/feeds/packages/rust/host/compile; do
+          echo "=== last 300 lines of the build log ==="
+          tail -300 build.log 2>/dev/null || echo "(no build.log)"
+
+          # Name the package that actually failed instead of guessing at one.
+          #
+          # OpenWrt's parallel build prints exactly one line per failing
+          # package — "ERROR: <path> failed to build." — and swallows the
+          # sub-make output, so the reason never reaches the log.  That single
+          # line is the only usable clue.
+          #
+          # The previous version of this step hard-coded
+          # package/feeds/packages/rust/host/compile.  That was the first
+          # failure this project ever hit, and it has not been the failing
+          # package since; the step spent its whole 25-minute budget re-proving
+          # that rust builds while shadowsocks-libev failed for a completely
+          # different reason that stayed invisible across two full CI cycles.
+          mapfile -t failed < <(
+            grep -aoE 'ERROR: [^ ]+ failed to build' build.log 2>/dev/null \
+              | sed 's/^ERROR: *//; s/ failed to build$//' | sort -u
+          )
+          if [ "${#failed[@]}" -eq 0 ]; then
+            printf 'no "failed to build" line found in build.log\n'
+          else
+            printf 'failing package(s): %s\n' "${failed[*]}"
+          fi
+
+          for pkg in ${failed[@]+"${failed[@]}"}; do
+            # Download first.  A download failure is reported with exactly the
+            # same wording as a compile failure, and the compile then fails a
+            # few seconds later for the trivial reason that there is no source
+            # tree — which is precisely how "Hash mismatch ... shadowsocks-libev"
+            # was mistaken for a compiler problem.
             echo
-            echo "=== re-running ${pkg} with V=s ==="
-            timeout 1200 make -C openwrt -j1 "${pkg}" V=s 2>&1 | tail -120
+            echo "=== re-running ${pkg}/download with V=s ==="
+            timeout 900 make -C openwrt -j1 "${pkg}/download" V=s > /tmp/diag-dl.log 2>&1
+            echo "exit: $?"
+            tail -40 /tmp/diag-dl.log
+
+            echo
+            echo "=== re-running ${pkg}/compile with V=s ==="
+            timeout 1800 make -C openwrt -j1 "${pkg}/compile" V=s > /tmp/diag-cc.log 2>&1
+            echo "exit: $?"
+            echo "--- error lines (full output, not just the tail) ---"
+            grep -aiE 'error|Error [0-9]|undefined reference|No such file|mismatch' /tmp/diag-cc.log \
+              | tail -60 || true
+            echo "--- last 120 lines ---"
+            tail -120 /tmp/diag-cc.log
           done
 
       - name: Collect build info
