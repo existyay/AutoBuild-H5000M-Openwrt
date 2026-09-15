@@ -2000,6 +2000,29 @@ compile_firmware() {
 	local start make_pid heartbeat_pid
 	start="$(date +%s)"
 
+	# Fail fast on packages that have failed late in a build before.
+	#
+	# `make world` only reaches the packages under package/luci-app-* about 160
+	# minutes in, so a failure there costs an entire run — three and a half
+	# hours — to discover.  Building the named packages first (with their
+	# dependencies, which is what `make <pkg>/compile` does) surfaces the same
+	# failure in minutes instead, and `world` then skips them.
+	#
+	# Nothing is built here that `world` would not have built anyway; only the
+	# order changes.  Empty by default, so a normal build is unaffected.
+	if [ -n "${PREBUILD_PACKAGES:-}" ]; then
+		local targets=() p
+		for p in $PREBUILD_PACKAGES; do targets+=("${p}/compile"); done
+		log "Pre-building first: ${targets[*]}"
+		if ! make -j"${THREADS}" \
+			BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" \
+			"${targets[@]}" > >(tee -a "$LOG_FILE") 2>&1; then
+			report_build_failure
+			die "Pre-build of ${targets[*]} failed"
+		fi
+		log "Pre-build finished"
+	fi
+
 	# make's output goes to build.log as well as the console.
 	#
 	# build.log used to hold only this script's own log() lines.  OpenWrt names a

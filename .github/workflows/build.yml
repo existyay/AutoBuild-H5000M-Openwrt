@@ -36,6 +36,10 @@ on:
         description: 'apk 仓库的托管地址 会被写入固件 留空则固件不带额外软件源'
         type: string
         default: ''
+      prebuild_packages:
+        description: '诊断用 先单独编译这些包（空格分隔 如 package/luci-app-ssr-plus/shadowsocks-libev）失败可提前暴露 留空则正常全量编译'
+        type: string
+        default: ''
       enable_dockerman:
         description: 'Docker 容器支持'
         type: boolean
@@ -302,6 +306,12 @@ jobs:
           ENABLE_MOSDNS: 'true'
           ENABLE_HOMEPROXY: 'false'
           ENABLE_ADGUARDHOME: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adguardhome) || 'false' }}
+          # Optional, diagnostic.  `make world` reaches package/luci-app-* about
+          # 160 minutes in, so a failure there costs a whole three-hour run to
+          # find.  Naming packages here builds them (and their dependencies)
+          # first, with the per-package logs on, so the same failure surfaces in
+          # minutes.  Empty by default: the only thing that changes is order.
+          PREBUILD_PACKAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.prebuild_packages || '' }}
         run: |
           set -euo pipefail
           args=()
