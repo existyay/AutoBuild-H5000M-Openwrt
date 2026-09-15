@@ -187,6 +187,30 @@ SRC="${ROOT_DIR}/${SOURCE_DIR}"
 ART="${ROOT_DIR}/${ARTIFACTS_DIR}"
 LOG_FILE="${ROOT_DIR}/build.log"
 
+# Per-package build logs, enabled by passing BUILD_LOG=1 to make below.
+#
+# OpenWrt already has this machinery — include/subdir.mk tees each package's
+# build output into $(BUILD_LOG_DIR)/<package>/<step>.txt and writes the name of
+# a failing target into that directory's error.txt — but it is gated on a config
+# symbol that our build could never set:
+#
+#   config BUILD_LOG
+#           bool "Enable log files during build process" if DEVEL
+#
+# `if DEVEL` makes the symbol invisible unless CONFIG_DEVEL=y, and defconfig
+# then drops `CONFIG_BUILD_LOG=y` from the seed without a word.  The result was
+# that every build so far kept no per-package output at all, which is why a
+# failure could only ever be reported as "ERROR: package/X failed to build."
+# with the reason nowhere.  Measured: with the flag the seed set, the generated
+# .config contains CONFIG_BUILD_LOG_DIR="" and no CONFIG_BUILD_LOG.
+#
+# Passing the variables to make directly sidesteps the Kconfig visibility rule
+# entirely.  Besides being the only way to get the reason for a failure, it also
+# keeps the CI console readable: the same measurement showed the console output
+# for one package drop from 1.9 MB to 3.9 KB while the full 277 KB landed in the
+# per-package file.
+BUILD_LOG_DIR="${ROOT_DIR}/logs"
+
 usage() {
 	cat <<'EOF'
 Usage: scripts/local-build.sh [options]
@@ -1953,6 +1977,7 @@ prefetch_and_toolchain() {
 	else
 		log "Prefetching sources (make download)"
 		run_with_timeout "$DOWNLOAD_TIMEOUT" make download -j"${THREADS}" \
+			BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" \
 			|| warn "make download reported failures; the compile step will retry them"
 	fi
 
@@ -1963,7 +1988,8 @@ prefetch_and_toolchain() {
 
 	log "Building toolchain (this is the long part)"
 	run_with_timeout "$TOOLCHAIN_TIMEOUT" make toolchain/install -j"${THREADS}" \
-		|| die "Toolchain build failed"
+		BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" \
+		|| { report_build_failure; die "Toolchain build failed"; }
 }
 
 compile_firmware() {
@@ -1974,7 +2000,23 @@ compile_firmware() {
 	local start make_pid heartbeat_pid
 	start="$(date +%s)"
 
-	make -j"${THREADS}" &
+	# make's output goes to build.log as well as the console.
+	#
+	# build.log used to hold only this script's own log() lines.  OpenWrt names a
+	# failing package with exactly one line — "ERROR: <path> failed to build." —
+	# printed by make, and it swallows the sub-make output, so that line is the
+	# only clue there is.  It therefore has to reach the file the diagnose step
+	# reads; without it the step reports "no failed to build line found" while
+	# the line sits in the console output right above it.  That is exactly what
+	# happened on the run this comment was written after.
+	#
+	# A process substitution rather than a pipe, deliberately: with
+	# `make ... | tee` the `$!` below would be tee's PID, so `wait` would return
+	# tee's status and a failed build would be reported as a successful one.
+	# With `> >(tee ...)` $! stays make's PID and `wait` sees the real status.
+	make -j"${THREADS}" \
+		BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" \
+		> >(tee -a "$LOG_FILE") 2>&1 &
 	make_pid=$!
 
 	# Heartbeat so CI logs show progress instead of going quiet for hours.
@@ -1989,6 +2031,7 @@ compile_firmware() {
 
 	if ! wait "$make_pid"; then
 		kill "$heartbeat_pid" 2>/dev/null || true
+		report_build_failure
 		die "Firmware compilation failed"
 	fi
 
@@ -1996,6 +2039,79 @@ compile_firmware() {
 	wait "$heartbeat_pid" 2>/dev/null || true
 
 	log "Compilation finished in $(( ($(date +%s) - start) / 60 )) min"
+}
+
+# Say which package failed and why, from the logs make just wrote.
+#
+# OpenWrt's parallel build prints one line per failure and swallows the sub-make
+# output, so "ERROR: package/X failed to build." is all the console ever shows.
+# The reason is not lost, it is just somewhere else: with BUILD_LOG set,
+# include/subdir.mk writes the failing target into
+# $(BUILD_LOG_DIR)/<package>/error.txt and that package's entire build output
+# into $(BUILD_LOG_DIR)/<package>/<step>.txt.
+#
+# This runs before die(), in the same job, so a failure explains itself instead
+# of costing another three-hour round trip.  Three earlier failures were
+# "failed to build" with nothing else, twice for the same package.
+report_build_failure() {
+	local err line target dir log found=0
+
+	# Every element must be a real glob: a literal path that does not exist is
+	# kept by nullglob (nullglob drops unmatched *patterns*, not missing names),
+	# and the loop below would then try to read a file that is not there.
+	shopt -s nullglob
+	local errors=("$BUILD_LOG_DIR"/*/error.txt "$BUILD_LOG_DIR"/*/*/error.txt \
+		"$BUILD_LOG_DIR"/*/*/*/error.txt "$BUILD_LOG_DIR"/*/*/*/*/error.txt)
+	shopt -u nullglob
+
+	if [ "${#errors[@]}" -eq 0 ]; then
+		warn "no error.txt under ${BUILD_LOG_DIR}; make's own output is in ${LOG_FILE}"
+		return 0
+	fi
+
+	printf '\n\033[1;31m[h5000m:error]\033[0m %s\n' "--- the package(s) that failed ---" >&2
+
+	for err in "${errors[@]}"; do
+		# error.txt holds the failing target name, e.g.
+		#   ERROR: package/luci-app-ssr-plus/shadowsocks-libev failed to build.
+		# Its own location is NOT the package's directory — it sits at the level
+		# of whichever subdir make was building, so several failures share one
+		# file.  The target therefore has to be read out of the contents.
+		while IFS= read -r line; do
+			target="$(printf '%s' "$line" \
+				| sed 's/^[[:space:]]*ERROR:[[:space:]]*//; s/[[:space:]]*failed to build\.\{0,1\}$//')"
+			[ -n "$target" ] || continue
+			found=1
+			printf '  %s\n' "$target" >&2
+
+			# subdir.mk tee'd that step to <BUILD_LOG_DIR>/<target>/<step>.txt;
+			# compile is the informative one, so prefer it.
+			log=""
+			dir="$BUILD_LOG_DIR/$target"
+			if [ -f "$dir/compile.txt" ]; then
+				log="$dir/compile.txt"
+			elif [ -f "$BUILD_LOG_DIR/$target.txt" ]; then
+				log="$BUILD_LOG_DIR/$target.txt"
+			elif [ -d "$dir" ]; then
+				log="$(find "$dir" -maxdepth 1 -type f -name '*.txt' \
+					! -name error.txt 2>/dev/null | head -1)"
+			fi
+
+			if [ -n "$log" ] && [ -f "$log" ]; then
+				printf '\n  --- last 60 lines of %s ---\n' "${log#"$ROOT_DIR"/}" >&2
+				tail -60 "$log" >&2
+				printf '  --- end ---\n' >&2
+			else
+				printf '  (no per-package log found for this target)\n' >&2
+			fi
+		done < "$err"
+	done
+
+	if [ "$found" = 0 ]; then
+		warn "error.txt exists but named no target; see ${LOG_FILE}"
+	fi
+	printf '  (full per-package logs: %s)\n\n' "${BUILD_LOG_DIR#"$ROOT_DIR"/}" >&2
+	return 0
 }
 
 # Assemble a single flat apk repository containing every package this build

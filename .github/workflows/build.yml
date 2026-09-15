@@ -403,11 +403,28 @@ jobs:
           ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst build-cache.sha256 )
           echo "pushed to ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
 
-      # OpenWrt's parallel build swallows the sub-make output, so a failure
-      # leaves only "ERROR: package/X failed to build" with no reason at all.
-      # This step recovers the name of the package that actually failed and
-      # re-runs its download *and* compile serially with V=s, so the real error
-      # reaches the log.  See the comment inside for why both stages matter.
+      # This is the step that has to work, because everything else about a
+      # failure is guesswork without it.
+      #
+      # Three separate mechanisms used to fail at once, which is why three
+      # consecutive builds reported nothing but "ERROR: package/X failed to
+      # build." — twice for the same package, with no way to see why:
+      #
+      #   * build.log held only the script's own log() lines.  The ERROR line is
+      #     printed by make, so it never reached the file this step read, and
+      #     the grep below found nothing while the line sat in the console.
+      #     Fixed in compile_firmware, which now tees make's output into it.
+      #   * The per-package logs OpenWrt can produce were switched off.  The
+      #     seed set CONFIG_BUILD_LOG=y, but that symbol is `if DEVEL`, so
+      #     defconfig dropped it silently.  local-build.sh now passes
+      #     BUILD_LOG=1 BUILD_LOG_DIR directly to make.
+      #   * The step then guessed a package — package/feeds/packages/rust/host,
+      #     the first failure this project ever hit — and spent its budget
+      #     re-proving rust while a different package was broken.
+      #
+      # So: read the real per-package logs first (error.txt names the failing
+      # target, <target>/compile.txt holds its output), and only re-run a build
+      # if those are missing.
       - name: Diagnose a failed build
         if: failure()
         continue-on-error: true
@@ -415,49 +432,80 @@ jobs:
         working-directory: /o
         run: |
           set -uo pipefail
-          echo "=== last 300 lines of the build log ==="
-          tail -300 build.log 2>/dev/null || echo "(no build.log)"
+          echo "=== last 120 lines of build.log (script log + make output) ==="
+          tail -120 build.log 2>/dev/null || echo "(no build.log)"
 
-          # Name the package that actually failed instead of guessing at one.
-          #
-          # OpenWrt's parallel build prints exactly one line per failing
-          # package — "ERROR: <path> failed to build." — and swallows the
-          # sub-make output, so the reason never reaches the log.  That single
-          # line is the only usable clue.
-          #
-          # The previous version of this step hard-coded
-          # package/feeds/packages/rust/host/compile.  That was the first
-          # failure this project ever hit, and it has not been the failing
-          # package since; the step spent its whole 25-minute budget re-proving
-          # that rust builds while shadowsocks-libev failed for a completely
-          # different reason that stayed invisible across two full CI cycles.
+          echo
+          echo "=== OpenWrt per-package logs ==="
+          if [ -d logs ]; then
+            echo "logs/ contains $(find logs -type f | wc -l) file(s)"
+            # error.txt is written by include/subdir.mk on every failure and
+            # names the target that failed.  Its location is the subdir make was
+            # building, not the package directory, so read the contents.
+            mapfile -t errfiles < <(find logs -name error.txt 2>/dev/null)
+            if [ "${#errfiles[@]}" -eq 0 ]; then
+              echo "(no error.txt; listing the largest logs instead)"
+              find logs -type f -name '*.txt' -size +1k -printf '%s %p\n' 2>/dev/null \
+                | sort -rn | head -10
+            fi
+            for f in ${errfiles[@]+"${errfiles[@]}"}; do
+              echo
+              echo "--- $f"
+              cat "$f"
+            done
+          else
+            echo "(no logs/ directory)"
+          fi
+
+          # Name the failing package from every available source.
           mapfile -t failed < <(
-            grep -aoE 'ERROR: [^ ]+ failed to build' build.log 2>/dev/null \
+            {
+              grep -aoE 'ERROR: [^ ]+ failed to build' build.log 2>/dev/null
+              find logs -name error.txt -exec cat {} + 2>/dev/null
+            } | grep -aoE 'ERROR: [^ ]+ failed to build' \
               | sed 's/^ERROR: *//; s/ failed to build$//' | sort -u
           )
           if [ "${#failed[@]}" -eq 0 ]; then
-            printf 'no "failed to build" line found in build.log\n'
-          else
-            printf 'failing package(s): %s\n' "${failed[*]}"
+            # Last resort: the package make started most recently is almost
+            # always the one that failed, because the ERROR line follows it.
+            last=$(grep -aoE 'make\[[0-9]+\] -C [^ ]+ compile' build.log 2>/dev/null \
+              | tail -1 | awk '{print $3}')
+            if [ -n "$last" ]; then
+              failed=("$last")
+              echo
+              echo "no ERROR line found; falling back to the last package make started: $last"
+            fi
           fi
+          printf 'failing package(s): %s\n' "${failed[*]:-<none identified>}"
 
+          # Everything needed to explain the failure is normally already on
+          # disk.  Only re-run when it is not.
           for pkg in ${failed[@]+"${failed[@]}"}; do
-            # Download first.  A download failure is reported with exactly the
-            # same wording as a compile failure, and the compile then fails a
-            # few seconds later for the trivial reason that there is no source
-            # tree — which is precisely how "Hash mismatch ... shadowsocks-libev"
-            # was mistaken for a compiler problem.
+            shown=0
+            for log in "logs/${pkg}/compile.txt" "logs/${pkg}/host-compile.txt"; do
+              if [ -s "$log" ]; then
+                echo
+                echo "=== $log (last 150 lines) ==="
+                tail -150 "$log"
+                shown=1
+              fi
+            done
+            if [ "$shown" = 1 ]; then
+              continue
+            fi
+
             echo
-            echo "=== re-running ${pkg}/download with V=s ==="
+            echo "=== no per-package log for ${pkg}; re-running it with V=s ==="
+            echo "--- ${pkg}/download ---"
             timeout 900 make -C openwrt -j1 "${pkg}/download" V=s > /tmp/diag-dl.log 2>&1
             echo "exit: $?"
             tail -40 /tmp/diag-dl.log
 
             echo
-            echo "=== re-running ${pkg}/compile with V=s ==="
+            echo "--- ${pkg}/compile ---"
             timeout 1800 make -C openwrt -j1 "${pkg}/compile" V=s > /tmp/diag-cc.log 2>&1
             echo "exit: $?"
-            echo "--- error lines (full output, not just the tail) ---"
+            echo "--- error lines (whole output, not just the tail) ---"
             grep -aiE 'error|Error [0-9]|undefined reference|No such file|mismatch' /tmp/diag-cc.log \
               | tail -60 || true
             echo "--- last 120 lines ---"
@@ -539,6 +587,25 @@ jobs:
           echo
           echo "=== images ==="
           ls -la artifacts/ 2>/dev/null || true
+
+      # A failed build's evidence is worth keeping.
+      #
+      # The successful-path upload below is skipped on failure, so without this
+      # the reason for a failed build disappeared with the runner — which is how
+      # the same package came to fail three times with nothing but "failed to
+      # build" to show for it.  logs/ holds each package's full build output and
+      # the name of the target that failed.
+      - name: Upload build logs on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs
+          path: |
+            logs/
+            build.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload firmware
         uses: actions/upload-artifact@v7

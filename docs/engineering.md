@@ -1202,6 +1202,52 @@ nftables 时代实现 fullcone 需要四层同时正确，缺任何一层都不�
   所以 `libnftables` 的完整路径（parse → evaluate → netlink）无法在仿真下走通，
   ③ 只能停在"语法表里确实有、链接无缺失"这一层。
 
+### 为什么"failed to build"能连着三次都没有原因
+
+同样的 `shadowsocks-libev` 连续失败三次，日志里永远只有一行：
+
+```
+ERROR: package/luci-app-ssr-plus/shadowsocks-libev failed to build.
+```
+
+根因不是构建本身，而是**三个诊断通路同时断掉**。修的过程比修 bug 本身更值得记：
+
+1. **`build.log` 里没有 make 的输出。** 它只收集脚本自己 `log()` 的行；
+   而 `ERROR: ... failed to build.` 是 **make** 打的。诊断步骤 grep 这个文件，
+   自然永远找不到 —— 而那一行就明晃晃地印在它上面的控制台里。
+   *修*：`compile_firmware` 用 `> >(tee -a "$LOG_FILE") 2>&1` 把 make 输出也接进去。
+   用进程替换而不是管道是必须的：`make ... | tee` 会让 `$!` 变成 tee 的 PID，
+   `wait` 就会返回 tee 的状态，**失败的构建会被当成成功**。
+
+2. **OpenWrt 本来就有每包日志，但开关被 Kconfig 静默丢掉了。**
+   `include/subdir.mk` 会把每个包的完整构建输出 tee 到
+   `$(BUILD_LOG_DIR)/<包>/<步骤>.txt`，并把失败目标写进同级的 `error.txt`。
+   开关是 `CONFIG_BUILD_LOG`，但它在 `config/Config-devel.in` 里声明为
+   `bool "..." if DEVEL` —— 没有 `CONFIG_DEVEL` 时该符号不可见，defconfig 直接丢弃。
+   **实测**：种子里写着 `CONFIG_BUILD_LOG=y`，生成的 `.config` 里却只有
+   `CONFIG_BUILD_LOG_DIR=""`，没有 `CONFIG_BUILD_LOG`。也就是说这个功能从来没生效过。
+   *修*：`scripts/local-build.sh` 直接给 make 传 `BUILD_LOG=1 BUILD_LOG_DIR=...`，
+   绕开可见性规则（**不要**用 `CONFIG_DEVEL=y` 去修：它会连带打开整个构建的调试信息）。
+   副作用是好的：同一个包的**控制台**输出从 1.9 MB 降到 3.9 KB，而完整的 277 KB
+   落进每包日志文件。
+
+3. **诊断步骤在猜包。** 它硬编码 `package/feeds/packages/rust/host/compile` ——
+   那是本工程遇到的第一个失败，此后就不是了；于是整个预算都用来反复证明 rust 能编译。
+   *修*：先读 `logs/`（`error.txt` 给出失败目标，`<目标>/compile.txt` 给出原因），
+   只有拿不到时才重跑，并加了"最后一个被 make 启动的包"作为兜底。
+
+现在的行为：失败当场打印失败包与它的日志尾部；CI 另外把 `logs/` 作为 artifact 上传
+（7 天保留）。**再出现失败，原因会直接出现在日志里，而不是再花三小时去猜。**
+
+顺带记两条排查中的教训：
+
+* `make package/X/compile` 在 `CONFIG_PACKAGE_X*` 全都没开时是**静默空转**（0.14 秒，
+  exit 0）。我据此一度得出"本地编译通过"，其实什么都没编译 —— 要验证一个包真的能编，
+  必须先把它的 config 符号打开，并清掉 `build_dir` 与 `staging_dir/stamp`。
+* `nullglob` 只丢弃**匹配不到的模式**，不丢弃**不存在的字面路径**。
+  把 `"$DIR"/error.txt` 这种字面量放进数组，即使文件不在也会留在数组里，
+  后面的 `read` 就会炸。要么用 `*` 通配，要么显式判存在。
+
 ### 结论
 
 | 路径 | 结论 |

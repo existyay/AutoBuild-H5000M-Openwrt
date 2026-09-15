@@ -49,9 +49,15 @@ package/
 
 # ---------------------------------------------------------------------------
 # Logs and scratch.  Per-profile coverage logs land in the repo root.
+#
+# logs/ is the per-package build output OpenWrt writes when BUILD_LOG is on
+# (scripts/local-build.sh passes it to make): logs/<package>/<step>.txt and
+# logs/<subdir>/error.txt naming whatever failed.  Reproducible, and CI uploads
+# it as an artifact when a build fails.
 # ---------------------------------------------------------------------------
 *.log
 build.log
+logs/
 coverage-*.log
 *.tmp
 *.bak
