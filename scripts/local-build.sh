@@ -233,6 +233,14 @@ Feature switches are environment variables, e.g.
   ENABLE_MT5700M=true ENABLE_WWAND=false THREADS=8 scripts/local-build.sh
   ENABLE_NIKKI=true ENABLE_ADBLOCK=false scripts/local-build.sh
 
+Diagnostics:
+  PREBUILD_PACKAGES="package/luci-app-ssr-plus/shadowsocks-libev ..."
+      Build these packages (and their dependencies) before `make world`, which
+      otherwise only reaches package/luci-app-* some 160 minutes in.  A failure
+      there then costs a whole three-hour run to discover.  Only the order
+      changes — world would have built them anyway.  The kernel is built first,
+      because a package compile needs its .config.
+
 Board stack (defaults):
   ENABLE_FANCONTROL=true   luci-app-h5000m-fancontrol + userspace fan DTS patch
   ENABLE_NETMODE=true      luci-app-h5000m-netmode (wired WAN / 5G priority)

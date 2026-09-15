@@ -1248,6 +1248,40 @@ ERROR: package/luci-app-ssr-plus/shadowsocks-libev failed to build.
   把 `"$DIR"/error.txt` 这种字面量放进数组，即使文件不在也会留在数组里，
   后面的 `read` 就会炸。要么用 `*` 通配，要么显式判存在。
 
+### 那三次失败的真正原因：缓存里的 tarball 是坏的，而 `skip` 把校验关掉了
+
+诊断通路修好之后，**一次 42 分钟的运行**就给出了答案（用 `PREBUILD_PACKAGES` 把
+shadowsocks-libev 提到最前面编，这样不必等到第 160 分钟）：
+
+```
+--- last 60 lines of logs/package/luci-app-ssr-plus/shadowsocks-libev/compile.txt ---
+xzcat: /o/openwrt/dl/shadowsocks-libev-3.3.5.tar.xz: File format not recognized
+tar: This does not look like a tar archive
+tar: Exiting with failure status due to previous errors
+make[2]: *** [Makefile:134: .../.prepared_a98f21d3020cd8...] Error 1
+```
+
+流程是这样的：**构建缓存里恢复出来的 `dl/shadowsocks-libev-3.3.5.tar.xz` 是损坏的**
+（多半来自更早某次被中断的下载），而为了修 `PKG_MIRROR_HASH` 不匹配，我把它置成了
+`skip` —— 那是唯一会检查这个文件的机制。于是坏文件一路走到解包才炸，对外只剩一行
+`ERROR: package/... failed to build.`。
+
+**`skip` 的语义是"这个哈希在本机复现不出来"，不是"完全不要看这个文件"。**
+OpenWrt 的 `include/download.mk` 确实认这个值（`[ "$MIRROR_HASH" = "skip" ]`），
+但那只跳过了**哈希比对**，文件本身有没有坏仍然没人管。
+
+修法：新增 `verify_cached_sources()`，对所有被置为 `skip` 的包，用 `tar -tf` 证明 dl 里
+同名归档至少**可读**，读不了的直接删掉。删掉就够了 —— `make download` 在这之后运行，
+会按 `PKG_SOURCE_VERSION` 用 rawgit 方式重新生成。该检查排在 `fix_mirror_hashes`
+之后、`prefetch_and_toolchain` 之前，正是为了赶在下载阶段之前。归档名以 `PKG_NAME`
+开头（已对全部 8 个包核对，含写成 `$(PKG_SOURCE_SUBDIR).tar.xz` 的），所以用
+`dl/<PKG_NAME>-*` 匹配；不在 `skip` 范围内的包不受影响，它们的校验仍由 OpenWrt 自己做。
+
+这里还有一个更一般的教训：**"关掉校验"和"改成另一种校验"是两回事。**
+如果一定要绕过上游记录的哈希，就应该至少保留一个能发现文件损坏的检查
+（这里是"能不能列出内容"）。否则缓存里任何一个坏文件都会伪装成编译错误，
+而且是在离原因很远的地方、以一句没有信息的话出现。
+
 ### 结论
 
 | 路径 | 结论 |
