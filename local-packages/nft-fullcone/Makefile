@@ -10,18 +10,23 @@
 #   https://github.com/sbwml/nft-fullcone            (2022-12, the source used)
 #   https://github.com/fullcone-nat-nftables/nft-fullcone  (2023-05, a later fork)
 #
-# Only the KERNEL half lives here.  The other two halves are deliberately not
-# included:
+# Only the KERNEL half lives here.  The other three halves are carried as
+# patches against mainline's own packages, from this repository:
 #
-#   * nftables userspace must know the `fullcone` expression or `nft` cannot
-#     parse a rule that uses it.  Mainline ships nftables 1.1.6; the only
-#     patched tree available is a fork of 1.0.2.  Carrying that means the whole
-#     system runs a patched nftables, which sits directly in the packet path —
-#     a decision, not a detail.
-#   * firewall4 has no fullcone option, so nothing emits the rules yet.
+#   * libnftnl-patches/100-fullcone-expression.patch
+#     adds NFTNL_EXPR_FULLCONE_* and src/expr/fullcone.c
+#   * nftables-patches/100-fullcone-expression.patch
+#     adds the `fullcone` keyword, the scanner rule and the parser statement
+#   * firewall4-patches/100-fullcone-support.patch
+#     makes zone-masq.uc emit `fullcone` instead of `masquerade` when
+#     firewall.@defaults[0].fullcone is set, and adds the dstnat rules
 #
-# So this package is useful on its own only to prove the module compiles and
-# loads against the current kernel.  Wiring it up is a separate step.
+# They are patches, not forks, because a fork of nftables would mean running a
+# patched packet-path binary from an unmaintained tree while upstream ships
+# security fixes.  install_nftables_patches in scripts/local-build.sh puts each
+# one in place.
+#
+# Only UDP is affected; every other protocol is ordinary MASQUERADE.
 #
 include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
@@ -52,9 +57,10 @@ define KernelPackage/nft-fullcone/description
   Adds the nftables "fullcone" expression, for RFC3489-compatible full cone
   SNAT.  Only UDP is affected; other protocols behave as ordinary MASQUERADE.
 
-  The module is only half of the feature: nftables userspace must also know the
-  expression, and firewall4 must emit the rules.  Neither is provided here, so
-  installing this alone changes nothing yet.
+  The three userspace halves are patched into mainline's libnftnl, nftables and
+  firewall4 by this repository, so installing this package alongside them is
+  what makes the feature available.  luci-app-h5000m-accel depends on all four
+  and is what switches it on.
 endef
 
 # Local sources, copied in.  $(CURDIR) is spelled out because a bare ./src is
