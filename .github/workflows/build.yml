@@ -464,6 +464,73 @@ jobs:
             tail -120 /tmp/diag-cc.log
           done
 
+      # A hard gate, before anything is uploaded or published.
+      #
+      # The fullcone chain is four layers deep, and three of the four ways it can
+      # break are silent: a patch that `patch --dry-run` accepts but that never
+      # creates a file; a source file that is never added to the build; an option
+      # that firewall4's whitelist discards.  All three of those actually happened
+      # during development, and each of them produced a firmware that looked
+      # healthy.  A build that compiles is not evidence that the feature works.
+      #
+      # These assertions read the *built* tree rather than the source tree, so they
+      # check what the image actually carries, and they need no device.
+      #
+      # The libnftnl assertion is the one with real teeth: with the broken patch
+      # the library still links and the build still succeeds, leaving
+      # expr_ops_fullcone undefined until something calls nftnl_expr_alloc().
+      # Verified to fail on a library in that state and pass on a fixed one.
+      - name: Verify the fullcone chain is really in the image
+        working-directory: /o
+        run: |
+          set -uo pipefail
+          fail=0
+          check() { if bash -c "$2" >/dev/null 2>&1; then echo "  OK    $1"; else echo "  FAIL  $1"; fail=$((fail+1)); fi; }
+
+          echo "=== layer 1: kernel module ==="
+          check "nft_fullcone.ko was built" \
+            'find openwrt/build_dir/target-*/linux-*/nft-fullcone -name nft_fullcone.ko | grep -q .'
+          check "the module registers the fullcone expression" \
+            'strings $(find openwrt/build_dir/target-*/linux-*/nft-fullcone -name nft_fullcone.ko | head -1) | grep -qx fullcone'
+          check "kmod-nft-fullcone is in the image root or packaged for it" \
+            'find openwrt/build_dir/target-*/root-* -name nft_fullcone.ko | grep -q . ||
+             grep -rqs kmod-nft-fullcone openwrt/build_dir/target-*/root-*/usr/lib/apk/db/installed ||
+             find openwrt/bin -name "kmod-nft-fullcone*" | grep -q .'
+
+          echo; echo "=== layer 2+3: libnftnl and nftables userspace ==="
+          # This is the assertion that the broken patch fails: without src/expr/fullcone.c
+          # wired into the build, libnftnl still links but leaves expr_ops_fullcone
+          # undefined, which is invisible until something calls nftnl_expr_alloc().
+          check "libnftnl resolves expr_ops_fullcone (no dangling symbol)" \
+            'L=$(ls openwrt/build_dir/target-*/libnftnl-*/src/.libs/libnftnl.so.* 2>/dev/null | head -1);
+             [ -n "$L" ] && ! nm -D --undefined-only "$L" | grep -q expr_ops_fullcone'
+          check "libnftnl carries the fullcone expression object" \
+            'strings $(ls openwrt/build_dir/target-*/libnftnl-*/src/.libs/libnftnl.so.* 2>/dev/null | head -1) | grep -q expr_ops_fullcone'
+          check "the nftables scanner knows the fullcone keyword" \
+            'grep -rqs --include=scanner.l fullcone openwrt/build_dir/target-*/nftables-*/'
+          check "the generated bison parser has the fullcone statement" \
+            'grep -rqs --include=parser_bison.c fullcone openwrt/build_dir/target-*/nftables-*/'
+          check "libnftables.so carries the fullcone expression name" \
+            'grep -rqas fullcone openwrt/build_dir/target-*/nftables-*/*/src/.libs/libnftables.so.*'
+
+          echo; echo "=== layer 4: firewall4 ==="
+          check "firewall4 accepts fullcone in its parse_defaults whitelist" \
+            'grep -rqs --include=fw4.uc "fullcone: \[ \"bool\", \"0\" \]" openwrt/build_dir/target-*/firewall4-*/'
+          check "zone-masq.uc emits fullcone instead of masquerade" \
+            'grep -rqs --include=zone-masq.uc fullcone openwrt/build_dir/target-*/firewall4-*/'
+          check "ruleset.uc adds the prerouting fullcone rules" \
+            'grep -rqs --include=ruleset.uc "fullcone comment" openwrt/build_dir/target-*/firewall4-*/'
+          check "the acceleration page depends on all four layers" \
+            'grep -q kmod-nft-fullcone openwrt/package/luci-app-h5000m-accel/Makefile &&
+             grep -q firewall4 openwrt/package/luci-app-h5000m-accel/Makefile'
+
+          echo; echo "=== config ==="
+          check "firewall4 =y" 'grep -q "^CONFIG_PACKAGE_firewall4=y$" openwrt/.config'
+          check "nftables-json =y" 'grep -q "^CONFIG_PACKAGE_nftables-json=y$" openwrt/.config'
+          check "kmod-nft-fullcone =y" 'grep -q "^CONFIG_PACKAGE_kmod-nft-fullcone=y$" openwrt/.config'
+
+          echo; if [ "$fail" -ne 0 ]; then echo "结论：$fail 项未通过"; exit 1; fi; echo "结论：全部通过"
+
       - name: Collect build info
         if: always()
         run: |
