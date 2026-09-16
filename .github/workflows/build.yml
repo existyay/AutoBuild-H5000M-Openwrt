@@ -589,6 +589,63 @@ jobs:
 
           echo; if [ "$fail" -ne 0 ]; then echo "结论：$fail 项未通过"; exit 1; fi; echo "结论：全部通过"
 
+      # The same class of regression as the fullcone gate, reported from a real
+      # device: `apk add luci-app-homeproxy` failed with
+      #
+      #   To enable Tun support, you need to install ip-full and kmod-tun.
+      #
+      # A kernel module can only come from a repository built against THIS
+      # kernel, and the only other source the image carries is
+      # downloads.openwrt.org/snapshots, whose kmods have a different vermagic
+      # and whose files disappear as soon as the snapshot moves.  So a kmod that
+      # is merely `=m` in our repository is not actually installable, and the
+      # dependency has to be in the image.
+      #
+      # This asserts both halves: the symbols are `=y` (so the image carries
+      # them), and luci-app-ssr-plus gained the core dependency that makes a
+      # plain install produce a working router.
+      - name: Verify the proxy stack dependencies are in the image
+        working-directory: /o
+        run: |
+          set -uo pipefail
+          fail=0
+          check() { if bash -c "$2" >/dev/null 2>&1; then echo "  OK    $1"; else echo "  FAIL  $1"; fail=$((fail+1)); fi; }
+
+          echo "=== kernel modules a frontend needs, in the image (=y) ==="
+          for sym in kmod-tun kmod-inet-diag kmod-dummy \
+                     kmod-nft-queue kmod-nfnetlink-queue kmod-nft-tproxy \
+                     kmod-ipt-tproxy kmod-ipt-conntrack-extra \
+                     kmod-netlink-diag kmod-nf-nathelper kmod-macvlan \
+                     kmod-sched-core kmod-ifb kmod-sched-bpf kmod-ipt-filter; do
+            check "${sym} =y" "grep -q '^CONFIG_PACKAGE_${sym}=y$' openwrt/.config"
+          done
+
+          echo
+          echo "=== userspace dependencies HomeProxy checks for ==="
+          for sym in ip-full ucode-mod-math sing-box; do
+            check "${sym} =y" "grep -q '^CONFIG_PACKAGE_${sym}=y$' openwrt/.config"
+          done
+
+          echo
+          echo "=== the kmods really are in the built rootfs ==="
+          check "kmod-tun (tun.ko)"    'find openwrt/build_dir/target-*/root-* -name tun.ko | grep -q .'
+          check "kmod-dummy (dummy.ko)" 'find openwrt/build_dir/target-*/root-* -name dummy.ko | grep -q .'
+          check "kmod-inet-diag"        'find openwrt/build_dir/target-*/root-* -name inet_diag.ko | grep -q .'
+          check "sing-box binary"       'find openwrt/build_dir/target-*/root-* -name "sing-box" -type f | grep -q .'
+
+          echo
+          echo "=== luci-app-ssr-plus declares a core ==="
+          check "LUCI_DEPENDS+= adds xray-core and mihomo" \
+            'grep -q "^LUCI_DEPENDS+=.*+xray-core" openwrt/package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile &&
+             grep -q "^LUCI_DEPENDS+=.*+mihomo" openwrt/package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile'
+
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "The proxy stack's dependencies are not all in the image; refusing to publish this firmware."
+            exit 1
+          fi
+          echo "Every proxy-stack dependency checked is present in the image."
+
       - name: Collect build info
         if: always()
         run: |

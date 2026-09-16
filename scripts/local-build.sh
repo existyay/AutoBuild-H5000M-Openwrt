@@ -1331,6 +1331,66 @@ verify_cached_sources() {
 	return 0
 }
 
+# Make luci-app-ssr-plus depend on a core, so installing it produces a working
+# router rather than a broken one.
+#
+# Reported from a real device, right after `apk add luci-app-ssr-plus`:
+#
+#   Main node:Xray 和 Mihomo 内核均不存在，无法启动。
+#   dns2tcp tunnel error.restart!
+#
+# and then every later `apk add` failed with `wget: exited with error 4`, because
+# the app had started without a core and its DNS handling left the box unable to
+# resolve anything.
+#
+# The cause is this project's own configuration.  SSR-Plus pulls its cores
+# through the INCLUDE_* options, and those are `select`s:
+#
+#   config PACKAGE_..._INCLUDE_Xray
+#           select PACKAGE_xray-core
+#
+# Turning them off (which is right — see the note in append_optional_config) also
+# removes the cores from LUCI_DEPENDS, because every core there is written as
+# `+PACKAGE_..._INCLUDE_Xray:xray-core`.  So the app installs and has nothing to
+# run.  Emitting the cores as `=m` in this project's repository is not enough on
+# its own: nothing says the app needs them.
+#
+# The fix is a real dependency.  `+=` after the main assignment and before
+# luci.mk is included is enough for luci.mk to see it, and a plain `+dep` from an
+# `=m` package keeps the target at `=m` — so the cores stay in the repository and
+# out of the image, while `apk add luci-app-ssr-plus` now pulls them.
+fix_ssr_plus_depends() {
+	local mk="${SRC}/package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile"
+	local cores="+xray-core +mihomo +coreutils-timeout"
+
+	[ -f "$mk" ] || return 0
+
+	# Idempotent: the tree is re-cloned only when it is missing, so this can run
+	# against a Makefile that already carries the line.
+	if grep -q '^LUCI_DEPENDS+=' "$mk" 2>/dev/null; then
+		return 0
+	fi
+
+	if ! awk -v extra="$cores" '
+		/^include .*luci\.mk/ && !done {
+			print "LUCI_DEPENDS+=" extra
+			print "# Added by AutoBuild-H5000M-Openwrt: the INCLUDE_* switches are"
+			print "# off (see scripts/local-build.sh), so without this the app would"
+			print "# install with no core and refuse to start."
+			done = 1
+		}
+		{ print }
+		END { exit(done ? 0 : 1) }
+	' "$mk" > "${mk}.tmp"; then
+		rm -f "${mk}.tmp"
+		warn "could not find the luci.mk include in $(basename "$mk"); SSR-Plus will install without a core"
+		return 0
+	fi
+	mv "${mk}.tmp" "$mk"
+	log "  luci-app-ssr-plus now depends on: ${cores}"
+	return 0
+}
+
 # Patch the nftables userspace with fullcone support.
 #
 # The `fullcone` expression the kernel module registers is invisible to nftables
@@ -1739,9 +1799,38 @@ EOF
 	emit_service "$ENABLE_ADBLOCK" \
 		adblock luci-app-adblock luci-i18n-adblock-zh-cn
 
+	# HomeProxy: the LuCI app stays in the repository, but its *dependencies* are
+	# installed into the image.
+	#
+	# That split is deliberate and comes from a real device.  With the app and
+	# every dependency left as `=m`, installing it looked like this:
+	#
+	#   apk add luci-app-homeproxy
+	#   ERROR: wget: exited with error 4
+	#   ERROR: kmod-tun-6.18.44-r1: unexpected end of file
+	#   ...
+	#   To enable Tun support, you need to install ip-full and kmod-tun.
+	#
+	# Two things went wrong there.  kmod-tun is a KERNEL module, so it has to
+	# come from a repository built against this exact kernel; the only other
+	# source configured in the image is downloads.openwrt.org/snapshots, whose
+	# kmods carry a different vermagic AND whose files disappear as soon as the
+	# snapshot moves on — so that download can only fail.  And ip-full is what
+	# HomeProxy's own page checks for before it will offer TUN mode at all.
+	#
+	# Both are small (kmod-tun is ~20 KB, ip-full ~200 KB), and sing-box is the
+	# core the app needs: it is also the one package this project PINS
+	# (patches/0003, 1.12.25) because 1.14 dropped the legacy inbound fields
+	# HomeProxy still writes.  A pin only holds if we control which version gets
+	# installed, and apk resolves dependencies to the HIGHEST version across all
+	# configured repositories — so leaving sing-box in the repository alone means
+	# apk would happily fetch 1.14 from the snapshot mirror and break HomeProxy.
+	# Installing it here fixes the version and removes a ~15 MB download from the
+	# user's install.
 	emit_service "$ENABLE_HOMEPROXY" \
-		luci-app-homeproxy sing-box kmod-nft-tproxy \
-		ucode-mod-math ip-full kmod-tun
+		luci-app-homeproxy luci-i18n-homeproxy-zh-cn
+	emit_service true \
+		sing-box ucode-mod-math ip-full kmod-tun
 
 	# AdGuardHome and its LuCI app are in the official feeds, so this needs no
 	# clone at all.
@@ -1753,17 +1842,25 @@ EOF
 	# Shark!, luci-xray, NeKoBox, Daed, HiJpass and v2rayA all redirect traffic
 	# through the same handful of kernel facilities: nftables tproxy/socket, the
 	# legacy iptables equivalents, tun/inet-diag for the userspace tunnels, and
-	# the NAT helper and traffic-control modules for the rest.  A user who
-	# `apk add`s one of them gets these pulled from the repository, so they have
-	# to be IN the repository — which is what `=m` produces.
+	# the NAT helper and traffic-control modules for the rest.
 	#
-	# ONLY modules that are not already built are listed here.  Writing `=m` for
-	# a module that something else already pulls in as `=y` is not a no-op: it
-	# can demote an installed module to repository-only and remove it from the
-	# image, which would break the firewall.  Everything the base system already
-	# needs (kmod-nft-*, kmod-nf-conntrack, kmod-nf-nat, kmod-ipt-*, ...) is
-	# therefore deliberately absent from this list — it is already present in
-	# the image, which is even better than being installable.
+	# These go INTO THE IMAGE (`=y`), not merely into the repository.
+	#
+	# They used to be `=m`, on the reasoning that a user who `apk add`s a frontend
+	# gets them from our repository.  A real device showed why that is not good
+	# enough: a kmod can only come from a repository built against this exact
+	# kernel, and the other source configured in the image is
+	# downloads.openwrt.org/snapshots — whose kmods carry a different vermagic
+	# and whose files vanish as soon as the snapshot moves.  So the install fails:
+	#
+	#   ERROR: kmod-tun-6.18.44-r1: unexpected end of file
+	#
+	# Every module here is a few tens of KB, so carrying them always costs
+	# well under a megabyte and removes the whole class of failure.  `=y` can
+	# only ever promote a symbol, never demote one, so it is also free of the
+	# hazard this list used to warn about (writing `=m` for something the base
+	# system already builds as `=y` would remove it from the image).
+	#
 	# `kmod-xdp-sockets-diag` is deliberately NOT here even though the wider
 	# module list suggests it: it depends on KERNEL_XDP_SOCKETS, which this
 	# kernel does not set, so the symbol is dropped by defconfig regardless.
@@ -1771,13 +1868,16 @@ EOF
 	# `apk add daed` would not pull it either way.  Turning the kernel option on
 	# changes the kernel ABI and forces a full rebuild; see
 	# ENABLE_EBPF_PROXY_KERNEL below for that decision.
-	emit_service "" \
+	emit_service true \
 		kmod-netlink-diag \
 		kmod-nf-nathelper \
 		kmod-macvlan \
 		kmod-sched-core \
 		kmod-ifb \
-		kmod-tcp-bbr
+		kmod-tcp-bbr \
+		kmod-tun \
+		kmod-inet-diag \
+		kmod-dummy
 
 	# Found by auditing the proxy packages' Makefiles rather than by guessing:
 	#   kmod-nft-queue            HomeProxy (VIKINGYFY variant) uses nft queue
@@ -1796,7 +1896,9 @@ EOF
 	# there, and the module package only exists for 6.12 where it evidently is
 	# not.  `kmod-nft-core`'s `select PACKAGE_kmod-lib-crc32c if LINUX_6_12`
 	# therefore does not fire for this build, which is correct rather than a gap.
-	emit_service "" \
+	#
+	# Into the image, for the same reason as the block above.
+	emit_service true \
 		kmod-nft-queue \
 		kmod-nfnetlink-queue \
 		kmod-sched-bpf \
@@ -2506,6 +2608,9 @@ main() {
 	# clones, so those trees kept their checkout mtimes and never hashed the
 	# same way twice.
 	fix_mirror_hashes
+	# Needs the SSR-Plus tree, so it has to run after install_proxy_repos like
+	# fix_mirror_hashes does.
+	fix_ssr_plus_depends
 	# Right after the hashes are neutralised, and therefore before `make
 	# download`: a bad cached archive has to be gone by then for the download
 	# stage to regenerate it.
