@@ -1359,35 +1359,64 @@ verify_cached_sources() {
 # luci.mk is included is enough for luci.mk to see it, and a plain `+dep` from an
 # `=m` package keeps the target at `=m` — so the cores stay in the repository and
 # out of the image, while `apk add luci-app-ssr-plus` now pulls them.
-fix_ssr_plus_depends() {
-	local mk="${SRC}/package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile"
-	local cores="+xray-core +mihomo +coreutils-timeout"
+#
+# SSR-Plus is not the only front-end with this shape.  PassWall and PassWall2
+# reach their cores through the same kind of switch:
+#
+#   config PACKAGE_luci-app-passwall_INCLUDE_Xray
+#           bool "..."
+#           select PACKAGE_xray-core
+#
+# and measured on a tree configured exactly as this project configures it,
+# `apk query --recursive luci-app-passwall` (and ...-passwall2) resolves with NO
+# core at all, even though the switches are on in .config: a `select` inside a
+# package that is itself only `=m` does not become an install dependency.  A user
+# who runs `apk add luci-app-passwall` therefore gets a panel that cannot start a
+# node, which is the same failure one package over.  Both are given the cores
+# their own default switches ask for.
+#
+# This is asserted from the built repository by the
+# "Verify the built repository can satisfy every frontend on its own" CI step, so
+# a front-end that loses its core fails the build instead of reaching a device.
+ensure_frontend_cores() {
+	local spec mk cores
 
-	[ -f "$mk" ] || return 0
+	# "<directory>/<package>|+deps to add"
+	for spec in \
+		"luci-app-ssr-plus/luci-app-ssr-plus|+xray-core +mihomo +coreutils-timeout" \
+		"openwrt-passwall/luci-app-passwall|+xray-core +sing-box" \
+		"openwrt-passwall2/luci-app-passwall2|+xray-core +sing-box"
+	do
+		mk="${SRC}/package/${spec%%|*}/Makefile"
+		cores="${spec##*|}"
 
-	# Idempotent: the tree is re-cloned only when it is missing, so this can run
-	# against a Makefile that already carries the line.
-	if grep -q '^LUCI_DEPENDS+=' "$mk" 2>/dev/null; then
-		return 0
-	fi
+		[ -f "$mk" ] || continue
 
-	if ! awk -v extra="$cores" '
-		/^include .*luci\.mk/ && !done {
-			print "LUCI_DEPENDS+=" extra
-			print "# Added by AutoBuild-H5000M-Openwrt: the INCLUDE_* switches are"
-			print "# off (see scripts/local-build.sh), so without this the app would"
-			print "# install with no core and refuse to start."
-			done = 1
-		}
-		{ print }
-		END { exit(done ? 0 : 1) }
-	' "$mk" > "${mk}.tmp"; then
-		rm -f "${mk}.tmp"
-		warn "could not find the luci.mk include in $(basename "$mk"); SSR-Plus will install without a core"
-		return 0
-	fi
-	mv "${mk}.tmp" "$mk"
-	log "  luci-app-ssr-plus now depends on: ${cores}"
+		# Idempotent: the tree is re-cloned only when it is missing, so this can
+		# run against a Makefile that already carries the line.
+		if grep -q '^LUCI_DEPENDS+=' "$mk" 2>/dev/null; then
+			continue
+		fi
+
+		if ! awk -v extra="$cores" '
+			/^include .*luci\.mk/ && !done {
+				print "LUCI_DEPENDS+=" extra
+				print "# Added by AutoBuild-H5000M-Openwrt: the cores this app needs are"
+				print "# reached through `select` switches, and a select inside a package"
+				print "# that is only =m does not become an install dependency, so the app"
+				print "# would install with no core and refuse to start."
+				done = 1
+			}
+			{ print }
+			END { exit(done ? 0 : 1) }
+		' "$mk" > "${mk}.tmp"; then
+			rm -f "${mk}.tmp"
+			warn "could not find the luci.mk include in ${spec%%|*}; it would install without a core"
+			continue
+		fi
+		mv "${mk}.tmp" "$mk"
+		log "  ${spec%%|*} now depends on: ${cores}"
+	done
 	return 0
 }
 
@@ -2608,9 +2637,9 @@ main() {
 	# clones, so those trees kept their checkout mtimes and never hashed the
 	# same way twice.
 	fix_mirror_hashes
-	# Needs the SSR-Plus tree, so it has to run after install_proxy_repos like
-	# fix_mirror_hashes does.
-	fix_ssr_plus_depends
+	# Needs the SSR-Plus, PassWall and PassWall2 trees, so it has to run after
+	# install_proxy_repos like fix_mirror_hashes does.
+	ensure_frontend_cores
 	# Right after the hashes are neutralised, and therefore before `make
 	# download`: a bad cached archive has to be gone by then for the download
 	# stage to regenerate it.

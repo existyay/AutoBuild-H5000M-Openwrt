@@ -831,6 +831,74 @@ rootfs 里（`tun.ko`/`dummy.ko`/`inet_diag.ko`）、`sing-box` 二进制在、�
 > 仍可能拿到与内核不匹配的 kmod。要彻底消除，需要把官方源从镜像里去掉（只留本仓库）。
 > 那是一个策略选择，没有默认做。
 
+### 11. `select` 不会变成安装依赖：三个前端都装不上核
+
+包进仓库还不够，**还要有人真的依赖它**。这一条是用真机 + apk 自己复现出来的。
+
+把发布出去的 `packages.adb` 当成一个真实仓库，配上一台设备会有的全部源（本仓库 +
+`distfeeds.list` 里那 7 条官方 snapshot 源），用本机编译出的 `staging_dir/host/bin/apk`
+去问：
+
+```
+apk add --simulate luci-app-ssr-plus      # 89 个包，里面没有 xray-core、没有 mihomo
+apk add --simulate luci-app-homeproxy     # sing-box 解析到 1.14.0-r1（官方快照）
+```
+
+两条都复现了用户报的现象，而且原因是同一个机制的两种表现：
+
+**（一）`select` 不是 `depends`。** SSR-Plus / PassWall / PassWall2 的核都挂在
+`INCLUDE_*` 这类开关上，写法是
+
+```
+config PACKAGE_luci-app-ssr-plus_INCLUDE_Xray
+        bool "Xray-core"
+        select PACKAGE_xray-core
+```
+
+`select` 只在 Kconfig 里把一个符号推上去，**不会变成该包的运行时依赖**。前端本身是
+`=m`（进仓库、不进镜像），于是装完前端，核一个都不会被拉进来 —— 面板能打开，节点起不来。
+
+**（二）apk 在多个源之间取最高版本。** 上游快照里的 `sing-box` 是 1.14.0，本仓库钉的是
+1.12.25，`apk` 选了 1.14.0 —— 于是 HomeProxy 又回到"legacy inbound fields removed"的
+崩溃上。三处证据放在一起看，`apk policy` 把这一条写得很直白：
+
+```
+sing-box policy:
+  1.12.25-r1:  https://existyay.github.io/AutoBuild-H5000M-Openwrt/packages.adb
+  1.14.0-r1:   https://downloads.openwrt.org/snapshots/.../packages.adb   ← 会被选中
+```
+
+修法是给每个前端补一条**真实依赖**（`LUCI_DEPENDS+=`，插在 `include .../luci.mk`
+之前，`luci.mk:184` 的 `DEPENDS:=$(LUCI_DEPENDS)` 就会看到它）。`=m` 的包写 `+dep`
+只把目标保持在 `=m`，所以核仍然留在仓库里、不进镜像：
+
+| 前端 | 补的依赖 | 装完会拉进来 |
+| --- | --- | --- |
+| `luci-app-ssr-plus` | `+xray-core +mihomo +coreutils-timeout` | xray-core、mihomo |
+| `luci-app-passwall` | `+xray-core +sing-box` | xray-core、sing-box |
+| `luci-app-passwall2` | `+xray-core +sing-box` | xray-core、sing-box |
+
+实测（对本机编译出的 495 个包建索引，再 `apk query --recursive`）：
+
+```
+luci-app-ssr-plus   → mihomo xray-core        luci-app-passwall  → sing-box xray-core
+luci-app-passwall2  → sing-box xray-core      luci-app-nikki     → mihomo nikki
+luci-app-momo       → momo sing-box
+```
+
+修之前 passwall / passwall2 这两行是**空的**：`INCLUDE_Xray=y` 在 `.config` 里明明开着，
+依赖里却什么都没有。
+
+> 顺带一个 apk 行为，写在这里免得下次再踩：`apk list <不存在的包>` **退出码是 0**，
+> `apk query --recursive <解析不了的包>` 也**退出码 0**，失败信息只在 stderr。
+> 所以门禁既不能只看退出码，也不能只看 stdout —— 本工程的门禁因此把"stderr 必须为空
+> 且 stdout 非空"当作通过条件，并且逐条断言"某个前端确实拉到了某个核"。
+
+发布前门禁新增 `Verify the built repository can satisfy every frontend on its own`：
+只配置本仓库（不配官方源），用本机 apk 读**将被发布的** `artifacts/apk-repo/packages.adb`，
+断言 14 个前端、10 个核/守护进程、18 个 kmod 都在索引里，`sing-box` 是 1.12.25，
+并且 9 个前端各自都能**解析出它需要的核**。
+
 ---
 
 ## 八、已知限制

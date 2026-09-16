@@ -628,16 +628,53 @@ jobs:
 
           echo
           echo "=== the kmods really are in the built rootfs ==="
-          check "kmod-tun (tun.ko)"    'find openwrt/build_dir/target-*/root-* -name tun.ko | grep -q .'
-          check "kmod-dummy (dummy.ko)" 'find openwrt/build_dir/target-*/root-* -name dummy.ko | grep -q .'
-          check "kmod-inet-diag"        'find openwrt/build_dir/target-*/root-* -name inet_diag.ko | grep -q .'
-          check "sing-box binary"       'find openwrt/build_dir/target-*/root-* -name "sing-box" -type f | grep -q .'
+          # Three ways to prove the same thing, because the rootfs directory is
+          # assembled by the image build and its exact layout (root-mediatek vs
+          # root-hiveton_h5000m) has moved between releases: the module in the
+          # assembled rootfs, the package recorded in that rootfs' installed
+          # database, or the .apk itself.  The fullcone gate above uses the same
+          # chain for the same reason.
+          echo "  rootfs dirs: $(ls -d openwrt/build_dir/target-*/root-* 2>/dev/null | tr '\n' ' ')"
+          echo "  modules in them: $(find openwrt/build_dir/target-*/root-* -name '*.ko' 2>/dev/null | wc -l)"
+          check "kmod-tun (tun.ko)" \
+            'find openwrt/build_dir/target-*/root-* -name tun.ko | grep -q . ||
+             grep -rqs kmod-tun openwrt/build_dir/target-*/root-*/usr/lib/apk/db/installed ||
+             find openwrt/bin -name "kmod-tun-*.apk" | grep -q .'
+          check "kmod-dummy (dummy.ko)" \
+            'find openwrt/build_dir/target-*/root-* -name dummy.ko | grep -q . ||
+             grep -rqs kmod-dummy openwrt/build_dir/target-*/root-*/usr/lib/apk/db/installed ||
+             find openwrt/bin -name "kmod-dummy-*.apk" | grep -q .'
+          check "kmod-inet-diag (inet_diag.ko)" \
+            'find openwrt/build_dir/target-*/root-* -name inet_diag.ko | grep -q . ||
+             grep -rqs kmod-inet-diag openwrt/build_dir/target-*/root-*/usr/lib/apk/db/installed ||
+             find openwrt/bin -name "kmod-inet-diag-*.apk" | grep -q .'
+          check "sing-box binary" \
+            'find openwrt/build_dir/target-*/root-* -name "sing-box" -type f | grep -q . ||
+             grep -rqs sing-box openwrt/build_dir/target-*/root-*/usr/lib/apk/db/installed ||
+             find openwrt/bin -name "sing-box-*.apk" | grep -q .'
 
           echo
-          echo "=== luci-app-ssr-plus declares a core ==="
-          check "LUCI_DEPENDS+= adds xray-core and mihomo" \
-            'grep -q "^LUCI_DEPENDS+=.*+xray-core" openwrt/package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile &&
-             grep -q "^LUCI_DEPENDS+=.*+mihomo" openwrt/package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile'
+          echo "=== every front-end declares a core ==="
+          # These apps reach their cores through `select` switches, and a select
+          # inside a package that is itself only =m does not become an install
+          # dependency — so the app installs with a panel that cannot start a
+          # node.  scripts/local-build.sh adds the dependency; this asserts it.
+          for entry in \
+            "luci-app-ssr-plus/luci-app-ssr-plus|+xray-core|+mihomo" \
+            "openwrt-passwall/luci-app-passwall|+xray-core|+sing-box" \
+            "openwrt-passwall2/luci-app-passwall2|+xray-core|+sing-box"; do
+            mk="openwrt/package/${entry%%|*}/Makefile"
+            rest="${entry#*|}"
+            first="${rest%%|*}"
+            second="${rest#*|}"
+            if grep -q "^LUCI_DEPENDS+=.*${first}\b" "$mk" 2>/dev/null &&
+               grep -q "^LUCI_DEPENDS+=.*${second}\b" "$mk" 2>/dev/null; then
+              echo "  OK    ${entry%%|*} declares ${first} ${second}"
+            else
+              echo "  FAIL  ${entry%%|*} does not declare ${first} ${second}"
+              fail=$((fail + 1))
+            fi
+          done
 
           echo
           if [ "$fail" -ne 0 ]; then
@@ -645,6 +682,141 @@ jobs:
             exit 1
           fi
           echo "Every proxy-stack dependency checked is present in the image."
+
+      # The promise the README makes is "install it from the repository", and a
+      # `.config` check cannot see whether that promise holds.  A real device ran
+      #
+      #   apk add luci-app-ssr-plus
+      #   Main node:Xray 和 Mihomo 内核均不存在，无法启动。
+      #
+      # because the package declared no core at all, and separately installed
+      # sing-box 1.14.0 from the official snapshot, which ignores the pin the
+      # front-ends depend on.  This step reads the index that will be published,
+      # with ONLY this project's repository configured — so anything the solver
+      # resolves here is resolved on the device without the official snapshot
+      # being involved, and anything that resolves to the wrong version shows up
+      # as a wrong version.
+      #
+      # Two measured apk behaviours shape the code below: `apk list <missing>`
+      # exits 0 with no output, and `apk query --recursive` exits 0 with its
+      # failure on stderr.  Neither the exit status nor stdout alone is enough.
+      - name: Verify the built repository can satisfy every frontend on its own
+        working-directory: /o
+        run: |
+          set -uo pipefail
+          APK=openwrt/staging_dir/host/bin/apk
+          INDEX=artifacts/apk-repo/packages.adb
+          ARCH=aarch64_cortex-a53
+          fail=0
+          ok()  { echo "  OK    $1"; }
+          bad() { echo "  FAIL  $1"; fail=$((fail + 1)); }
+
+          [ -x "$APK" ] || { echo "::error::no apk tool at $APK to read the index with"; exit 1; }
+          [ -s "$INDEX" ] || { echo "::error::$INDEX is missing or empty"; exit 1; }
+
+          ROOT="$(mktemp -d)"
+          mkdir -p "$ROOT/cache"
+          if ! "$APK" --root "$ROOT" --arch "$ARCH" --allow-untrusted --initdb --usermode add >/dev/null 2>&1; then
+            echo "::error::could not create a scratch apk database"
+            exit 1
+          fi
+          printf '%s\n' "/o/${INDEX}" > "$ROOT/etc/apk/repositories"
+          apk_() { "$APK" --root "$ROOT" --arch "$ARCH" --allow-untrusted --cache-dir "$ROOT/cache" "$@"; }
+          if ! apk_ update >/dev/null 2>&1; then
+            echo "::error::this tree's own apk cannot read ${INDEX} — devices would not either"
+            exit 1
+          fi
+
+          echo "=== what the published index contains ==="
+          echo "  $(apk_ list 2>/dev/null | wc -l) packages, no official feeds configured"
+          echo
+          echo "=== front-ends a user may install ==="
+          for p in luci-app-passwall luci-app-passwall2 luci-app-ssr-plus luci-app-homeproxy \
+                   luci-app-nikki luci-app-momo luci-app-openclash luci-app-mosdns \
+                   luci-app-nekobox luci-app-xray luci-app-hijpass luci-app-fchomo \
+                   luci-app-v2raya luci-app-adblock; do
+            if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
+          done
+          echo
+          echo "=== cores and daemons, without which a front-end cannot run ==="
+          for p in xray-core mihomo sing-box mosdns nikki momo adblock dns2tcp ip-full ucode-mod-math; do
+            if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
+          done
+          echo
+          echo "=== kernel modules (they must carry this kernel's vermagic) ==="
+          for p in kmod-tun kmod-inet-diag kmod-dummy kmod-nft-queue kmod-nfnetlink-queue \
+                   kmod-nft-tproxy kmod-nft-socket kmod-nft-fullcone kmod-ipt-tproxy \
+                   kmod-ipt-conntrack-extra kmod-ipt-filter kmod-netlink-diag \
+                   kmod-nf-nathelper kmod-macvlan kmod-sched-core kmod-sched-bpf \
+                   kmod-ifb kmod-tcp-bbr; do
+            if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
+          done
+          echo
+          echo "=== the version pins that cannot be left to the snapshot ==="
+          # The official snapshot carries a newer sing-box, and apk resolves to
+          # the highest version across every configured repository.  A pin only
+          # holds if the pinned version is the one that gets installed; the
+          # device proved it does not hold on its own.
+          pinned="$(apk_ list sing-box 2>/dev/null | awk '{print $1}')"
+          case "$pinned" in
+            sing-box-1.12.25-r1) ok "sing-box is pinned to 1.12.25 ($pinned)" ;;
+            "")                  bad "sing-box is not in the built repository" ;;
+            *)                   bad "sing-box is $pinned, not 1.12.25 — the front-ends emit removed inbound fields" ;;
+          esac
+          echo
+          echo "=== dependency resolution, exactly as the device does it ==="
+          # Empty stderr is the pass condition: the failure path prints
+          # "ERROR: unable to select packages" there and still exits 0.
+          resolve() {
+            local err out
+            err="$(apk_ query --recursive "$1" 2>&1 >/dev/null)"
+            out="$(apk_ query --recursive "$1" 2>/dev/null)"
+            if [ -z "$err" ] && [ -n "$out" ]; then
+              ok "$1 resolves entirely from this repository"
+            else
+              bad "$1 does not resolve: $(printf '%s' "$err" | head -3 | tr '\n' ' ')"
+            fi
+          }
+          resolve luci-app-ssr-plus
+          resolve luci-app-homeproxy
+          resolve luci-app-passwall
+          resolve luci-app-passwall2
+          resolve luci-app-nikki
+          resolve luci-app-momo
+          resolve luci-app-openclash
+          resolve luci-app-mosdns
+          resolve luci-app-nekobox
+          echo
+          echo "=== and each one actually pulls a core ==="
+          # Resolving is not enough: luci-app-ssr-plus resolved fine on the
+          # device while declaring no core at all, which is exactly what the user
+          # saw as "Main node:Xray 和 Mihomo 内核均不存在".  The core has to be in
+          # the resolution, not merely in the repository.
+          require_core() {
+            local pkg="$1" core="$2" err out
+            err="$(apk_ query --recursive "$pkg" 2>&1 >/dev/null)"
+            out="$(apk_ query --recursive "$pkg" 2>/dev/null)"
+            if [ -z "$err" ] && printf '%s\n' "$out" | grep -q "^Name: ${core}$"; then
+              ok "$pkg pulls $core"
+            else
+              bad "$pkg does not pull $core"
+            fi
+          }
+          require_core luci-app-ssr-plus   xray-core
+          require_core luci-app-ssr-plus   mihomo
+          require_core luci-app-passwall   xray-core
+          require_core luci-app-passwall   sing-box
+          require_core luci-app-passwall2  xray-core
+          require_core luci-app-passwall2  sing-box
+          require_core luci-app-homeproxy  sing-box
+          require_core luci-app-nikki      nikki
+          require_core luci-app-momo       momo
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::$fail repository check(s) failed — the published repository would not be installable"
+            exit 1
+          fi
+          echo "The published repository satisfies every front-end on its own."
 
       - name: Collect build info
         if: always()

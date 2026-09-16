@@ -68,6 +68,9 @@ v2rayA、OpenClash、SSR-Plus** 以及各自的中文语言包。内核模块与
 | `ucode-mod-math` | HomeProxy 依赖，缺失会导致面板起不来 |
 | `sing-box` 1.12.25 | 固定版本，避免被上游快照里的新版顶掉 |
 
+每个面板的**核**（Xray / Mihomo / sing-box）都在软件源里，`apk add` 面板时会自动一起
+装上，不需要再手动补 —— 装完直接能用。
+
 > `apk update` 出现 `UNTRUSTED signature` 警告说明索引签名校验失败 —— 正常构建不会
 > 出现：索引由本次构建的密钥签名，对应公钥就在固件的 `/etc/apk/keys/`。
 
