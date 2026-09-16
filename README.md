@@ -145,6 +145,21 @@ H5000M_APK_REPO_URL=http://<你的地址>:8099 ./scripts/local-build.sh
 | [docs/engineering.md](docs/engineering.md) | 上游选型论证、组件集成细节、实机问题的逐条根因分析、软件包审计、仿真测试结论 |
 | [docs/proxy-kmod-audit.md](docs/proxy-kmod-audit.md) | 各代理软件所需内核模块的逐包证据 |
 
+## 验证软件源
+
+想确认某个固件对应的软件源能不能装，用设备自己的 apk 逻辑查一遍：
+
+```sh
+./scripts/verify-apk-repo.sh                       # 查本机刚编译出的 artifacts/apk-repo/
+./scripts/verify-apk-repo.sh --with-official-feeds # 再加上官方源，等价于实机环境
+./scripts/verify-apk-repo.sh https://<地址>/packages.adb   # 查已经发布的源
+```
+
+它会只配置指定的源，用构建出的 `apk` 建一个临时数据库，逐条断言：14 个面板都在、
+核与守护进程都在、18 个 kmod 都在、`sing-box` 是钉住的 1.12.25，以及**每个面板都能
+解析出它需要的核**。`--with-official-feeds` 还会显示 `apk policy`，把"官方源里更新的
+版本会被优先选中"这件事直接摆出来。
+
 ## 许可证
 
 见 [LICENSE](LICENSE)。
