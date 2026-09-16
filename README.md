@@ -92,25 +92,39 @@ SoC 上并不存在。
 
 ## 自己编译
 
-### 云编译
+### 在线编译（推荐，也是本项目的默认方式）
 
-Fork 本仓库，在 **Actions → 构建 H5000M 主线 OpenWrt 固件 → Run workflow** 手动触发。
-构建完成后固件自动发布为 Release，软件包仓库自动发布到 GitHub Pages。
-
-大部分组件已固定为默认内置，界面上只保留确实需要选择的开关（5G 拨号器、Docker、
-各代理前端等）。
-
-### 本地编译
+在 **Actions → 构建 H5000M 主线 OpenWrt 固件 → Run workflow** 手动触发，或者用命令行：
 
 ```sh
-# 装依赖（Debian/Ubuntu 用 apt，Arch 用 pacman）
-./scripts/local-build.sh --install-deps
+gh workflow run build.yml --ref master
+```
 
-# 全量编译
-./scripts/local-build.sh
+构建完成后固件自动发布为 Release，软件包仓库自动发布到 GitHub Pages，不需要本机装任何
+交叉编译环境。大部分组件已固定为默认内置，界面上只保留确实需要选择的开关（5G 拨号器、
+Docker、各代理前端等）。
+
+发布前会跑三道门禁（fullcone 四层链路、代理 kmod 是否真在镜像里、**发布出去的软件源
+能否独立满足所有前端**），任何一条不过就不发布。
+
+### 本地编译（只在需要调试时用）
+
+```sh
+./scripts/local-build.sh --install-deps    # 装依赖（Debian/Ubuntu 用 apt，Arch 用 pacman）
+./scripts/local-build.sh                   # 全量编译
 ```
 
 产物在 `artifacts/`：sysupgrade 镜像、rootfs、manifest，以及可供设备安装的 apk 仓库。
+
+> **会把源码树和工具链留在本机**：`openwrt/` 编译完约 **70 GB**（含 toolchain 与
+> `build_dir`）。本项目不再在本机保留这些产物，用完请删掉：
+>
+> ```sh
+> rm -rf openwrt artifacts artifacts-coverage logs build.log coverage-*.log
+> ```
+>
+> 如果 `/home` 跑在 btrfs 且装了 snapper，空间要等包含这棵树的快照被清掉才会真正释放
+> （见下面「已知限制」）。
 
 常用环境变量：
 
@@ -142,6 +156,11 @@ H5000M_APK_REPO_URL=http://<你的地址>:8099 ./scripts/local-build.sh
   因此起不来），也可能换上与内核不匹配的 kmod。装包用 `apk add <包名>` 就好。
 - 需要**本项目没有编译进去的 kmod** 的包装不上：kmod 必须与内核 vermagic 一致，官方
   源里的对不上。遇到这种包，得把它加进构建配置重新编译。
+- **btrfs + snapper 的机器上，删掉本地构建产物不等于立刻回收空间**：本机做过一次全量
+  编译后 `openwrt/` 约 70 GB，删掉之后 `df` 可能仍然是满的，因为 snapper 的 timeline
+  快照还引用着那棵树。用 `sudo snapper -c home list` 找到构建期间生成的快照并
+  `sudo snapper -c home delete <编号>` 才会真正释放；只等 `snapper-cleanup` 的话，
+  daily/monthly/yearly 那几档会把它留很久。
 
 ## 文档
 

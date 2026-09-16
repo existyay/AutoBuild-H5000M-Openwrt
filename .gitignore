@@ -10,8 +10,13 @@
 # local-packages/*, scripts/*.sh  — 18 files.
 
 # ---------------------------------------------------------------------------
-# The OpenWrt source tree. ~16 GB after a build, cloned at run time by
-# scripts/local-build.sh into openwrt/ (or into $SOURCE_DIR).  Never commit it.
+# The OpenWrt source tree. ~70 GB after a full build (source + toolchain +
+# build_dir + bin), cloned at run time by scripts/local-build.sh into openwrt/
+# (or into $SOURCE_DIR).  Never commit it.
+#
+# Builds normally happen in GitHub Actions, so this should not have to exist
+# locally at all.  On btrfs with snapper, deleting the tree does not free the
+# space until the snapshots that captured it are deleted as well.
 # ---------------------------------------------------------------------------
 openwrt/
 openwrt-*/
