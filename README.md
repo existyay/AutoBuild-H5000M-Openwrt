@@ -56,8 +56,17 @@ apk add luci-app-passwall
 ```
 
 可安装的包括 **PassWall、PassWall2、HomeProxy、MosDNS、Nikki、Momo、NeKoBox、
-v2rayA、OpenClash** 以及各自的中文语言包。内核模块与固件同一次构建产出，
+v2rayA、OpenClash、SSR-Plus** 以及各自的中文语言包。内核模块与固件同一次构建产出，
 所以 ABI 天然匹配，不必担心装不上。
+
+代理面板运行需要的内核侧依赖已经**装进固件本身**，不需要用户再补：
+
+| 已内置 | 作用 |
+| --- | --- |
+| `kmod-tun` / `ip-full` | TUN 模式（面板提示的 "需要安装 ip-full 和 kmod-tun" 已是过去式） |
+| `kmod-nft-socket` / `kmod-nft-tproxy` / `kmod-nft-fullcone` | 透明代理与 FullCone |
+| `ucode-mod-math` | HomeProxy 依赖，缺失会导致面板起不来 |
+| `sing-box` 1.12.25 | 固定版本，避免被上游快照里的新版顶掉 |
 
 > `apk update` 出现 `UNTRUSTED signature` 警告说明索引签名校验失败 —— 正常构建不会
 > 出现：索引由本次构建的密钥签名，对应公钥就在固件的 `/etc/apk/keys/`。

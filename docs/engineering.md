@@ -776,7 +776,65 @@ HiJpass、v2rayA。逐包的 Makefile 路径、行号与审计 commit 见
 
 ---
 
+### 10. 「依赖进仓库」不够：kmod 与钉版本的包必须进镜像
+
+第一轮实机反馈后又改了默认策略。设备上装 `luci-app-ssr-plus` 之后再装任何包都失败：
+
+```
+Main node:Xray 和 Mihomo 内核均不存在，无法启动。
+dns2tcp tunnel error.restart!
+...
+ERROR: wget: exited with error 4
+ERROR: kmod-tun-6.18.44-r1: unexpected end of file
+```
+
+**两件事，第二件解释了第一件。**
+
+**（一）SSR-Plus 装上了却没有内核。** SSR-Plus 的核是通过 `INCLUDE_*` 选项用 `select`
+拉的，而这些核在 `LUCI_DEPENDS` 里全都写成条件依赖
+`+PACKAGE_$(PKG_NAME)_INCLUDE_Xray:xray-core`。为了不让 xray/mihomo/3proxy 被
+`select` 顶进镜像（实测 `select` 的源是那个 bool，而 bool 只能是 `y`，所以目标必然是
+`y`），这些 bool 被关掉了 —— **关掉的同时也把核从依赖里删掉了**。于是应用装上了、
+启动、没有核可跑，而它的 DNS 处理把整机解析弄坏，之后所有下载都挂。修法是补一条真正的
+依赖：在 `include $(TOPDIR)/feeds/luci/luci.mk`（`luci.mk:184` 正是
+`DEPENDS:=$(LUCI_DEPENDS)`）之前追加 `LUCI_DEPENDS+=+xray-core +mihomo
++coreutils-timeout`。普通 `+dep` 从 `=m` 的包出发会把目标保持在 `=m`，所以核仍在仓库、
+不进镜像，但 `apk add luci-app-ssr-plus` 会拉它们。
+
+**（二）「只放仓库」对两类包是无效的。** 对比两版固件的 `.manifest` 一目了然 ——
+旧版 36 MB，新版 25 MB（用户说"感觉不如之前的固件"就是这 11 MB）：
+
+| 包 | 旧固件（在镜像里） | 新固件（只在仓库） |
+| --- | --- | --- |
+| `sing-box` | `1.12.25-r1` | — |
+| `luci-app-homeproxy` | `26.223.23928~edece28` | — |
+| `kmod-tun` | `6.18.44-r1` | — |
+| `ip-full` | `6.18.0-r2` | — |
+| `ucode-mod-math` | `2026.07.09~b885dd0f-r1` | — |
+
+- **kmod 只能来自与本内核匹配的仓库。** 镜像里配置的另一个源是
+  `downloads.openwrt.org/snapshots`，它的 kmod vermagic 不同，而且**文件会随 snapshot
+  推进而消失** —— 那个下载注定失败，用户日志里的 `unexpected end of file` 就是它。
+- **钉版本的包不能只放仓库。** `sing-box` 是本工程唯一钉版本的包
+  （`patches/0003` = 1.12.25，因为 1.13 删掉了 legacy inbound 字段而 HomeProxy 还在写）。
+  而 apk 解析依赖时**在所有源之间取最高版本**，所以只放仓库会让它去官方镜像取
+  1.14.0 —— 正是这个补丁要防的崩溃。**版本钉住的前提是我们能决定装哪个版本。**
+
+结论：**kmod 一律进镜像**（每个只有几十 KB，`=y` 只会提升符号、不会降级，因此没有"把
+基础系统已 `=y` 的模块降成仓库包"的风险），**钉版本的核（sing-box）也进镜像**；
+**前端应用本身仍留在仓库**。发布前门禁新增
+`Verify the proxy stack dependencies are in the image`，断言这些符号是 `=y`、kmod 真的在
+rootfs 里（`tun.ko`/`dummy.ko`/`inet_diag.ko`）、`sing-box` 二进制在、以及
+`luci-app-ssr-plus` 确实带上了核依赖 —— 否则拒绝发布。
+
+> 仍然存在的边界：镜像里保留了官方 snapshot 源，所以用户**自行**安装本仓库没有的包时，
+> 仍可能拿到与内核不匹配的 kmod。要彻底消除，需要把官方源从镜像里去掉（只留本仓库）。
+> 那是一个策略选择，没有默认做。
+
+---
+
 ## 八、已知限制
+
 
 * **已完成验证的范围 —— 完整固件已在本机编译成功**（`BUILD_EXIT=0`，6 核，含工具链）：
 
