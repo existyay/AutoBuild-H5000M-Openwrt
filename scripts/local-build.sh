@@ -2000,6 +2000,16 @@ EOF
 	# changes the kernel ABI and forces a full rebuild; see
 	# ENABLE_EBPF_PROXY_KERNEL for that decision.  Nikki-RS does not want
 	# AF_XDP, so its eBPF support does not require it either.
+	#
+	# kmod-veth is the eBPF datapath's load-bearing module.  Nikki-RS's eBPF
+	# manager builds dae0 <-> dae0peer as a link pair: it prefers the L2 netkit
+	# driver and falls back to veth, and this kernel leaves CONFIG_NETKIT off, so
+	# veth is the only path.  Without the module `RTM_NEWLINK` fails with
+	# EOPNOTSUPP and clash-rs stops at startup with
+	#
+	#   failed to initialize eBPF inbound: IO error: Not supported (os error 95)
+	#
+	# so it must be IN the image, not merely built into the repository.
 	emit_service true \
 		kmod-netlink-diag \
 		kmod-nf-nathelper \
@@ -2009,7 +2019,8 @@ EOF
 		kmod-tcp-bbr \
 		kmod-tun \
 		kmod-inet-diag \
-		kmod-dummy
+		kmod-dummy \
+		kmod-veth
 
 	# Found by auditing the proxy packages' Makefiles rather than by guessing:
 	#   kmod-nft-queue            HomeProxy (VIKINGYFY variant) uses nft queue
@@ -2099,6 +2110,10 @@ build_required_packages() {
 	is_true "$ENABLE_THEME_ARGON" && REQUIRED_PACKAGES+=(luci-theme-argon luci-app-argon-config)
 	REQUIRED_PACKAGES+=(h5000m-integration luci-app-h5000m-accel kmod-tcp-bbr
 		kmod-nft-socket kmod-nft-tproxy
+		# kmod-veth carries the Nikki-RS eBPF datapath's dae0/dae0peer link
+		# pair; without it clash-rs fails at startup with EOPNOTSUPP.  Verified
+		# like any other in-image kmod so a defconfig that drops it is fatal.
+		kmod-veth
 		# firewall4 and nftables-json are required, not implied: they are
 		# the userspace half of fullcone, and the acceleration page writes
 		# its `fullcone` option into firewall4's config.  A defconfig that

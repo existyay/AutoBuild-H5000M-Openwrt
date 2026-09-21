@@ -105,7 +105,7 @@ KMODS=(
 	kmod-nft-tproxy kmod-nft-socket kmod-nft-fullcone kmod-ipt-tproxy
 	kmod-ipt-conntrack-extra kmod-ipt-filter kmod-netlink-diag
 	kmod-nf-nathelper kmod-macvlan kmod-sched-core kmod-sched-bpf
-	kmod-ifb kmod-tcp-bbr kmod-ipt-ipset
+	kmod-ifb kmod-tcp-bbr kmod-ipt-ipset kmod-veth
 )
 
 # Package -> the core it must resolve.  The whole point: the core has to be part

@@ -116,11 +116,24 @@ elif ls /lib/modules/"$(uname -r)"/cls_bpf.ko* >/dev/null 2>&1; then
 elif modprobe -n -q cls_bpf >/dev/null 2>&1; then
 	ebpf_tc=1
 fi
-if [ "$ebpf_bpf" = 1 ] && [ "$ebpf_tc" = 1 ]; then
+# veth is not optional: the eBPF manager builds dae0 <-> dae0peer as a link
+# pair (netkit if the kernel has it, veth otherwise) before it loads any BPF
+# program.  Without the module it stops with EOPNOTSUPP, so readiness has to
+# include it or the page would call a datapath "ready" that cannot start.
+ebpf_veth=0
+if [ -e /sys/module/veth ]; then
+	ebpf_veth=1
+elif ls /lib/modules/"$(uname -r)"/veth.ko* >/dev/null 2>&1; then
+	ebpf_veth=1
+elif modprobe -n -q veth >/dev/null 2>&1; then
+	ebpf_veth=1
+fi
+if [ "$ebpf_bpf" = 1 ] && [ "$ebpf_tc" = 1 ] && [ "$ebpf_veth" = 1 ]; then
 	echo "ebpf_kernel=1"
 else
 	echo "ebpf_kernel=0"
 fi
+echo "ebpf_veth=${ebpf_veth}"
 
 # CONFIG_CGROUP_BPF has no sysctl or module of its own.  kallsyms carries the
 # static key it is built around; this script runs as root, so it is readable.

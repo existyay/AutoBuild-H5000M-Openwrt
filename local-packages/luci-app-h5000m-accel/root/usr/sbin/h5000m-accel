@@ -29,6 +29,10 @@ apply_ebpf_proxy() {
 	modprobe sch_ingress 2>/dev/null
 	modprobe cls_bpf 2>/dev/null
 	modprobe act_bpf 2>/dev/null
+	# The eBPF manager creates dae0 <-> dae0peer as a netkit/veth pair before
+	# it loads any program; preloading veth removes the EOPNOTSUPP first-run
+	# failure when the module is present but not yet loaded.
+	modprobe veth 2>/dev/null
 
 	case "$want" in
 		on|1)  want=1 ;;

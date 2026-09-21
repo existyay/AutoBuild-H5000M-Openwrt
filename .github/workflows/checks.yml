@@ -283,6 +283,10 @@ jobs:
             "local-build.sh requests CONFIG_KERNEL_CGROUP_BPF"
           want scripts/local-build.sh 'kmod-sched-bpf' \
             "local-build.sh carries the TC BPF modules"
+          want scripts/local-build.sh 'kmod-veth' \
+            "local-build.sh installs kmod-veth (the eBPF link pair)"
+          want scripts/verify-apk-repo.sh 'kmod-veth' \
+            "verify-apk-repo.sh checks kmod-veth"
           want configs/h5000m.config 'ENABLE_EBPF_PROXY_KERNEL' \
             "h5000m.config documents the eBPF switch"
 
@@ -293,12 +297,18 @@ jobs:
             "the accel config has the eBPF option"
           want "$accel/root/usr/sbin/h5000m-accel" 'cls_bpf' \
             "the accel apply script loads cls_bpf"
+          want "$accel/root/usr/sbin/h5000m-accel" 'modprobe veth' \
+            "the accel apply script loads veth"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_kernel' \
             "the accel status script reports eBPF readiness"
+          want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_veth' \
+            "the accel status script reports veth readiness"
           want "$accel/htdocs/luci-static/resources/view/h5000m/accel.js" 'ebpf_proxy' \
             "the accel page exposes the eBPF option"
           want "$accel/Makefile" 'kmod-sched-bpf' \
             "the accel package depends on the TC BPF module"
+          want "$accel/Makefile" 'kmod-veth' \
+            "the accel package depends on kmod-veth"
 
           echo
           if [ "$fail" -ne 0 ]; then

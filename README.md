@@ -94,9 +94,10 @@ SoC 上并不存在。
 
 代理侧的加速则是 **Nikki-RS（clash-rs）的 eBPF 快路径**：固件默认编译了 cgroup BPF 与
 TC eBPF 所需的全部内核选项（`CONFIG_CGROUP_BPF` 以及 kmod-sched-core / kmod-sched-bpf
-带来的 cls_bpf、act_bpf），装上 `luci-app-nikki-rs` 后在它的 eBPF 页面打开即可。
-「网络加速」页面会报告 eBPF 内核支持是否就绪，并可代为开关（默认「不管理」，由 Nikki-RS
-自己的页面决定）。
+带来的 cls_bpf、act_bpf），并把 eBPF 管理器建 datapath 所需的 `kmod-veth` 装进镜像
+（它用 netkit/veth 建 `dae0`/`dae0peer` 链路对）。装上 `luci-app-nikki-rs` 后在它的
+eBPF 页面打开即可；「网络加速」页面会报告 eBPF 内核支持是否就绪，并可代为开关
+（默认「不管理」，由 Nikki-RS 自己的页面决定）。
 
 ## 自己编译
 
@@ -160,6 +161,12 @@ H5000M_APK_REPO_URL=http://<你的地址>:8099 ./scripts/local-build.sh
 - **无线与 5G 需要真机验证**：仿真能验证脚本与启动流程，但射频、模组附着、风扇曲线
   这类依赖真实硬件的行为，只能上机确认。
 - 第三方代理面板由各自上游维护，本项目只负责把它们编译进仓库并保证依赖完整。
+- **不要额外添加 `nikki-rs.pages.dev` 源**：本固件的软件源已经包含 `nikki-rs` /
+  `clash-rs` / `luci-app-nikki-rs`，无需 nikki-rs 官方的 `feed.sh`。混用外部源会出现
+  `WARNING: updating and opening https://nikki-rs.pages.dev/...: UNTRUSTED signature`
+  （该源的公钥不在固件里），且可能装上与本固件 ABI/版本不一致的 `clash-rs`。
+  已经加过的，删掉 `/etc/apk/repositories.d/` 里指向 `nikki-rs.pages.dev` 的那一行，
+  再 `apk update` 即可。
 - **不要盲目 `apk upgrade`**：镜像里保留了官方 snapshot 源，而那些版本比本工程的构建新
   —— `apk` 取最高版本，升级会把钉住的 `sing-box` 换成 1.13+（HomeProxy / PassWall2 会
   因此起不来），也可能换上与内核不匹配的 kmod。装包用 `apk add <包名>` 就好。

@@ -802,6 +802,34 @@ CONFIG_KERNEL_CGROUP_BPF=y
 the image` 都会检查它们真的进了 `.config` 与内核 `.config`。TC 那一半不写符号，
 而是依靠已经 `=y` 的 `kmod-sched-core` / `kmod-sched-bpf`。
 
+**还有一条不在内核选项里、但会让 eBPF 直接起不来：`kmod-veth` 必须在镜像里。**
+实机上打开 Nikki-RS 的 eBPF 后报：
+
+```
+ERROR .../ebpf/runner.rs:52: failed to initialize eBPF inbound: IO error: Not supported (os error 95)
+```
+
+`os error 95` 是 `EOPNOTSUPP`。`clash-ebpf/src/manager.rs` 在加载任何 BPF 程序**之前**
+先建 `dae0 <-> dae0peer` 链路对，`netlink.rs::add_link_pair()` 优先用 L2 `netkit`，
+拿到 `EOPNOTSUPP` 就回退 `veth`：
+
+```rust
+match self.add_netkit_pair(name, peer) {
+    Ok(()) => Ok(LinkPairKind::Netkit),
+    Err(e) => { /* fallback */ self.add_veth_pair(name, peer)?; ... }
+}
+```
+
+本内核 `CONFIG_NETKIT` 没开，所以只剩 veth 一条路；而本工程原来只把 `kmod-veth` 放在
+仓库（`=m`），镜像里没有这个模块，`RTM_NEWLINK kind=veth` 便返回 `EOPNOTSUPP`，整个
+eBPF inbound 在初始化阶段就退出。修法是把 `kmod-veth` 加进 `emit_service true` 的镜像
+清单并纳入 `REQUIRED_PACKAGES`/发布检查；「网络加速」页的就绪判定与 `apply` 预加载也
+一并覆盖 veth。
+
+顺序上值得记一笔：`load_and_attach()` 的失败只 `warn!`，不会中断启动；真正 `init()`
+返回错误的是它前面的链路对创建。所以“eBPF 报错但 TC/cgroup 都已就绪”这种组合，指向的
+是 veth，而不是 BPF 本身。
+
 `luci-app-h5000m-accel` 的「网络加速」页会读内核状态并报告 eBPF 是否就绪，
 另有一个默认「不管理」的三态开关，避免保存加速页时覆盖 Nikki-RS 自己 eBPF 页面的设置。
 

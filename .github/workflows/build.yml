@@ -630,7 +630,7 @@ jobs:
                      kmod-ipt-tproxy kmod-ipt-conntrack-extra \
                      kmod-netlink-diag kmod-nf-nathelper kmod-macvlan \
                      kmod-sched-core kmod-ifb kmod-sched-bpf kmod-ipt-filter \
-                     kmod-ipt-ipset; do
+                     kmod-ipt-ipset kmod-veth; do
             check "${sym} =y" "grep -q '^CONFIG_PACKAGE_${sym}=y$' openwrt/.config"
           done
 
@@ -819,7 +819,7 @@ jobs:
                    kmod-nft-tproxy kmod-nft-socket kmod-nft-fullcone kmod-ipt-tproxy \
                    kmod-ipt-conntrack-extra kmod-ipt-filter kmod-netlink-diag \
                    kmod-nf-nathelper kmod-macvlan kmod-sched-core kmod-sched-bpf \
-                   kmod-ifb kmod-tcp-bbr kmod-ipt-ipset; do
+                   kmod-ifb kmod-tcp-bbr kmod-ipt-ipset kmod-veth; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
           echo
