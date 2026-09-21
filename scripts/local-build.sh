@@ -1715,6 +1715,33 @@ CONFIG_PACKAGE_kmod-nft-socket=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y
 EOF
 
+	# ------------------------------------------------ adblock DNS backends ---
+	# Classic `adblock` and the newer `adblock-fast` both drive a DNS server's
+	# blocklist, and both offer a dnsmasq backend that needs more than the base
+	# image carries:
+	#
+	#   dnsmasq-full   the base image ships the plain `dnsmasq` variant, which
+	#                  has neither ipset nor nftset support compiled in.  The
+	#                  full variant has both and PROVIDES dnsmasq, so it takes
+	#                  its place.  nftset additionally needs nftables, which the
+	#                  image already has.
+	#
+	#   ipset          dnsmasq.ipset needs the ipset userspace tool AND the
+	#                  ipset netfilter modules.  Without them the LuCI page
+	#                  reports "Please note that dnsmasq.ipset is not supported
+	#                  on this system." and the option is not offered at all.
+	#                  `ipset` pulls kmod-ipt-ipset, libmnl and libipset; the
+	#                  kmod is named explicitly because a kernel module may only
+	#                  come from this exact kernel build.
+	#
+	# This is a few tens of KB and it is what makes adblock-fast's recommended
+	# dnsmasq.ipset mode work instead of merely warning about it.
+	cat >> "$out" <<'EOF'
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_ipset=y
+CONFIG_PACKAGE_kmod-ipt-ipset=y
+EOF
+
 	# eBPF proxy kernel support (Nikki-RS / clash-rs).
 	#
 	# The TC half of the eBPF datapath attaches cls_bpf/act_bpf programs to a
@@ -1884,6 +1911,23 @@ EOF
 
 	emit_service "$ENABLE_ADBLOCK" \
 		adblock luci-app-adblock luci-i18n-adblock-zh-cn
+
+	# adblock-fast — the modern, ucode-based implementation.  It is built into
+	# the repository whether or not ENABLE_ADBLOCK is on: the switch installs the
+	# classic adblock into the image, and this one stays installable so the owner
+	# can choose.  `luci-app-adblock-fast` pulls adblock-fast and rpcd-mod-ucode.
+	#
+	# The four tools are adblock-fast's *recommended* packages, not hard
+	# dependencies: it probes /usr/sbin/gawk and /usr/libexec/{grep-gnu,
+	# sed-gnu,sort-coreutils} and warns when they are absent, even though busybox
+	# provides awk/grep/sed/sort.  Putting them in the repository is what makes
+	# the `apk add` its warning suggests actually succeed.  gawk and
+	# coreutils-sort already arrive as hard dependencies of the classic adblock
+	# package; all four are named here so the repository stays complete even if
+	# that package is ever dropped.
+	emit_service "" \
+		adblock-fast luci-app-adblock-fast luci-i18n-adblock-fast-zh-cn \
+		gawk grep sed coreutils-sort
 
 	# HomeProxy: the LuCI app stays in the repository, but its *dependencies* are
 	# installed into the image.
@@ -2064,7 +2108,15 @@ build_required_packages() {
 		# PROVIDES alias, so CONFIG_PACKAGE_nftables never exists in .config
 		# and listing it here would fail every build.
 		firewall4 nftables-json kmod-nft-fullcone)
-	is_true "$ENABLE_REPO_PACKAGES" && REPO_PACKAGES+=(luci-app-ssr-plus chinadns-ng)
+	# Adblock DNS backends.  dnsmasq-full (ipset + nftset compiled in) plus the
+	# ipset tool and its netfilter modules are what make `dnsmasq.ipset` an
+	# offered mode in the adblock / adblock-fast LuCI pages instead of a
+	# "not supported on this system" note.  They are checked here so a defconfig
+	# that silently drops one of them fails the build rather than shipping a
+	# feature that is switched off.
+	REQUIRED_PACKAGES+=(dnsmasq-full ipset kmod-ipt-ipset)
+	is_true "$ENABLE_REPO_PACKAGES" && REPO_PACKAGES+=(luci-app-ssr-plus chinadns-ng
+		adblock-fast luci-app-adblock-fast gawk grep sed coreutils-sort)
 
 	# Optional switches are verified too, and for a specific reason: `make
 	# defconfig` exits 0 even when a requested package does not exist, it just

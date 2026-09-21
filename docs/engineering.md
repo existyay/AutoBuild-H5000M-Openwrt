@@ -809,6 +809,58 @@ the image` 都会检查它们真的进了 `.config` 与内核 `.config`。TC 那
 `ebpf` feature（release workflow 的 `features: minimal,jemallocator,ebpf`），
 所以本工程不需要在固件构建里引入 Rust / LLVM / bpf-linker 工具链，只是下载并打包。
 
+#### adblock-fast 的两类提示：一类是缺包，一类是缺 DNS 后端
+
+实机上安装 `adblock-fast` 后会出现两种看起来相似、成因完全不同的提示。
+
+**（一）"无 gawk, grep, sed, coreutils-sort" 是推荐包提示，不是安装失败。**
+`adblock-fast` 用 `_check_recommended_packages()` 探测的是 **GNU 工具的固定路径**：
+
+```
+gawk  -> /usr/sbin/gawk 或 /usr/bin/gawk
+grep  -> /usr/libexec/grep-gnu
+sed   -> /usr/libexec/sed-gnu
+sort  -> /usr/libexec/sort-coreutils
+```
+
+busybox 提供 `awk`/`grep`/`sed`/`sort`，但不会出现在这些路径上，所以**即使功能可用，
+提示也会出现**，并附一条 `apk add gawk grep sed coreutils-sort`。本工程原来的仓库里只有
+经典 `adblock` 硬依赖带进来的 `gawk` 与 `coreutils-sort`，没有 `grep`/`sed`，那条建议
+执行不下去。现在四个都按 `=m` 编进仓库，建议命令可以直接执行；`gawk`/`coreutils-sort`
+因此同时被两条路径引用，不再依赖经典 `adblock` 是否被选中。
+
+**（二）"此系统不支持 dnsmasq.ipset" 是缺后端，不是缺工具。**
+`adblock-fast.uc` 的判定是：
+
+```
+dnsmasq.ipset  = is_present('ipset') && ipset help hash:net && dnsmasq 带 ipset 特性
+dnsmasq.nftset = is_present('nft')   && dnsmasq 带 nftset 特性
+```
+
+基础镜像里的 `dnsmasq` 变体**既没有 ipset 也没有 nftset**；`dnsmasq-full` 才有，并且
+`PROVIDES:=dnsmasq` 会顶替它。`nft` 工具由 `nftables-json` 提供（已在），所以缺的通常只是
+`ipset` 用户态工具与 `kmod-ipt-ipset` 内核模块。现在 `append_board_stack_config()` 固定写入：
+
+```
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_ipset=y
+CONFIG_PACKAGE_kmod-ipt-ipset=y
+```
+
+`ipset` 会带出 `libmnl`、`libipset` 与 `kmod-ipt-ipset`；kmod 显式列出，因为它只能与
+同一次构建的内核配对。`verify_config()` 会断言这三个符号在 `.config` 里，发布前的
+`Verify the proxy stack dependencies are in the image` 与 `verify-apk-repo.sh` 也会同时检查
+用户态与内核模块。
+
+**`smartdns.domainset` / `unbound.adb_list` 两条不需要处理。** 它们分别是
+"smartdns 未安装" 与 "unbound 未安装" 的同义提示——这两个是 adblock-fast 支持的**另一种
+DNS 服务**，本固件用 dnsmasq，不会同时装三个 DNS 服务去绑 53 端口。装上对应服务后提示
+自然消失，与 adblock 能否工作无关。
+
+> 提醒：`gawk` / `grep` / `sed` / `coreutils-sort` / `ipset` 是**架构相关**包，必须与本固件
+> 同一次构建。跨固件或从官方快照装可能因 libc/ABI 不同而失败，这正是它们进本仓库、
+> `ipset` 进一步进镜像的原因。
+
 ---
 
 ### 10. 「依赖进仓库」不够：kmod 与钉版本的包必须进镜像

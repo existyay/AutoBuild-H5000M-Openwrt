@@ -65,6 +65,7 @@ v2rayA、OpenClash、SSR-Plus** 以及各自的中文语言包。内核模块与
 | --- | --- |
 | `kmod-tun` / `ip-full` | TUN 模式（面板提示的 "需要安装 ip-full 和 kmod-tun" 已是过去式） |
 | `kmod-nft-socket` / `kmod-nft-tproxy` / `kmod-nft-fullcone` | 透明代理与 FullCone |
+| `dnsmasq-full` / `ipset` / `kmod-ipt-ipset` | adblock / adblock-fast 的 `dnsmasq.ipset`、`dnsmasq.nftset` 后端（页面上不会再显示 "dnsmasq.ipset 不支持"） |
 | `ucode-mod-math` | HomeProxy 依赖，缺失会导致面板起不来 |
 | `sing-box` 1.12.25 | 固定版本，避免被上游快照里的新版顶掉 |
 
@@ -83,6 +84,7 @@ v2rayA、OpenClash、SSR-Plus** 以及各自的中文语言包。内核模块与
 | **5G 拨号** `ddimension/wwand` | 5G 模组拨号，带 LuCI 面板 |
 | **MosDNS** | 域名分流，开箱已装 |
 | HomeProxy / Adblock | 已在软件源中，`apk add luci-app-homeproxy` / `luci-app-adblock` 安装；**默认不装进固件** |
+| **Adblock-Fast** | 软件源里也提供 `adblock-fast` + `luci-app-adblock-fast` + 中文包；它推荐但非必需的 `gawk` / `grep` / `sed` / `coreutils-sort` 同样在源里，面板不会再提示缺包 |
 | Argon 主题 | LuCI 主题 |
 | UPnP IGD / ttyd | 端口映射 / 网页终端 |
 

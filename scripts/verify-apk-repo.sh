@@ -76,26 +76,36 @@ FRONTENDS=(
 	luci-app-passwall luci-app-passwall2 luci-app-ssr-plus luci-app-homeproxy
 	luci-app-nikki-rs luci-app-momo luci-app-openclash luci-app-mosdns
 	luci-app-nekobox luci-app-xray luci-app-hijpass luci-app-fchomo
-	luci-app-v2raya luci-app-adblock
+	luci-app-v2raya luci-app-adblock luci-app-adblock-fast
 )
 
 # Cores and daemons: a front-end without one of these installs and then cannot
 # start a node.
 DAEMONS=(
-	xray-core mihomo sing-box mosdns nikki-rs clash-rs momo adblock dns2tcp
-	ip-full ucode-mod-math
+	xray-core mihomo sing-box mosdns nikki-rs clash-rs momo adblock adblock-fast
+	dns2tcp ip-full ucode-mod-math
 )
+
+# adblock / adblock-fast hand a blocklist to a DNS server.  dnsmasq-full is the
+# variant with ipset and nftset compiled in; `nftables-json` (already in KMODS'
+# userspace half) supplies the `nft` tool nftset needs; `ipset` is the userspace
+# tool the ipset backend probes.  The four GNU tools are adblock-fast's
+# *recommended* packages — it warns when they are absent even though busybox
+# provides awk/grep/sed/sort — so the repository has to carry them for the
+# warning's own `apk add` suggestion to work.
+DNS_BACKENDS=(dnsmasq-full ipset)
+ADBLOCK_TOOLS=(gawk grep sed coreutils-sort)
 
 # Kernel modules the proxy stack redirects traffic through.  They can only come
 # from a repository built against this exact kernel: the official snapshot's
 # modules carry a different vermagic, and their files disappear as the snapshot
-# moves on.
+# moves on.  kmod-ipt-ipset is what the ipset userspace tool drives.
 KMODS=(
 	kmod-tun kmod-inet-diag kmod-dummy kmod-nft-queue kmod-nfnetlink-queue
 	kmod-nft-tproxy kmod-nft-socket kmod-nft-fullcone kmod-ipt-tproxy
 	kmod-ipt-conntrack-extra kmod-ipt-filter kmod-netlink-diag
 	kmod-nf-nathelper kmod-macvlan kmod-sched-core kmod-sched-bpf
-	kmod-ifb kmod-tcp-bbr
+	kmod-ifb kmod-tcp-bbr kmod-ipt-ipset
 )
 
 # Package -> the core it must resolve.  The whole point: the core has to be part
@@ -107,6 +117,7 @@ declare -A REQUIRED_CORES=(
 	[luci-app-homeproxy]="sing-box"
 	[luci-app-nikki-rs]="nikki-rs clash-rs"
 	[luci-app-momo]="momo"
+	[luci-app-adblock-fast]="adblock-fast"
 )
 
 # This project's only version pin, and the reason it has to be in the image.
@@ -203,6 +214,11 @@ echo
 
 echo "=== kernel modules ==="
 for p in "${KMODS[@]}"; do present "$p"; done
+echo
+
+echo "=== adblock DNS backends and recommended tools ==="
+for p in "${DNS_BACKENDS[@]}"; do present "$p"; done
+for p in "${ADBLOCK_TOOLS[@]}"; do present "$p"; done
 echo
 
 # `apk list <missing>` exits 0 with no output, and `apk query --recursive` exits 0

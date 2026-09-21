@@ -629,13 +629,24 @@ jobs:
                      kmod-nft-queue kmod-nfnetlink-queue kmod-nft-tproxy \
                      kmod-ipt-tproxy kmod-ipt-conntrack-extra \
                      kmod-netlink-diag kmod-nf-nathelper kmod-macvlan \
-                     kmod-sched-core kmod-ifb kmod-sched-bpf kmod-ipt-filter; do
+                     kmod-sched-core kmod-ifb kmod-sched-bpf kmod-ipt-filter \
+                     kmod-ipt-ipset; do
             check "${sym} =y" "grep -q '^CONFIG_PACKAGE_${sym}=y$' openwrt/.config"
           done
 
           echo
           echo "=== userspace dependencies HomeProxy checks for ==="
           for sym in ip-full ucode-mod-math sing-box; do
+            check "${sym} =y" "grep -q '^CONFIG_PACKAGE_${sym}=y$' openwrt/.config"
+          done
+
+          echo
+          echo "=== adblock DNS backends in the image ==="
+          # adblock-fast offers dnsmasq.ipset / dnsmasq.nftset, and the LuCI page
+          # hides a mode whose prerequisites are absent.  dnsmasq-full carries
+          # both features; ipset is the userspace tool the ipset check probes.
+          # kmod-ipt-ipset is covered by the kernel-module loop above.
+          for sym in dnsmasq-full ipset; do
             check "${sym} =y" "grep -q '^CONFIG_PACKAGE_${sym}=y$' openwrt/.config"
           done
 
@@ -784,12 +795,22 @@ jobs:
           for p in luci-app-passwall luci-app-passwall2 luci-app-ssr-plus luci-app-homeproxy \
                    luci-app-nikki-rs luci-app-momo luci-app-openclash luci-app-mosdns \
                    luci-app-nekobox luci-app-xray luci-app-hijpass luci-app-fchomo \
-                   luci-app-v2raya luci-app-adblock; do
+                   luci-app-v2raya luci-app-adblock luci-app-adblock-fast; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
           echo
           echo "=== cores and daemons, without which a front-end cannot run ==="
-          for p in xray-core mihomo sing-box mosdns nikki-rs clash-rs momo adblock dns2tcp ip-full ucode-mod-math; do
+          for p in xray-core mihomo sing-box mosdns nikki-rs clash-rs momo adblock adblock-fast dns2tcp ip-full ucode-mod-math; do
+            if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
+          done
+          echo
+          echo "=== adblock-fast's recommended tools ==="
+          # adblock-fast probes the GNU paths (/usr/sbin/gawk,
+          # /usr/libexec/{grep-gnu,sed-gnu,sort-coreutils}) and warns, with an
+          # `apk add` line, when they are absent — even though busybox provides
+          # awk/grep/sed/sort.  The warning is only actionable if this repository
+          # actually carries the four packages.
+          for p in gawk grep sed coreutils-sort; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
           echo
@@ -798,7 +819,7 @@ jobs:
                    kmod-nft-tproxy kmod-nft-socket kmod-nft-fullcone kmod-ipt-tproxy \
                    kmod-ipt-conntrack-extra kmod-ipt-filter kmod-netlink-diag \
                    kmod-nf-nathelper kmod-macvlan kmod-sched-core kmod-sched-bpf \
-                   kmod-ifb kmod-tcp-bbr; do
+                   kmod-ifb kmod-tcp-bbr kmod-ipt-ipset; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
           echo
@@ -836,6 +857,7 @@ jobs:
           resolve luci-app-openclash
           resolve luci-app-mosdns
           resolve luci-app-nekobox
+          resolve luci-app-adblock-fast
           echo
           echo "=== and each one actually pulls a core ==="
           # Resolving is not enough: luci-app-ssr-plus resolved fine on the
@@ -862,6 +884,7 @@ jobs:
           require_core luci-app-nikki-rs   nikki-rs
           require_core luci-app-nikki-rs   clash-rs
           require_core luci-app-momo       momo
+          require_core luci-app-adblock-fast adblock-fast
           echo
           if [ "$fail" -ne 0 ]; then
             echo "::error::$fail repository check(s) failed — the published repository would not be installable"

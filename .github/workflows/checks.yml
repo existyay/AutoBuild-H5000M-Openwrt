@@ -307,6 +307,56 @@ jobs:
           fi
           echo "Nikki-RS and eBPF wiring is consistent."
 
+      # adblock-fast's two complaints on a real device were "gawk, grep, sed,
+      # coreutils-sort are missing" (its recommended-package probe only knows the
+      # GNU paths) and "dnsmasq.ipset is not supported" (no ipset tool/module).
+      # Both are fixed in the build script and the repository/release checks;
+      # this asserts the fix stays wired together.
+      - name: Verify the adblock DNS backends are wired consistently
+        run: |
+          set -euo pipefail
+          fail=0
+          want() { if grep -q "$2" "$1"; then echo "  OK    $3"; else echo "  FAIL  $3"; fail=1; fi; }
+
+          # Image: dnsmasq-full (ipset + nftset) and the ipset tool/module.
+          want scripts/local-build.sh 'CONFIG_PACKAGE_dnsmasq-full=y' \
+            "local-build.sh installs dnsmasq-full"
+          want scripts/local-build.sh 'CONFIG_PACKAGE_ipset=y' \
+            "local-build.sh installs the ipset tool"
+          want scripts/local-build.sh 'CONFIG_PACKAGE_kmod-ipt-ipset=y' \
+            "local-build.sh installs kmod-ipt-ipset"
+          want scripts/local-build.sh 'REQUIRED_PACKAGES+=(dnsmasq-full ipset kmod-ipt-ipset)' \
+            "local-build.sh verifies the adblock DNS backends survive defconfig"
+
+          # Repository: the adblock-fast stack and the four recommended tools.
+          want scripts/local-build.sh 'adblock-fast luci-app-adblock-fast luci-i18n-adblock-fast-zh-cn' \
+            "local-build.sh emits the adblock-fast stack"
+          want scripts/local-build.sh 'gawk grep sed coreutils-sort' \
+            "local-build.sh emits adblock-fast's recommended tools"
+
+          want scripts/verify-apk-repo.sh 'luci-app-adblock-fast' \
+            "verify-apk-repo.sh checks the adblock-fast front-end"
+          want scripts/verify-apk-repo.sh 'adblock-fast' \
+            "verify-apk-repo.sh checks the adblock-fast service"
+          want scripts/verify-apk-repo.sh 'kmod-ipt-ipset' \
+            "verify-apk-repo.sh checks kmod-ipt-ipset"
+          want scripts/verify-apk-repo.sh 'DNS_BACKENDS=(dnsmasq-full ipset)' \
+            "verify-apk-repo.sh checks the DNS backends"
+          want scripts/verify-apk-repo.sh 'ADBLOCK_TOOLS=(gawk grep sed coreutils-sort)' \
+            "verify-apk-repo.sh checks the recommended tools"
+
+          want .github/workflows/build.yml 'luci-app-adblock-fast' \
+            "build.yml checks the adblock-fast front-end"
+          want .github/workflows/build.yml 'require_core luci-app-adblock-fast adblock-fast' \
+            "build.yml requires adblock-fast under the front-end"
+
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::adblock DNS backend wiring is inconsistent"
+            exit 1
+          fi
+          echo "adblock DNS backend wiring is consistent."
+
   # ---------------------------------------------------------------------------
   # Configuration coverage: every ENABLE_* profile must still produce a valid
   # .config.  Independent of the firmware build, so a config regression does not
