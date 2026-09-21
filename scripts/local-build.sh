@@ -80,8 +80,23 @@ ENABLE_UPNP="${ENABLE_UPNP:-true}"
 # for.  Turn either on with ENABLE_ADBLOCK=true / ENABLE_HOMEPROXY=true.
 ENABLE_ADBLOCK="${ENABLE_ADBLOCK:-false}"
 ENABLE_DOCKERMAN="${ENABLE_DOCKERMAN:-false}"
+# Nikki-RS (clash-rs), replacing the old mihomo-based Nikki.  See
+# install_external_packages().
 ENABLE_NIKKI="${ENABLE_NIKKI:-false}"
 ENABLE_OPENCLASH="${ENABLE_OPENCLASH:-false}"
+
+# eBPF proxy kernel support.  Nikki-RS's eBPF fast path attaches TC (clsact)
+# programs to the LAN/WAN interfaces and, when cgroup v2 is mounted, cgroup
+# programs for host/process matching.  The TC half needs only the BPF syscall
+# and the cls_bpf/act_bpf modules, which the kernel already has / the
+# kmod-sched-* packages already carry.  The host half needs CONFIG_CGROUPS and
+# CONFIG_CGROUP_BPF, which mainline OpenWrt leaves off, so this switch turns
+# them on.
+#
+# Default true: the whole point of shipping Nikki-RS is the eBPF fast path, and
+# a firmware that ships the app but not the kernel support would make the page's
+# eBPF switch a no-op.  Turn it off only for a deliberately minimal build.
+ENABLE_EBPF_PROXY_KERNEL="${ENABLE_EBPF_PROXY_KERNEL:-true}"
 # Built into the image by default, matching the workflow.  A default that
 # differs between a local build and CI produces two different firmwares from the
 # same commit, which is worse than either choice on its own.
@@ -252,6 +267,12 @@ Optional services (defaults):
   ENABLE_DOCKERMAN=false
   ENABLE_NIKKI=false ENABLE_OPENCLASH=false ENABLE_MOSDNS=false
   ENABLE_HOMEPROXY=false ENABLE_ADGUARDHOME=false
+
+Acceleration (defaults):
+  ENABLE_EBPF_PROXY_KERNEL=true
+      Kernel support for the Nikki-RS eBPF proxy: writes CONFIG_KERNEL_CGROUPS
+      and CONFIG_KERNEL_CGROUP_BPF (the TC half comes from kmod-sched-*).
+      Changing it changes the kernel ABI and forces a full kernel rebuild.
 EOF
 }
 
@@ -453,7 +474,8 @@ show_features() {
 	log "apk source    : ${H5000M_APK_REPO_URL:-(none)}"
 	log "Optional      : upnp=${ENABLE_UPNP} adblock=${ENABLE_ADBLOCK} dockerman=${ENABLE_DOCKERMAN}"
 	log "Repo extras   : build=${ENABLE_REPO_PACKAGES} (services are =m unless their switch is on)"
-	log "Proxy/DNS     : nikki=${ENABLE_NIKKI} openclash=${ENABLE_OPENCLASH} mosdns=${ENABLE_MOSDNS} homeproxy=${ENABLE_HOMEPROXY} adguardhome=${ENABLE_ADGUARDHOME}"
+	log "Proxy/DNS     : nikki-rs=${ENABLE_NIKKI} openclash=${ENABLE_OPENCLASH} mosdns=${ENABLE_MOSDNS} homeproxy=${ENABLE_HOMEPROXY} adguardhome=${ENABLE_ADGUARDHOME}"
+	log "eBPF kernel   : ${ENABLE_EBPF_PROXY_KERNEL} (CGROUPS + CGROUP_BPF for Nikki-RS)"
 }
 
 resolve_modem_stack() {
@@ -1095,7 +1117,12 @@ clone_for_repo_or_image() {
 }
 
 install_external_packages() {
-	clone_for_repo_or_image "$ENABLE_NIKKI"     NIKKI     OpenWrt-nikki   https://github.com/nikkinikki-org/OpenWrt-nikki.git main
+	# Nikki-RS, not Nikki.  This is CHKayanami/OpenWrt-nikki-rs: the same LuCI
+	# transparent-proxy front-end reworked around the Rust clash-rs core, with
+	# an eBPF fast path.  The repository is a monorepo — clash-rs/, nikki-rs/
+	# and luci-app-nikki-rs/ — and OpenWrt's package scanner picks up all three
+	# Makefiles from the one checkout, so the whole stack lands in package/.
+	clone_for_repo_or_image "$ENABLE_NIKKI"     NIKKI     OpenWrt-nikki-rs https://github.com/CHKayanami/OpenWrt-nikki-rs.git main
 	clone_for_repo_or_image "$ENABLE_OPENCLASH" OPENCLASH OpenClash       https://github.com/vernesong/OpenClash.git master
 	clone_for_repo_or_image "$ENABLE_MOSDNS"    MOSDNS    luci-app-mosdns https://github.com/sbwml/luci-app-mosdns.git v5
 	clone_for_repo_or_image "$ENABLE_HOMEPROXY" HOMEPROXY homeproxy       https://github.com/immortalwrt/homeproxy.git master
@@ -1687,6 +1714,36 @@ CONFIG_PACKAGE_kmod-nft-fullcone=y
 CONFIG_PACKAGE_kmod-nft-socket=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y
 EOF
+
+	# eBPF proxy kernel support (Nikki-RS / clash-rs).
+	#
+	# The TC half of the eBPF datapath attaches cls_bpf/act_bpf programs to a
+	# clsact qdisc.  Those come from the kmod-sched-core / kmod-sched-bpf
+	# packages emitted further down, so there is no CONFIG_KERNEL_* to add for
+	# them: kmod-sched-core's KCONFIG already sets CONFIG_NET_SCH_INGRESS and
+	# CONFIG_NET_CLS_ACT, and kmod-sched-bpf sets CONFIG_NET_CLS_BPF /
+	# CONFIG_NET_ACT_BPF.
+	#
+	# The host half — proxy-local and the process lists — is a cgroup BPF hook,
+	# and that is the part mainline leaves off: the generic kernel config ships
+	# `# CONFIG_CGROUPS is not set`, and CONFIG_CGROUP_BPF sits behind it.  Both
+	# are declared OpenWrt symbols (config/Config-kernel.in), so they survive
+	# `make defconfig` and the kernel build copies them across.
+	#
+	# Enabling cgroups adds the default-on controllers (pids, cpuset, cpuacct,
+	# memory, ...) to the kernel.  That is a few tens of KB and a kernel ABI
+	# change — harmless here, because every kmod in this image is built from the
+	# same tree in the same run, which is the only way a kernel module may ever
+	# be paired with a kernel.
+	if is_true "$ENABLE_EBPF_PROXY_KERNEL"; then
+		cat >> "$out" <<'EOF'
+
+# eBPF proxy kernel support (Nikki-RS): cgroup BPF needs cgroups underneath it.
+# The TC half rides on kmod-sched-core + kmod-sched-bpf.
+CONFIG_KERNEL_CGROUPS=y
+CONFIG_KERNEL_CGROUP_BPF=y
+EOF
+	fi
 }
 
 append_optional_config() {
@@ -1756,7 +1813,7 @@ EOF
 		luci-app-dockerman luci-i18n-dockerman-zh-cn \
 		kmod-fs-cifs kmod-nf-nathelper-extra
 
-	emit_service "$ENABLE_NIKKI"     nikki mihomo-meta luci-app-nikki
+	emit_service "$ENABLE_NIKKI"     nikki-rs clash-rs luci-app-nikki-rs
 	emit_service "$ENABLE_OPENCLASH" luci-app-openclash
 	emit_service "$ENABLE_MOSDNS"    mosdns luci-app-mosdns
 	# ucode-mod-math is a HARD requirement that upstream does not declare.
@@ -1867,11 +1924,12 @@ EOF
 		adguardhome luci-app-adguardhome luci-i18n-adguardhome-zh-cn
 
 	# ------------------------------------------- proxy ecosystem kmod support ---
-	# PassWall, PassWall2, SSR-Plus, HomeProxy, OpenClash, Nikki, Momo, FullCombo
-	# Shark!, luci-xray, NeKoBox, Daed, HiJpass and v2rayA all redirect traffic
-	# through the same handful of kernel facilities: nftables tproxy/socket, the
-	# legacy iptables equivalents, tun/inet-diag for the userspace tunnels, and
-	# the NAT helper and traffic-control modules for the rest.
+	# PassWall, PassWall2, SSR-Plus, HomeProxy, OpenClash, Nikki-RS, Momo,
+	# FullCombo Shark!, luci-xray, NeKoBox, Daed, HiJpass and v2rayA all redirect
+	# traffic through the same handful of kernel facilities: nftables
+	# tproxy/socket, the legacy iptables equivalents, tun/inet-diag for the
+	# userspace tunnels, the NAT helper and traffic-control modules for the
+	# rest, and — for Nikki-RS and Daed — the TC eBPF classifier/action.
 	#
 	# These go INTO THE IMAGE (`=y`), not merely into the repository.
 	#
@@ -1896,7 +1954,8 @@ EOF
 	# Only Daed wants it, and only in its README rather than its Makefile, so
 	# `apk add daed` would not pull it either way.  Turning the kernel option on
 	# changes the kernel ABI and forces a full rebuild; see
-	# ENABLE_EBPF_PROXY_KERNEL below for that decision.
+	# ENABLE_EBPF_PROXY_KERNEL for that decision.  Nikki-RS does not want
+	# AF_XDP, so its eBPF support does not require it either.
 	emit_service true \
 		kmod-netlink-diag \
 		kmod-nf-nathelper \
@@ -1911,7 +1970,11 @@ EOF
 	# Found by auditing the proxy packages' Makefiles rather than by guessing:
 	#   kmod-nft-queue            HomeProxy (VIKINGYFY variant) uses nft queue
 	#                             rather than tproxy; pulls kmod-nfnetlink-queue
-	#   kmod-sched-bpf            Daed traffic shaping
+	#   kmod-sched-bpf            Daed traffic shaping AND Nikki-RS's eBPF fast
+	#                             path (cls_bpf + act_bpf are the TC hooks the
+	#                             eBPF manager attaches); kmod-sched-core brings
+	#                             the clsact qdisc (NET_SCH_INGRESS) and
+	#                             NET_CLS_ACT those two depend on
 	#   kmod-ipt-tproxy           OpenClash's firewall3 path and the fw3 branch
 	#   kmod-ipt-conntrack-extra  of ttimasdf's luci-app-xray
 	#   kmod-ipt-filter
@@ -1969,7 +2032,7 @@ EOF
 	# their own because luci.mk selects the configured language, but naming them
 	# is what turns "the Chinese UI is present" into a checked property.
 	emit_service "" \
-		luci-i18n-nikki-zh-cn luci-i18n-mosdns-zh-cn luci-i18n-homeproxy-zh-cn
+		luci-i18n-nikki-rs-zh-cn luci-i18n-mosdns-zh-cn luci-i18n-homeproxy-zh-cn
 
 	return 0
 }
@@ -2011,7 +2074,7 @@ build_required_packages() {
 	# in a package name, or an upstream package being removed, would ship a
 	# firmware that quietly lacks the feature the switch promised.
 	is_true "$ENABLE_DOCKERMAN"   && REQUIRED_PACKAGES+=(docker dockerd containerd runc luci-app-dockerman)
-	is_true "$ENABLE_NIKKI"       && REQUIRED_PACKAGES+=(nikki mihomo-meta luci-app-nikki)
+	is_true "$ENABLE_NIKKI"       && REQUIRED_PACKAGES+=(nikki-rs clash-rs luci-app-nikki-rs)
 	is_true "$ENABLE_OPENCLASH"   && REQUIRED_PACKAGES+=(luci-app-openclash)
 	is_true "$ENABLE_MOSDNS"      && REQUIRED_PACKAGES+=(mosdns luci-app-mosdns)
 	# The ucode module and the two TUN packages are listed here too: a
@@ -2086,6 +2149,19 @@ configure_build() {
 	run_with_timeout "$CONFIG_TIMEOUT" make defconfig \
 		|| die "second make defconfig failed"
 
+	# Kernel symbols are read out of .config by the kernel build (see
+	# include/kernel-defaults.mk: an `awk` copies every CONFIG_KERNEL_* line
+	# across with the prefix stripped), so writing them after the final
+	# defconfig is enough — and it is necessary, because defconfig is free to
+	# drop a symbol whose parent it did not see in the same pass.  The eBPF
+	# kernel options are the Nikki-RS fast path's hard requirement; a firmware
+	# that ships the app without them would have an eBPF switch that fails at
+	# runtime with no hint as to why.
+	if is_true "$ENABLE_EBPF_PROXY_KERNEL"; then
+		config_set_symbol "CONFIG_KERNEL_CGROUPS" "y"
+		config_set_symbol "CONFIG_KERNEL_CGROUP_BPF" "y"
+	fi
+
 	# ccache last, and after defconfig rather than in the seed, because its
 	# Kconfig is `bool "Use ccache" if DEVEL` and defconfig drops it whenever
 	# DEVEL is unset.  Turning DEVEL on instead would pull in debug information
@@ -2158,6 +2234,21 @@ verify_config() {
 	# Board target must be the H5000M, not a generic filogic profile.
 	grep -q "^CONFIG_TARGET_${TARGET_BOARD}_${TARGET_SUBTARGET}_DEVICE_${TARGET_PROFILE}=y$" "$SRC/.config" \
 		|| die "target profile ${TARGET_PROFILE} is not selected in .config"
+
+	# The eBPF proxy's kernel half.  Checked here rather than only written in
+	# append_board_stack_config because this is the one part of the eBPF
+	# datapath that mainline leaves off, and a silently dropped symbol would
+	# turn the Nikki-RS eBPF page into a switch that cannot work.
+	if is_true "$ENABLE_EBPF_PROXY_KERNEL"; then
+		grep -q '^CONFIG_KERNEL_CGROUPS=y$' "$SRC/.config" \
+			|| die "CONFIG_KERNEL_CGROUPS was dropped — the eBPF proxy's cgroup half cannot work"
+		grep -q '^CONFIG_KERNEL_CGROUP_BPF=y$' "$SRC/.config" \
+			|| die "CONFIG_KERNEL_CGROUP_BPF was dropped — the eBPF proxy's cgroup half cannot work"
+		for pkg in kmod-sched-core kmod-sched-bpf; do
+			config_symbol_is_set "$pkg" \
+				|| die "${pkg} is not in the image — the eBPF proxy's TC half cannot work"
+		done
+	fi
 
 	log "Verified ${#REQUIRED_PACKAGES[@]} required packages and target profile ${TARGET_PROFILE}"
 

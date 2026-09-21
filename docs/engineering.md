@@ -262,10 +262,10 @@ ENABLE_HOMEPROXY=false ENABLE_ADGUARDHOME=false
 
 三个板级插件（`luci-app-h5000m-fancontrol` / `-netmode` / `-mt5700m`）不在任何 feed 里，
 构建脚本会把它们从各自上游仓库克隆到 `package/`；**克隆失败会直接中止构建**，不会产出一个
-没有风扇控制或没有出口仲裁的固件。其余第三方组件（Nikki / OpenClash / MosDNS / HomeProxy）
+没有风扇控制或没有出口仲裁的固件。其余第三方组件（Nikki-RS / OpenClash / MosDNS / HomeProxy）
 同样是克隆，但失败只告警。AdGuardHome 走官方 feeds，不需要克隆。
 
-例：用 mt5700m 面板 + 打开 Nikki：
+例：用 mt5700m 面板 + 打开 Nikki-RS：
 
 ```sh
 ENABLE_WWAND=false ENABLE_MT5700M=true ENABLE_NIKKI=true THREADS=8 ./scripts/local-build.sh
@@ -686,10 +686,11 @@ autosetup 仍是开启的，机器能自己起来。
 
 ### 9. 代理软件的 kmod 依赖 —— 已补齐
 
-代理插件（PassWall / PassWall2 / SSR-Plus / HomeProxy / OpenClash / Nikki / Momo /
+代理插件（PassWall / PassWall2 / SSR-Plus / HomeProxy / OpenClash / Nikki-RS / Momo /
 FullCombo Shark! / luci-xray / NeKoBox / Daed / HiJpass / v2rayA）重定向流量依赖的是
 同一批内核设施：nftables 的 tproxy/socket、对应的 iptables 老接口、用户态隧道用的
-tun 与 inet-diag，以及 NAT helper 与流量控制模块。
+tun 与 inet-diag，以及 NAT helper 与流量控制模块。Nikki-RS 与 Daed 还额外使用
+TC eBPF（`kmod-sched-core` 的 clsact + `kmod-sched-bpf` 的 cls_bpf/act_bpf）。
 
 盘点后发现**基础集已经齐备**（`kmod-nft-tproxy`、`kmod-nft-socket`、`kmod-nft-nat`、
 `kmod-nf-tproxy`、`kmod-nf-socket`、`kmod-nf-nat`、`kmod-nf-conntrack`、`kmod-tun`、
@@ -723,6 +724,7 @@ kmod-sched-core    kmod-ifb           kmod-tcp-bbr
 | --- | --- | --- |
 | PassWall | `luci-app-passwall` + `luci-i18n-passwall-zh-cn` | `Openwrt-Passwall/openwrt-passwall` @ `main` |
 | PassWall2 | `luci-app-passwall2` + `luci-i18n-passwall2-zh-cn` | `Openwrt-Passwall/openwrt-passwall2` @ `main` |
+| Nikki-RS | `clash-rs` + `nikki-rs` + `luci-app-nikki-rs` + `luci-i18n-nikki-rs-zh-cn` | `CHKayanami/OpenWrt-nikki-rs` @ `main`（Rust clash-rs 内核 + eBPF） |
 | Momo | `momo` + `luci-app-momo` + `luci-i18n-momo-zh-cn` | `nikkinikki-org/OpenWrt-momo` @ `main` |
 | fcshark | `mihomo` + `luci-app-fchomo` + `luci-i18n-fchomo-zh-cn` | `fcshark-org/openwrt-fchomo` @ `master` |
 | NeKoBox | `luci-app-nekobox`（无中文 po） | `Thaolga/openwrt-nekobox` @ `main` |
@@ -743,7 +745,7 @@ kmod-sched-core    kmod-ifb           kmod-tcp-bbr
 feeds 解析其余依赖。
 
 **审计覆盖的软件包**：PassWall、PassWall2、SSR-Plus、HomeProxy（`immortalwrt` 与
-`VIKINGYFY` 两个变体）、OpenClash、Nikki、Momo、FullCombo Shark!（fchomo）、
+`VIKINGYFY` 两个变体）、OpenClash、Nikki-RS、Momo、FullCombo Shark!（fchomo）、
 luci-xray（`yichya` 与 `ttimasdf`）、NeKoBox、Daed（`QiuSimons` 与 `kenzok8`）、
 HiJpass、v2rayA。逐包的 Makefile 路径、行号与审计 commit 见
 [`proxy-kmod-audit.md`](proxy-kmod-audit.md)。
@@ -773,6 +775,39 @@ HiJpass、v2rayA。逐包的 Makefile 路径、行号与审计 commit 见
   `CONFIG_BPF_TOOLCHAIN_HOST`。这些**不是包而是内核配置**，开启会变更内核 ABI 并
   触发全量重编，且 BTF 会明显增大镜像。**本次未开启**，因此 Daed 目前装不上；
   需要的话告诉我，我加一个独立开关。
+
+#### Nikki-RS 与 Daed 的 eBPF 不是同一条路线
+
+把代理前端从 `nikkinikki-org/OpenWrt-nikki`（mihomo）换成
+`CHKayanami/OpenWrt-nikki-rs`（Rust `clash-rs`）之后，eBPF 支持也一并进来了，
+但它需要的**内核选项与 Daed 并不相同**，不要照抄上一条：
+
+| | Nikki-RS（clash-rs） | Daed |
+| --- | --- | --- |
+| eBPF 字节码 | 上游 release workflow 用 nightly + `bpf-linker` 编译，**嵌进预编译二进制**（`clash-ebpf-bpf`） | 运行时用 BTF/CO-RE 加载 |
+| 需要 BTF | **不需要**（所以 `CONFIG_DEBUG_INFO_BTF` 保持关闭，镜像不被 BTF 撑大） | 需要 |
+| 需要 XDP sockets | **不需要** | 需要 |
+| TC 程序 | `CONFIG_NET_SCH_INGRESS` + `CONFIG_NET_CLS_ACT` + `CONFIG_NET_CLS_BPF` + `CONFIG_NET_ACT_BPF`，全部由 `kmod-sched-core` / `kmod-sched-bpf` 的 KCONFIG 带出 | 同左（也依赖 `kmod-sched-*`） |
+| cgroup / host 分流 | `CONFIG_CGROUPS` + `CONFIG_CGROUP_BPF` | 同左 |
+
+所以本工程只新增了两个内核符号，由 `ENABLE_EBPF_PROXY_KERNEL`（默认 true）控制：
+
+```
+CONFIG_KERNEL_CGROUPS=y
+CONFIG_KERNEL_CGROUP_BPF=y
+```
+
+它们写在 `.config` 里，`include/kernel-defaults.mk` 会把 `CONFIG_KERNEL_` 前缀去掉后
+转给内核构建；`verify_config()` 与发布前的 `Verify the proxy stack dependencies are in
+the image` 都会检查它们真的进了 `.config` 与内核 `.config`。TC 那一半不写符号，
+而是依靠已经 `=y` 的 `kmod-sched-core` / `kmod-sched-bpf`。
+
+`luci-app-h5000m-accel` 的「网络加速」页会读内核状态并报告 eBPF 是否就绪，
+另有一个默认「不管理」的三态开关，避免保存加速页时覆盖 Nikki-RS 自己 eBPF 页面的设置。
+
+预编译的 `clash-rs` 二进制自 v0.20.0-alpha 起，aarch64-musl 的 minimal 包就带
+`ebpf` feature（release workflow 的 `features: minimal,jemallocator,ebpf`），
+所以本工程不需要在固件构建里引入 Rust / LLVM / bpf-linker 工具链，只是下载并打包。
 
 ---
 
@@ -882,7 +917,7 @@ sing-box policy:
 
 ```
 luci-app-ssr-plus   → mihomo xray-core        luci-app-passwall  → sing-box xray-core
-luci-app-passwall2  → sing-box xray-core      luci-app-nikki     → mihomo nikki
+luci-app-passwall2  → sing-box xray-core      luci-app-nikki-rs  → clash-rs nikki-rs
 luci-app-momo       → momo sing-box
 ```
 
@@ -896,7 +931,7 @@ luci-app-momo       → momo sing-box
 
 发布前门禁新增 `Verify the built repository can satisfy every frontend on its own`：
 只配置本仓库（不配官方源），用本机 apk 读**将被发布的** `artifacts/apk-repo/packages.adb`，
-断言 14 个前端、10 个核/守护进程、18 个 kmod 都在索引里，`sing-box` 是 1.12.25，
+断言 14 个前端、11 个核/守护进程、18 个 kmod 都在索引里，`sing-box` 是 1.12.25，
 并且 9 个前端各自都能**解析出它需要的核**。
 
 ---
@@ -954,7 +989,7 @@ luci-app-momo       → momo sing-box
 * `wwand` 对 MT5700M 的驱动依赖其 NCM 后端对这颗模组的兼容性。若现场发现 wwand 无法
   附着，`ENABLE_MT5700M=true ENABLE_WWAND=false` 可切回 FAN789 的 NCM/DHCP 拨号路径；
   两条路径不会同时进入固件（`resolve_modem_stack()` 强制互斥）。
-* 可选的第三方代理组件（Nikki / OpenClash / MosDNS / HomeProxy）全部默认关闭，且是从
+* 可选的第三方代理组件（Nikki-RS / OpenClash / MosDNS / HomeProxy）全部默认关闭，且是从
   各自上游仓库直接克隆进 `package/` 的，**不保证**与当前 snapshot 兼容；打开它们属于
   自行承担风险，`coverage-test.sh full` 会校验其配置符号。
 * `luci-app-h5000m-*` 与 wwand 的版本会各自前进。插件是源码随固件编译的，所以在
@@ -1018,7 +1053,7 @@ luci-app-momo       → momo sing-box
 | ImmortalWrt 独有 | 1 | `luci-app-ramfree` | 主线 `openwrt/luci` 404，`immortalwrt/luci` 200 |
 | 旧 LuCI 遗留 | 3 | `luci-cbi` `luci-lib-cbi` `luci-lib-docker` | 现代 LuCI 已删（改为客户端 JS）。注意主线版 `luci-app-dockerman` 依赖 `luci-base + docker + ttyd + dockerd + docker-compose + ucode-mod-socket`，**不需要** `luci-lib-docker` |
 | 已改名换代 | 1 | `luci-app-Airpifanctrl` | → `luci-app-h5000m-fancontrol` |
-| 第三方，可克隆集成 | 10 | `luci-app-homeproxy` `luci-i18n-homeproxy-zh-cn` `luci-app-mosdns` `luci-i18n-mosdns-zh-cn` `mosdns` `luci-app-nikki` `luci-i18n-nikki-zh-cn` `nikki` `mihomo-meta` `luci-app-openclash` | 本工程已作为**可选开关**从各自上游克隆，默认关 |
+| 第三方，可克隆集成 | 10 | `luci-app-homeproxy` `luci-i18n-homeproxy-zh-cn` `luci-app-mosdns` `luci-i18n-mosdns-zh-cn` `mosdns` `luci-app-nikki-rs` `luci-i18n-nikki-rs-zh-cn` `nikki-rs` `clash-rs` `luci-app-openclash` | 本工程已作为**可选开关**从各自上游克隆，默认关 |
 
 主线可直接集成的 52 个里，有 2 个（`luci-theme-argon`、`luci-app-argon-config`）其实是
 **我们自己的克隆**而不是主线原生包，核对时已扣除。
@@ -1109,7 +1144,7 @@ EXIT=0                          ← 不报错
 ```
 
 `luci-theme-argon`、`luci-app-argon-config`、`luci-app-h5000m-fancontrol`、
-`luci-app-h5000m-netmode`、`luci-app-mt5700m`、`OpenClash`、`OpenWrt-nikki`、
+`luci-app-h5000m-netmode`、`luci-app-mt5700m`、`OpenClash`、`OpenWrt-nikki-rs`、
 `homeproxy`、`luci-app-mosdns`、`h5000m-integration` 这些克隆进来的目录，
 **没有一个与主线 feed 里的包重名**，因此不存在静默覆盖。
 
@@ -1121,7 +1156,7 @@ EXIT=0                          ← 不报错
 | `luci-app-homeproxy` → `sing-box-tiny` → `sing-box` → (selected by) `luci-app-homeproxy` | 第三方 `homeproxy` + 主线 `sing-box` 变体机制 |
 | `luci-app-wwand` ↔ `luci-proto-wwand` ↔ `wwand` | 第三方 wwand feed |
 | `wwand-esim` depends on **itself** | 第三方 wwand feed（该包定义的明显缺陷） |
-| `mihomo-alpha` ↔ `mihomo-meta` | 第三方 `OpenWrt-nikki` |
+| `mihomo-alpha` ↔ `mihomo-meta` | **旧的第三方 `OpenWrt-nikki`**；换成 `OpenWrt-nikki-rs`（clash-rs）后该树不再定义这两个 mihomo 变体，这条循环应当消失（待下一次实测量确认，本行保留自替换前的记录） |
 | `libubus-lua`（主线核心）↔ `libubus-lua-async`（wwand feed） | 第三方 wwand feed |
 | `librespeed-cli-rust` → `librespeed-cli` → `librespeed-common` | **主线自身**（与本工程无关） |
 | `luci-app-librespeed` depends on **itself** | **主线自身**（与本工程无关） |
@@ -1136,7 +1171,7 @@ EXIT=0                          ← 不报错
 
 ### 服务类包：编译进仓库，但不装进镜像
 
-按"能后续安装的就先不烧进固件"的原则，Docker 栈、代理栈（nikki / OpenClash /
+按"能后续安装的就先不烧进固件"的原则，Docker 栈、代理栈（nikki-rs / OpenClash /
 MosDNS / HomeProxy）与 AdGuardHome **默认不进入镜像**，改为 `=m`：
 
 ```
@@ -1156,7 +1191,7 @@ rootfs**；其运行时依赖同样以 `=m` 产出，所以仓库自洽，用户
 | 开关 | 默认 | 镜像内 | apk-repo |
 | --- | --- | --- | --- |
 | `ENABLE_DOCKERMAN` | false | ✗ | ✓（docker/dockerd/containerd/runc/docker-compose + LuCI） |
-| `ENABLE_NIKKI` | false | ✗ | ✓（nikki/mihomo-meta + LuCI） |
+| `ENABLE_NIKKI` | false | ✗ | ✓（clash-rs/nikki-rs + LuCI；打开即构建 Nikki-RS） |
 | `ENABLE_OPENCLASH` | false | ✗ | ✓ |
 | `ENABLE_MOSDNS` | false | ✗ | ✓（mosdns + LuCI） |
 | `ENABLE_HOMEPROXY` | false | ✗ | ✓（+ sing-box、kmod-nft-tproxy） |
@@ -1475,7 +1510,7 @@ download.pl ... "x" || ( dl_github_archive.py ... || ( git clone 固定 commit �
 | `vlmcsd` + `luci-app-vlmcsd` | **去掉** | 已从 OpenWrt 官方 feeds 全部移除（packages / luci / routing / telephony / video 里都没有）。要保留需自行引入第三方 feed。 |
 | AdGuardHome 走私有预编译 ipk + 版本降级 hack | **改用官方 feeds** | `adguardhome` 与 `luci-app-adguardhome` 现在都在主线 feeds 里，不再需要下载 ipk、也不再需要 Go 版本兼容补丁。 |
 | MosDNS 的 Go 1.24 补丁、`v2dat` 清理、HomeProxy 回退源等 | **去掉** | 这些是针对 ImmortalWrt 24.10 特定版本组合的补丁；主线直接装上游包，`v2ray-geoip` / `v2ray-geosite` / `sing-box` / `kmod-nft-tproxy` 都已由官方 feeds 提供。 |
-| Nikki / OpenClash / MosDNS / HomeProxy | 保留为**可选**（默认关），从各自上游仓库克隆 | 它们从来不在官方 feeds 里 |
+| Nikki-RS / OpenClash / MosDNS / HomeProxy | 保留为**可选**（默认关），从各自上游仓库克隆 | 它们从来不在官方 feeds 里 |
 
 ---
 

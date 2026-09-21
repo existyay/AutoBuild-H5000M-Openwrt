@@ -61,11 +61,14 @@ run_profile() {
 run_profile default            env
 run_profile mt5700m            env ENABLE_WWAND=false ENABLE_MT5700M=true
 run_profile minimal            env ENABLE_UPNP=false ENABLE_ADBLOCK=false ENABLE_FANCONTROL=false ENABLE_NETMODE=false
-run_profile all-optional       env ENABLE_DOCKERMAN=true ENABLE_NIKKI=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true
+run_profile all-optional       env ENABLE_DOCKERMAN=true ENABLE_NIKKI=true ENABLE_EBPF_PROXY_KERNEL=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true
 
 if [ "$PROFILE_SET" = "full" ]; then
 	run_profile services        env ENABLE_DOCKERMAN=true ENABLE_ADGUARDHOME=true
 	run_profile proxy-stack     env ENABLE_NIKKI=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true
+	# The eBPF kernel options are a separate code path (the CONFIG_KERNEL_*
+	# writes and verify_config's live check), so the off case is exercised too.
+	run_profile no-ebpf-kernel  env ENABLE_EBPF_PROXY_KERNEL=false
 	run_profile no-dialer       env ENABLE_WWAND=false ENABLE_MT5700M=false
 	run_profile no-argon        env ENABLE_THEME_ARGON=false
 fi

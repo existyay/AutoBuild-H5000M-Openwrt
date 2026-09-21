@@ -4,13 +4,65 @@
 # On mainline this device has no HNAT and no TurboACC: hardware acceleration is
 # the PPE driven through netfilter's flowtable, which fw4 exposes as
 # flow_offloading_hw.  This writes those two switches, optionally turns on BBR,
-# and carries the fullcone switch through to firewall4 (which is where a
-# full-cone rule is actually emitted — the acceleration page only records the
-# intent).  It deliberately does not pretend to offer anything else.
+# carries the fullcone switch through to firewall4 (which is where a full-cone
+# rule is actually emitted — the acceleration page only records the intent),
+# and loads the eBPF proxy's TC modules so Nikki-RS's fast path can attach.  It
+# deliberately does not pretend to offer anything else.
 
 CONF=h5000m_accel
 
 log() { logger -t h5000m-accel "$@" 2>/dev/null || true; }
+
+# eBPF proxy fast path (Nikki-RS / clash-rs).
+#
+# The kernel half of the datapath is TC eBPF: a clsact qdisc carrying cls_bpf /
+# act_bpf programs.  Those modules are demand-loaded when the core attaches, but
+# loading them here means the status page can say "ready" immediately and the
+# first attach does not have to race module loading.
+#
+# The switch is a tristate and defaults to "keep": Nikki-RS has its own eBPF
+# page, and a page that always wrote nikki-rs.ebpf.enabled would silently
+# override it on every save.  Only an explicit on/off touches the other package.
+apply_ebpf_proxy() {
+	local want="$1" cur
+
+	modprobe sch_ingress 2>/dev/null
+	modprobe cls_bpf 2>/dev/null
+	modprobe act_bpf 2>/dev/null
+
+	case "$want" in
+		on|1)  want=1 ;;
+		off|0) want=0 ;;
+		*)     return 0 ;;   # keep / empty / unknown: this page does not manage it
+	esac
+
+	# Nothing to drive unless Nikki-RS is installed.  Touching its UCI anyway
+	# would leave a half-created /etc/config/nikki-rs behind for a service that
+	# is not there.
+	if [ ! -f /etc/config/nikki-rs ]; then
+		log "ebpf_proxy=${want} but Nikki-RS is not installed; skipping"
+		return 0
+	fi
+
+	# The named section is created by Nikki-RS's own migrate.sh.  A hand-edited
+	# config may lack it, and `uci set nikki-rs.ebpf.enabled` on a missing
+	# section is an error rather than a create.
+	if ! uci -q get nikki-rs.ebpf >/dev/null 2>&1; then
+		uci -q set nikki-rs.ebpf=ebpf
+		uci -q set nikki-rs.ebpf.enabled='0'
+	fi
+
+	cur="$(uci -q get nikki-rs.ebpf.enabled || echo 0)"
+	[ "$cur" = "$want" ] && return 0
+
+	uci -q set "nikki-rs.ebpf.enabled=${want}"
+	uci -q commit nikki-rs
+	if [ -x /etc/init.d/nikki-rs ]; then
+		/etc/init.d/nikki-rs restart >/dev/null 2>&1
+	fi
+	log "nikki-rs eBPF enabled=${want}"
+	return 0
+}
 
 apply_settings() {
 	local offload hw bbr
@@ -70,7 +122,13 @@ apply_settings() {
 		sysctl -qw net.ipv4.tcp_congestion_control=cubic 2>/dev/null
 	fi
 
-	log "applied: profile=${profile} flow_offloading=${offload} flow_offloading_hw=${hw} bbr=${bbr} fullcone=${fullcone}"
+	# The eBPF proxy's kernel side.  Independent of the profile: it is a
+	# different datapath, owned by Nikki-RS, and 'keep' (the default) leaves it
+	# exactly as Nikki-RS left it.
+	ebpf_proxy="$(uci -q get ${CONF}.settings.ebpf_proxy || echo keep)"
+	apply_ebpf_proxy "$ebpf_proxy"
+
+	log "applied: profile=${profile} flow_offloading=${offload} flow_offloading_hw=${hw} bbr=${bbr} fullcone=${fullcone} ebpf_proxy=${ebpf_proxy}"
 	return 0
 }
 

@@ -76,33 +76,27 @@ LUCI_EXTRA_DEPENDS:=sing-box (>=1.14.0)
 
 ---
 
-## 2. Nikki — `nikkinikki-org/OpenWrt-nikki`
+## 2. Nikki-RS — `CHKayanami/OpenWrt-nikki-rs`
+
+> 本节在把代理前端从 `nikkinikki-org/OpenWrt-nikki`（mihomo）换成
+> `CHKayanami/OpenWrt-nikki-rs`（Rust `clash-rs`）后重写。旧树仍可从上游拿到，
+> 但本工程不再克隆它，下游的 `nikki` / `mihomo-meta` / `mihomo-alpha` 也被
+> `nikki-rs` / `clash-rs` 取代。
 
 - 默认分支：**`main`**
-- 审计 commit：`3799926b147d7065ac98508f16951f8714e53659`
+- 仓库：<https://github.com/CHKayanami/OpenWrt-nikki-rs>
+- 包是一个 monorepo，三个 Makefile 各定义一个包：
 
-来源（四个 Makefile）：
-
-| 包 | 文件 | 行 |
+| 包 | 文件 | 关键内容 |
 |---|---|---|
-| `luci-app-nikki` | `luci-app-nikki/Makefile` | L6 `LUCI_DEPENDS:=+luci-base +nikki` |
-| `nikki` | `nikki/Makefile` | L17 |
-| `mihomo-meta` | `mihomo-meta/Makefile` | L38 |
-| `mihomo-alpha` | `mihomo-alpha/Makefile` | L38 |
+| `clash-rs` | `clash-rs/Makefile` | 预编译 Rust 内核（无 kmod 依赖） |
+| `nikki-rs` | `nikki-rs/Makefile` | 服务与默认配置 |
+| `luci-app-nikki-rs` | `luci-app-nikki-rs/Makefile` | `LUCI_DEPENDS:=+luci-base +nikki-rs` |
 
-- https://github.com/nikkinikki-org/OpenWrt-nikki/blob/3799926b147d7065ac98508f16951f8714e53659/nikki/Makefile#L17
-- https://github.com/nikkinikki-org/OpenWrt-nikki/blob/3799926b147d7065ac98508f16951f8714e53659/mihomo-meta/Makefile#L38
-- https://github.com/nikkinikki-org/OpenWrt-nikki/blob/3799926b147d7065ac98508f16951f8714e53659/mihomo-alpha/Makefile#L38
-
-`nikki/Makefile:17`：
+`nikki-rs/Makefile`：
 ```
-DEPENDS:=+ca-bundle +curl +yq firewall4 +ip-full +kmod-inet-diag +kmod-nft-socket \
-         +kmod-nft-tproxy +kmod-tun +kmod-dummy +mihomo
-```
-
-`mihomo-meta/Makefile:38` 与 `mihomo-alpha/Makefile:38`（两者完全相同）：
-```
-DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +ip-full +kmod-inet-diag +kmod-tun
+DEPENDS:=+ca-bundle curl +yq firewall4 +ip-full +kmod-inet-diag +kmod-nft-socket \
+         +kmod-nft-tproxy +kmod-tun +kmod-dummy +clash-rs
 ```
 
 **kmod 依赖（确定）：**
@@ -112,14 +106,28 @@ DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +ip-full +kmod-inet-diag +kmod-tun
 - `kmod-tun`
 - `kmod-dummy`
 
-**非 kmod 关键依赖：** `ca-bundle`、`curl`、`yq`、`firewall4`、`ip-full`、`mihomo`（由 `mihomo-meta` **或** `mihomo-alpha` 提供，二者 `PROVIDES:=mihomo` 且互相 `CONFLICTS`）
-- `luci-app-nikki`：`luci-base` + `nikki`（无 kmod）
+**非 kmod 关键依赖：** `ca-bundle`、`curl`、`yq`、`firewall4`、`ip-full`、`clash-rs`
+- `luci-app-nikki-rs`：`luci-base` + `nikki-rs`（无自己的 kmod）
+
+`clash-rs/Makefile` 不编译任何东西，它下载上游 release 的
+`clash-rs-minimal-<target>.tar.gz` 并安装 `clash-rs` 二进制。aarch64 用的是
+`aarch64-unknown-linux-musl`，哈希钉在 Makefile 的 `CLASH_HASH` 里；上游 release
+workflow 对 Linux 目标的 `features` 含 `ebpf`（见 `docs/engineering.md` 的
+「Nikki-RS 与 Daed 的 eBPF 不是同一条路线」），所以内核里不需要额外的 Rust 工具链。
+
+**eBPF 依赖（与上面的 kmod 不同，单独列）：**
+- TC 快路径：`kmod-sched-core`（clsact / `NET_SCH_INGRESS` + `NET_CLS_ACT`）
+  与 `kmod-sched-bpf`（`cls_bpf` + `act_bpf`）。这两个包本工程**无条件 `=y`**
+  编进镜像。
+- cgroup / 本机分流：内核选项 `CONFIG_KERNEL_CGROUPS=y` +
+  `CONFIG_KERNEL_CGROUP_BPF=y`，由 `ENABLE_EBPF_PROXY_KERNEL`（默认 true）写入。
+- **不需要** `CONFIG_DEBUG_INFO_BTF` / `CONFIG_BPF_EVENTS` / `CONFIG_XDP_SOCKETS`：
+  eBPF 字节码是上游预编译并嵌进二进制里的，不走 CO-RE，也不使用 AF_XDP。
 
 **备注：**
-- `mihomo-meta` 与 `mihomo-alpha` 是二选一变体（`VARIANT:=meta` / `alpha`，`CONFLICTS` 互斥），kmood 依赖相同。
-- 仓库 README（`README.md:95-99`）的依赖列表与 Makefile 完全一致，互相印证。
-- ⚠️ **`kmod-br-netfilter` 不是依赖。** 它只出现在 init 脚本的兼容性注释里：
-  - `nikki/files/nikki.init:387-388` 与 `:501` — 当 `kmod-br-netfilter` 已加载时把 `bridge-nf-call-iptables` 置 0 的 workaround（`lsmod | grep -q br_netfilter` 运行时判断）。不要误当作依赖编进仓库。
+- 旧 `nikki` init 里的 `kmod-br-netfilter` 兼容性 workaround（`bridge-nf-call-iptables`
+  置 0）是运行时 `lsmod` 判断，**不是依赖**；`momo` 里同样一份也仍然不是依赖。
+- 旧的 `mihomo-meta` / `mihomo-alpha` 变体冲突随旧树一起消失。
 
 ---
 
@@ -157,7 +165,7 @@ DEPENDS:=+ca-bundle +curl firewall4 +ip-full +kmod-inet-diag +kmod-nft-socket \
 
 **非 kmod 关键依赖：** `ca-bundle`、`curl`、`firewall4`、`ip-full`、`sing-box`
 
-**备注：** kmod 集合与 `nikki` **完全相同**，只是把 `mihomo` 换成 `sing-box`。同样无 `Config.in`；`kmod-br-netfilter` 也只出现在 `momo/files/momo.init:330-331,444` 的兼容性注释中，**不是依赖**。
+**备注：** kmod 集合与 `nikki-rs` **完全相同**（旧 `nikki` 也一样，这套 kmod 一直没有变），只是把内核换成 `sing-box`。同样无 `Config.in`；`kmod-br-netfilter` 也只出现在 `momo/files/momo.init:330-331,444` 的兼容性注释中，**不是依赖**。
 
 ---
 
@@ -303,7 +311,7 @@ BTF 二选一（`Package/daed/config` choice，`default DAED_USE_KERNEL_BTF`）�
 
 **备注（发现的文档/代码不一致）：**
 - `kenzok8/openwrt-daede README.md:150` 把 **`kmod-nft-tproxy`** 列为依赖，但 `daed/Makefile` 和 `dae/Makefile` 的 `DEPENDS` **都没有**它；整个仓库除 README 外无任何 `nft-tproxy` 引用（已全仓 grep）。**倾向于 README 过时/多余**；但既然 cost 很低，建议一并编入以求稳。
-- Daed 的 kmod 集合与前面四家**完全不重叠**（eBPF 路线 vs nftables TPROXY 路线）。
+- Daed 的 kmod 集合与前面四家**完全不重叠**（eBPF 路线 vs nftables TPROXY 路线）。Nikki-RS 也用 eBPF，但只共用 TC 那两个模块，不共用 Daed 的 BTF / XDP 那套。
 
 ---
 
@@ -330,15 +338,15 @@ define Package/sing-box-default
 
 | # | kmod 包 | 被谁需要 |
 |---|---|---|
-| 1 | `kmod-nft-tproxy` | HomeProxy(immortalwrt)、Nikki、Momo、OpenClash(fw4) |
-| 2 | `kmod-nft-socket` | Nikki、Momo |
-| 3 | `kmod-tun` | Nikki、Momo、mihomo-meta、mihomo-alpha、sing-box、OpenClash(硬依赖)、HomeProxy-VIKINGYFY |
-| 4 | `kmod-dummy` | Nikki、Momo |
-| 5 | `kmod-inet-diag` | Nikki、Momo、mihomo-meta、mihomo-alpha、sing-box、OpenClash(fw4) |
+| 1 | `kmod-nft-tproxy` | HomeProxy(immortalwrt)、Nikki-RS、Momo、OpenClash(fw4) |
+| 2 | `kmod-nft-socket` | Nikki-RS、Momo |
+| 3 | `kmod-tun` | Nikki-RS、Momo、sing-box、OpenClash(硬依赖)、HomeProxy-VIKINGYFY |
+| 4 | `kmod-dummy` | Nikki-RS、Momo |
+| 5 | `kmod-inet-diag` | Nikki-RS、Momo、sing-box、OpenClash(fw4) |
 | 6 | `kmod-nft-queue` | HomeProxy-VIKINGYFY |
 | 7 | `kmod-ipt-nat` | OpenClash(fw3) |
-| 8 | `kmod-sched-core` | Daed (QiuSimons + kenzok8) |
-| 9 | `kmod-sched-bpf` | Daed (QiuSimons + kenzok8) |
+| 8 | `kmod-sched-core` | Daed (QiuSimons + kenzok8)、Nikki-RS（eBPF 的 clsact / `NET_SCH_INGRESS`） |
+| 9 | `kmod-sched-bpf` | Daed (QiuSimons + kenzok8)、Nikki-RS（eBPF 的 `cls_bpf` / `act_bpf`） |
 | 10 | `kmod-veth` | Daed (QiuSimons + kenzok8) |
 | 11 | `kmod-xdp-sockets-diag` | Daed（仅 README / 手动选中，**不在 DEPENDS**） |
 | 12 | `kmod-ipt-tproxy` | OpenClash(fw3，经 `iptables-mod-tproxy`) |
@@ -378,7 +386,7 @@ define Package/sing-box-default
 | # | kmod 包 | 说明 |
 |---|---|---|
 | 26 | `kmod-lib-crc32c` | `kmod-nft-core` 的 `+LINUX_6_12:kmod-lib-crc32c`。**你的 6.18 目标大概率不需要**——见下方说明。若编 `kmod-nft-core` 时报缺 crc32c，补上它。 |
-| 27 | `kmod-br-netfilter` | **仅代码注释提到，不是依赖**（Nikki/Momo 的 init 兼容性 workaround）。如果用户在 Docker 网桥环境下跑 TPROXY 才可能受益。**不建议为它编包**，但知道它存在。 |
+| 27 | `kmod-br-netfilter` | **仅代码注释提到，不是依赖**（Nikki-RS/Momo 的 init 兼容性 workaround）。如果用户在 Docker 网桥环境下跑 TPROXY 才可能受益。**不建议为它编包**，但知道它存在。 |
 
 **关于 `LINUX_6_12`（已查证机制）：**
 - `scripts/target-metadata.pl:69-78` 的 `kver()` 返回"主.次"（如 `6_12`、`6_18`）
@@ -391,7 +399,7 @@ define Package/sing-box-default
 
 ## 8. 需要写进 `.config` 的内核选项（非 kmod 包）
 
-只有 Daed 需要，且是**硬性**的：
+**Daed** 需要下面这一整组，且是**硬性**的：
 
 ```
 CONFIG_KERNEL_BPF_EVENTS=y
@@ -405,9 +413,21 @@ CONFIG_BPF_TOOLCHAIN_HOST=y
 CONFIG_DEVEL=y
 ```
 
+**Nikki-RS**（clash-rs）的前端只要其中两个：
+
+```
+CONFIG_KERNEL_CGROUPS=y
+CONFIG_KERNEL_CGROUP_BPF=y
+```
+
 - `CONFIG_KERNEL_XDP_SOCKETS=y` 是 `daed` 包出现的前提（`+@KERNEL_XDP_SOCKETS`）。
 - `CONFIG_KERNEL_DEBUG_INFO_BTF=y` 用于 CO-RE eBPF；不开就得改走 `vmlinux-btf` 包路线。注意这会显著增大内核体积。
-- 其余四家（HomeProxy/Nikki/Momo/OpenClash）**不需要**任何额外 `CONFIG_KERNEL_*`。
+- Nikki-RS **不需要** BTF / BPF_EVENTS / XDP sockets：TC 那一半由已经 `=y` 的
+  `kmod-sched-core` / `kmod-sched-bpf` 带出，eBPF 字节码嵌在预编译二进制里。
+  本工程用 `ENABLE_EBPF_PROXY_KERNEL`（默认 true）只写 `CGROUPS` 与 `CGROUP_BPF`；
+  Daed 那一整组保持关闭。
+- 旧 `nikki`（mihomo）不需要任何额外 `CONFIG_KERNEL_*`；HomeProxy / Momo / OpenClash
+  同样不需要。
 
 ---
 
@@ -417,7 +437,7 @@ CONFIG_DEVEL=y
 |---|---|
 | HomeProxy (immortalwrt) | `sing-box`、`firewall4`、`ucode-mod-digest` |
 | HomeProxy (VIKINGYFY) | `luci-base`、`sing-box(>=1.14.0)`、`firewall4`、`curl`、`flock`、`unzip`、`ucode-mod-digest`、`ucode-mod-math` |
-| Nikki | `nikki` + `luci-base`；`nikki`：`ca-bundle`、`curl`、`yq`、`firewall4`、`ip-full`、`mihomo`；`mihomo-*`：`ca-bundle`、`ip-full` |
+| Nikki-RS | `luci-app-nikki-rs`：`luci-base` + `nikki-rs`；`nikki-rs`：`ca-bundle`、`curl`、`yq`、`firewall4`、`ip-full`、`clash-rs`；`clash-rs`：预编译二进制，无依赖 |
 | Momo | `luci-base`、`momo`；`momo`：`ca-bundle`、`curl`、`firewall4`、`ip-full`、`sing-box` |
 | OpenClash | `dnsmasq-full`、`bash`、`curl`、`ca-bundle`、`ip-full`、`ruby`、`ruby-yaml`、`unzip`、`luci-compat`、`ipset`(fw3) |
 | Daed | `ca-bundle`、`v2ray-geoip`、`v2ray-geosite`；`luci-app-daed`：`zoneinfo-asia`、`luci-compat`；`vmlinux-btf`（条件） |
@@ -431,6 +451,8 @@ CONFIG_DEVEL=y
 3. **HomeProxy 两个变体并存**：两者 kmod 需求不同（`nft-tproxy` vs `nft-queue`），需要决定支持哪个/都支持。
 4. **OpenClash 的 config 块**：若你的收集逻辑基于 `DEPENDS` 而非 menuconfig 实际选中，会漏 `kmod-inet-diag`/`kmod-nft-tproxy`。
 5. **apk + kmod 的版本锁定**：kmod 包带内核 vermagic，必须与固件内核同一次构建产出，不能跨版本复用。这几个 kmod 都属 `package/kernel/linux/`，在 `CONFIG_ALL_KMODS` 之外时需逐个显式 `=y`（或 `=m` 后进仓库）。
+6. **Nikki-RS 的 eBPF 与 Daed 的内核选项分开取舍**：本工程默认只开 Nikki-RS 需要的 `CGROUPS` + `CGROUP_BPF`（`ENABLE_EBPF_PROXY_KERNEL`），Daed 那套 BTF / XDP 仍然关闭。两者不能混为一条"eBPF 支持"来一次性打开。
+7. **`clash-rs` 是预编译二进制**：版本与 SHA-256 由上游 `OpenWrt-nikki-rs` 仓库的 `clash-rs/Makefile` 钉住。上游一旦更换 release 资产，构建会在下载校验处失败；`checks.yml` 只检查仓库可达性，哈希随上游更新。
 
 ---
 
@@ -439,7 +461,8 @@ CONFIG_DEVEL=y
 上游（固定 commit）：
 - HomeProxy: `https://github.com/immortalwrt/homeproxy/blob/edece28a0085f36d469ec82c8d45f562f602db53/Makefile`
 - HomeProxy-VIKINGYFY: `https://github.com/VIKINGYFY/packages/blob/53bae7ce1990ad9bb6093fe0edc461e8574fffe7/luci-app-homeproxy/Makefile`
-- Nikki: `https://github.com/nikkinikki-org/OpenWrt-nikki/blob/3799926b147d7065ac98508f16951f8714e53659/nikki/Makefile`
+- Nikki-RS: `https://github.com/CHKayanami/OpenWrt-nikki-rs/blob/main/nikki-rs/Makefile`（clash-rs: `.../clash-rs/Makefile`）
+- Nikki（旧, 已不再克隆）: `https://github.com/nikkinikki-org/OpenWrt-nikki/blob/3799926b147d7065ac98508f16951f8714e53659/nikki/Makefile`
 - Momo: `https://github.com/nikkinikki-org/OpenWrt-momo/blob/72f5c46b5b65ad95f8f786f024c98204e47cd3dd/momo/Makefile`
 - OpenClash: `https://github.com/vernesong/OpenClash/blob/c3a33c1d3407956fdf8f0e0b7c1a4c52e6ad9593/luci-app-openclash/Makefile`
 - Daed (QiuSimons, 分支 `kix`): `https://github.com/QiuSimons/luci-app-daed/blob/bc9a40e08b3c926a4d324f87911cba5e85dce8e6/daed/Makefile`

@@ -213,10 +213,10 @@ jobs:
           fi
           exit $status
 
-      - name: Verify the board plugin repositories still exist
+      - name: Verify the externally cloned repositories still exist
         run: |
           set -euo pipefail
-          # These three are cloned straight from their upstreams into package/ at
+          # These are cloned straight from their upstreams into package/ at
           # build time, so a rename, a force-push to a different default branch,
           # or a deletion would only surface deep inside a build.  Check here.
           fail=0
@@ -224,7 +224,8 @@ jobs:
             FAN789/luci-app-h5000m-fancontrol \
             FAN789/luci-app-h5000m-netmode \
             FAN789/luci-app-mt5700m \
-            ddimension/openwrt-repo
+            ddimension/openwrt-repo \
+            CHKayanami/OpenWrt-nikki-rs
           do
             code="$(curl -s -o /dev/null -w '%{http_code}' \
               -H 'Accept: application/vnd.github+json' \
@@ -237,6 +238,74 @@ jobs:
             fi
           done
           exit $fail
+
+      # The Nikki -> Nikki-RS switch and the eBPF kernel wiring are spread over
+      # several files that no compiler checks together: a package token left as
+      # the old `luci-app-nikki` is silently dropped by defconfig, and an eBPF
+      # symbol that stops being emitted turns the Nikki-RS eBPF page into a
+      # switch that cannot work.  Both are cheap to assert by text.
+      - name: Verify the Nikki-RS and eBPF wiring is consistent
+        run: |
+          set -euo pipefail
+          fail=0
+          want() { if grep -q "$2" "$1"; then echo "  OK    $3"; else echo "  FAIL  $3"; fail=1; fi; }
+          reject() { if grep -qE "$2" "$1"; then echo "  FAIL  $3"; fail=1; else echo "  OK    $3"; fi; }
+
+          # The build clones the Rust monorepo, not the old mihomo tree.
+          want scripts/local-build.sh 'CHKayanami/OpenWrt-nikki-rs.git' \
+            "local-build.sh clones OpenWrt-nikki-rs"
+          reject scripts/local-build.sh 'nikkinikki-org/OpenWrt-nikki\.git' \
+            "local-build.sh no longer clones the mihomo Nikki"
+          reject scripts/local-build.sh 'mihomo-meta' \
+            "local-build.sh no longer emits mihomo-meta"
+
+          # Package tokens.  Anchored so that `luci-app-nikki-rs` does not match.
+          for f in scripts/local-build.sh scripts/verify-apk-repo.sh .github/workflows/build.yml; do
+            reject "$f" 'luci-app-nikki([^-]|$)' "$f has no stale luci-app-nikki token"
+          done
+          want scripts/local-build.sh 'nikki-rs clash-rs luci-app-nikki-rs' \
+            "local-build.sh emits the Nikki-RS stack"
+          want scripts/local-build.sh 'luci-i18n-nikki-rs-zh-cn' \
+            "local-build.sh emits the Nikki-RS translation"
+          want scripts/verify-apk-repo.sh 'luci-app-nikki-rs' \
+            "verify-apk-repo.sh checks the Nikki-RS front-end"
+          want scripts/verify-apk-repo.sh 'clash-rs' \
+            "verify-apk-repo.sh checks the clash-rs core"
+          want .github/workflows/build.yml 'require_core luci-app-nikki-rs   clash-rs' \
+            "build.yml requires clash-rs under the front-end"
+
+          # The eBPF kernel half, and the TC modules it rides on.
+          want scripts/local-build.sh 'ENABLE_EBPF_PROXY_KERNEL' \
+            "local-build.sh has the eBPF kernel switch"
+          want scripts/local-build.sh 'CONFIG_KERNEL_CGROUPS=y' \
+            "local-build.sh requests CONFIG_KERNEL_CGROUPS"
+          want scripts/local-build.sh 'CONFIG_KERNEL_CGROUP_BPF=y' \
+            "local-build.sh requests CONFIG_KERNEL_CGROUP_BPF"
+          want scripts/local-build.sh 'kmod-sched-bpf' \
+            "local-build.sh carries the TC BPF modules"
+          want configs/h5000m.config 'ENABLE_EBPF_PROXY_KERNEL' \
+            "h5000m.config documents the eBPF switch"
+
+          # The acceleration page owns the kernel-side prerequisites and reports
+          # readiness; the actual on/off stays with Nikki-RS via a tristate.
+          accel=local-packages/luci-app-h5000m-accel
+          want "$accel/root/etc/config/h5000m_accel" 'ebpf_proxy' \
+            "the accel config has the eBPF option"
+          want "$accel/root/usr/sbin/h5000m-accel" 'cls_bpf' \
+            "the accel apply script loads cls_bpf"
+          want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_kernel' \
+            "the accel status script reports eBPF readiness"
+          want "$accel/htdocs/luci-static/resources/view/h5000m/accel.js" 'ebpf_proxy' \
+            "the accel page exposes the eBPF option"
+          want "$accel/Makefile" 'kmod-sched-bpf' \
+            "the accel package depends on the TC BPF module"
+
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Nikki-RS / eBPF wiring is inconsistent"
+            exit 1
+          fi
+          echo "Nikki-RS and eBPF wiring is consistent."
 
   # ---------------------------------------------------------------------------
   # Configuration coverage: every ENABLE_* profile must still produce a valid

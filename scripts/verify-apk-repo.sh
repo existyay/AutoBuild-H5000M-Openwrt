@@ -74,7 +74,7 @@ fi
 # because upstream ships the translation separately and nothing pulls it in.
 FRONTENDS=(
 	luci-app-passwall luci-app-passwall2 luci-app-ssr-plus luci-app-homeproxy
-	luci-app-nikki luci-app-momo luci-app-openclash luci-app-mosdns
+	luci-app-nikki-rs luci-app-momo luci-app-openclash luci-app-mosdns
 	luci-app-nekobox luci-app-xray luci-app-hijpass luci-app-fchomo
 	luci-app-v2raya luci-app-adblock
 )
@@ -82,7 +82,7 @@ FRONTENDS=(
 # Cores and daemons: a front-end without one of these installs and then cannot
 # start a node.
 DAEMONS=(
-	xray-core mihomo sing-box mosdns nikki momo adblock dns2tcp
+	xray-core mihomo sing-box mosdns nikki-rs clash-rs momo adblock dns2tcp
 	ip-full ucode-mod-math
 )
 
@@ -105,7 +105,7 @@ declare -A REQUIRED_CORES=(
 	[luci-app-passwall]="xray-core sing-box"
 	[luci-app-passwall2]="xray-core sing-box"
 	[luci-app-homeproxy]="sing-box"
-	[luci-app-nikki]="nikki"
+	[luci-app-nikki-rs]="nikki-rs clash-rs"
 	[luci-app-momo]="momo"
 )
 

@@ -90,4 +90,72 @@ fi
 
 echo "fw4_offload_kmod=$(ls /sys/module/nf_flow_table /sys/module/nft_flow_offload 2>/dev/null | wc -l)"
 
+# --- eBPF proxy (Nikki-RS / clash-rs) ----------------------------------------
+#
+# Read-only: this reports what the kernel and Nikki-RS are doing, and the apply
+# script is what changes anything.  Three separate facts, because they fail
+# independently and a single "on/off" would hide which one is missing:
+#
+#   ebpf_kernel   the kernel can host the eBPF datapath at all
+#   ebpf_cgroup   the cgroup BPF half is compiled in (host/process matching)
+#   ebpf_*        what Nikki-RS itself is configured to do
+echo "ebpf_proxy=$(conf_get ebpf_proxy)"
+
+# BPF syscall + JIT are exposed as sysctls; the TC classifier/action appear as
+# modules once available.  Both sysctls are created by the core BPF options, so
+# their absence is a definitive "no".
+ebpf_bpf=0
+if [ -e /proc/sys/net/core/bpf_jit_enable ] && [ -e /proc/sys/kernel/unprivileged_bpf_disabled ]; then
+	ebpf_bpf=1
+fi
+ebpf_tc=0
+if [ -e /sys/module/cls_bpf ] || [ -e /sys/module/act_bpf ]; then
+	ebpf_tc=1
+elif ls /lib/modules/"$(uname -r)"/cls_bpf.ko* >/dev/null 2>&1; then
+	ebpf_tc=1
+elif modprobe -n -q cls_bpf >/dev/null 2>&1; then
+	ebpf_tc=1
+fi
+if [ "$ebpf_bpf" = 1 ] && [ "$ebpf_tc" = 1 ]; then
+	echo "ebpf_kernel=1"
+else
+	echo "ebpf_kernel=0"
+fi
+
+# CONFIG_CGROUP_BPF has no sysctl or module of its own.  kallsyms carries the
+# static key it is built around; this script runs as root, so it is readable.
+# `-m1` stops at the first match, so an enabled kernel does not pay for a full
+# read of the symbol table.
+if grep -qm1 'cgroup_bpf' /proc/kallsyms 2>/dev/null; then
+	echo "ebpf_cgroup=1"
+elif [ -r /proc/kallsyms ] && [ -s /proc/kallsyms ]; then
+	echo "ebpf_cgroup=0"
+else
+	echo "ebpf_cgroup=unknown"
+fi
+
+if [ -f /etc/config/nikki-rs ] && [ -x /usr/bin/clash-rs ]; then
+	echo "ebpf_nikki_rs=1"
+else
+	echo "ebpf_nikki_rs=0"
+fi
+echo "ebpf_enabled=$(uci -q get nikki-rs.ebpf.enabled 2>/dev/null || echo 0)"
+if pidof clash-rs >/dev/null 2>&1; then
+	echo "ebpf_running=1"
+else
+	echo "ebpf_running=0"
+fi
+
+# Attachment heuristic: clash-rs logs the attach once the TC/cgroup programs are
+# live.  There is no pinned object to look at (the core does not use
+# /sys/fs/bpf), and `tc` is not required by this firmware, so the core log is
+# the only portable signal.  A missing/rotated log reports "not attached"
+# rather than guessing.
+if [ -f /var/log/nikki-rs/core.log ] \
+	&& grep -q 'TC/cgroup hooks successfully attached' /var/log/nikki-rs/core.log 2>/dev/null; then
+	echo "ebpf_attached=1"
+else
+	echo "ebpf_attached=0"
+fi
+
 exit 0

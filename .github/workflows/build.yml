@@ -45,9 +45,13 @@ on:
         type: boolean
         default: false
       enable_nikki:
-        description: 'Nikki 代理'
+        description: 'Nikki-RS 代理（clash-rs 内核，支持 eBPF 加速）'
         type: boolean
         default: false
+      enable_ebpf_proxy_kernel:
+        description: 'eBPF 代理内核支持（Nikki-RS 的 cgroup BPF，会改变内核 ABI）'
+        type: boolean
+        default: true
       enable_openclash:
         description: 'OpenClash 代理'
         type: boolean
@@ -302,6 +306,10 @@ jobs:
           H5000M_APK_REPO_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.apk_repo_url || '' }}
           ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
           ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
+          # True on scheduled/tag builds: the eBPF kernel options are what make
+          # the Nikki-RS eBPF page more than a switch that cannot work.  Only a
+          # manual run can turn them off, for a deliberately minimal image.
+          ENABLE_EBPF_PROXY_KERNEL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_ebpf_proxy_kernel) || 'true' }}
           ENABLE_OPENCLASH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_openclash) || 'false' }}
           ENABLE_MOSDNS: 'true'
           ENABLE_HOMEPROXY: 'false'
@@ -606,6 +614,11 @@ jobs:
       # plain install produce a working router.
       - name: Verify the proxy stack dependencies are in the image
         working-directory: /o
+        env:
+          # The same expression the Build step uses, so a run that turned the
+          # eBPF kernel options off is not failed by a check that insists they
+          # are on.  Nothing else here differs by switch.
+          ENABLE_EBPF_PROXY_KERNEL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_ebpf_proxy_kernel) || 'true' }}
         run: |
           set -uo pipefail
           fail=0
@@ -625,6 +638,43 @@ jobs:
           for sym in ip-full ucode-mod-math sing-box; do
             check "${sym} =y" "grep -q '^CONFIG_PACKAGE_${sym}=y$' openwrt/.config"
           done
+
+          echo
+          echo "=== eBPF proxy kernel support (Nikki-RS) ==="
+          # Nikki-RS's eBPF fast path has two halves.  The TC half rides on
+          # kmod-sched-core (clsact / NET_SCH_INGRESS + NET_CLS_ACT) and
+          # kmod-sched-bpf (cls_bpf + act_bpf); those are already =y above, and
+          # the kernel symbols are asserted here because a package being present
+          # does not prove its KCONFIG landed.  The host/process half is a
+          # cgroup BPF hook, and that is the part mainline leaves off — hence the
+          # two CONFIG_KERNEL_* symbols the switch writes.
+          if [ "${ENABLE_EBPF_PROXY_KERNEL:-true}" = "true" ]; then
+            check "CONFIG_KERNEL_CGROUPS=y" \
+              "grep -q '^CONFIG_KERNEL_CGROUPS=y$' openwrt/.config"
+            check "CONFIG_KERNEL_CGROUP_BPF=y" \
+              "grep -q '^CONFIG_KERNEL_CGROUP_BPF=y$' openwrt/.config"
+            # The kernel .config is $(LINUX_DIR)/.config, i.e.
+            # build_dir/target-*/linux-<board>_<subtarget>/linux-<ver>/.config
+            # (include/kernel.mk: KERNEL_BUILD_DIR = $(BUILD_DIR)/linux-$(BOARD)_$(SUBTARGET),
+            #  LINUX_DIR = $(KERNEL_BUILD_DIR)/linux-$(LINUX_VERSION)).
+            # Two linux-* levels, not one: a single-level glob silently matches
+            # nothing and every check below would "fail" on a correct build.
+            KCFG='openwrt/build_dir/target-*/linux-*/linux-*/.config'
+            check "kernel CONFIG_CGROUPS=y" \
+              "grep -q '^CONFIG_CGROUPS=y\$' $KCFG"
+            check "kernel CONFIG_CGROUP_BPF=y" \
+              "grep -q '^CONFIG_CGROUP_BPF=y\$' $KCFG"
+            check "kernel CONFIG_NET_CLS_ACT=y" \
+              "grep -q '^CONFIG_NET_CLS_ACT=y\$' $KCFG"
+            check "kernel CONFIG_NET_CLS_BPF built" \
+              "grep -qE '^CONFIG_NET_CLS_BPF=[my]\$' $KCFG"
+            check "kernel CONFIG_NET_ACT_BPF built" \
+              "grep -qE '^CONFIG_NET_ACT_BPF=[my]\$' $KCFG"
+            check "kernel CONFIG_NET_SCH_INGRESS built" \
+              "grep -qE '^CONFIG_NET_SCH_INGRESS=[my]\$' $KCFG"
+          else
+            echo "  (skipped: ENABLE_EBPF_PROXY_KERNEL is off)"
+          fi
 
           echo
           echo "=== the kmods really are in the built rootfs ==="
@@ -732,14 +782,14 @@ jobs:
           echo
           echo "=== front-ends a user may install ==="
           for p in luci-app-passwall luci-app-passwall2 luci-app-ssr-plus luci-app-homeproxy \
-                   luci-app-nikki luci-app-momo luci-app-openclash luci-app-mosdns \
+                   luci-app-nikki-rs luci-app-momo luci-app-openclash luci-app-mosdns \
                    luci-app-nekobox luci-app-xray luci-app-hijpass luci-app-fchomo \
                    luci-app-v2raya luci-app-adblock; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
           echo
           echo "=== cores and daemons, without which a front-end cannot run ==="
-          for p in xray-core mihomo sing-box mosdns nikki momo adblock dns2tcp ip-full ucode-mod-math; do
+          for p in xray-core mihomo sing-box mosdns nikki-rs clash-rs momo adblock dns2tcp ip-full ucode-mod-math; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
           echo
@@ -781,7 +831,7 @@ jobs:
           resolve luci-app-homeproxy
           resolve luci-app-passwall
           resolve luci-app-passwall2
-          resolve luci-app-nikki
+          resolve luci-app-nikki-rs
           resolve luci-app-momo
           resolve luci-app-openclash
           resolve luci-app-mosdns
@@ -809,7 +859,8 @@ jobs:
           require_core luci-app-passwall2  xray-core
           require_core luci-app-passwall2  sing-box
           require_core luci-app-homeproxy  sing-box
-          require_core luci-app-nikki      nikki
+          require_core luci-app-nikki-rs   nikki-rs
+          require_core luci-app-nikki-rs   clash-rs
           require_core luci-app-momo       momo
           echo
           if [ "$fail" -ne 0 ]; then
@@ -1022,7 +1073,7 @@ jobs:
             >> /etc/apk/repositories.d/customfeeds.list
           apk update
           apk add luci-app-passwall</pre>
-            <p>可安装的代理面板包括 PassWall、PassWall2、HomeProxy、MosDNS、Nikki、
+            <p>可安装的代理面板包括 PassWall、PassWall2、HomeProxy、MosDNS、Nikki-RS、
                Momo、NeKoBox、v2rayA、OpenClash 以及各自的中文语言包。</p>
           </body>
           </html>

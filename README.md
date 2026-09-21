@@ -55,7 +55,7 @@ apk update
 apk add luci-app-passwall
 ```
 
-可安装的包括 **PassWall、PassWall2、HomeProxy、MosDNS、Nikki、Momo、NeKoBox、
+可安装的包括 **PassWall、PassWall2、HomeProxy、MosDNS、Nikki-RS、Momo、NeKoBox、
 v2rayA、OpenClash、SSR-Plus** 以及各自的中文语言包。内核模块与固件同一次构建产出，
 所以 ABI 天然匹配，不必担心装不上。
 
@@ -89,6 +89,12 @@ v2rayA、OpenClash、SSR-Plus** 以及各自的中文语言包。内核模块与
 硬件加速用的是**主线自己的 PPE 卸载**（fw4 的 `flow_offloading_hw`），首次启动已自动
 开启。它与 ImmortalWrt 上的 TurboACC / MTK HNAT 是**两套不同的东西**，后者在主线这个
 SoC 上并不存在。
+
+代理侧的加速则是 **Nikki-RS（clash-rs）的 eBPF 快路径**：固件默认编译了 cgroup BPF 与
+TC eBPF 所需的全部内核选项（`CONFIG_CGROUP_BPF` 以及 kmod-sched-core / kmod-sched-bpf
+带来的 cls_bpf、act_bpf），装上 `luci-app-nikki-rs` 后在它的 eBPF 页面打开即可。
+「网络加速」页面会报告 eBPF 内核支持是否就绪，并可代为开关（默认「不管理」，由 Nikki-RS
+自己的页面决定）。
 
 ## 自己编译
 
@@ -134,7 +140,8 @@ Docker、各代理前端等）。
 | `H5000M_WIFI_KEY` / `_ENCRYPTION` | 空 / `none` | 默认开放网络 |
 | `H5000M_APK_REPO_URL` | 空 | 软件源基址；留空则固件不带额外源 |
 | `ENABLE_ADBLOCK` / `ENABLE_HOMEPROXY` | `false` | 关闭时编进软件源（`=m`），打开时装进固件（`=y`） |
-| `ENABLE_DOCKERMAN` / `ENABLE_NIKKI` / `ENABLE_OPENCLASH` / `ENABLE_ADGUARDHOME` | `false` | 可选服务 |
+| `ENABLE_DOCKERMAN` / `ENABLE_NIKKI` / `ENABLE_OPENCLASH` / `ENABLE_ADGUARDHOME` | `false` | 可选服务（`ENABLE_NIKKI` 会克隆并构建 Nikki-RS / clash-rs） |
+| `ENABLE_EBPF_PROXY_KERNEL` | `true` | 写入 `CONFIG_KERNEL_CGROUPS` / `CONFIG_KERNEL_CGROUP_BPF`，给 Nikki-RS 的 eBPF 代理补齐 cgroup BPF 内核支持（会改变内核 ABI，关闭则只有 TC 快路径） |
 | `THREADS` | CPU 核数 | 并行度 |
 
 想把软件源指向自己的服务器：

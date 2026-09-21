@@ -18,3 +18,21 @@ config accel 'settings'
 	# dstnat.  All four ship in this firmware; see docs/engineering.md for why
 	# "it compiles" is not the same as "it works".
 	option fullcone '1'
+
+	# eBPF proxy fast path, owned by Nikki-RS.
+	#
+	# Nikki-RS (clash-rs) can move the transparent proxy's fast path into the
+	# kernel: TC (clsact) programs on the LAN/WAN interfaces, plus cgroup BPF
+	# programs for host/process matching.  The kernel half is built into this
+	# firmware (CONFIG_CGROUP_BPF + the cls_bpf/act_bpf modules); whether it is
+	# switched on belongs to Nikki-RS's own eBPF page, so this page only takes
+	# over when asked:
+	#
+	#   keep — leave Nikki-RS's own setting alone (default)
+	#   on   — write nikki-rs.ebpf.enabled=1 and (re)start Nikki-RS
+	#   off  — write nikki-rs.ebpf.enabled=0 and (re)start Nikki-RS
+	#
+	# 'keep' exists so that saving this page does not silently override a
+	# choice made on Nikki-RS's page.  It is a no-op when Nikki-RS is not
+	# installed.
+	option ebpf_proxy 'keep'

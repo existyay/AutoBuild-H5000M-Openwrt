@@ -57,6 +57,33 @@ return view.extend({
 				else
 					ppeText = '未检测到';
 
+				var ebpfKernelText;
+				if (d.ebpf_kernel === '1')
+					ebpfKernelText = '就绪（BPF 与 TC 模块可用）';
+				else
+					ebpfKernelText = '不可用 —— 内核缺少 BPF/TC eBPF 支持，Nikki-RS 的 eBPF 模式无法挂载';
+
+				var ebpfCgroupText;
+				if (d.ebpf_cgroup === '1')
+					ebpfCgroupText = '已编译（本机/进程分流可用）';
+				else if (d.ebpf_cgroup === '0')
+					ebpfCgroupText = '未编译（只有 TC 快路径可用）';
+				else
+					ebpfCgroupText = '无法判定';
+
+				var ebpfProxyText;
+				if (d.ebpf_nikki_rs !== '1')
+					ebpfProxyText = '未安装 Nikki-RS';
+				else if (d.ebpf_enabled === '1') {
+					if (d.ebpf_attached === '1')
+						ebpfProxyText = '已启用，内核已挂载';
+					else if (d.ebpf_running === '1')
+						ebpfProxyText = '已启用，等待挂载';
+					else
+						ebpfProxyText = '已启用，但代理未运行';
+				} else
+					ebpfProxyText = '未启用';
+
 				var rows = [
 					[ '软件流量卸载', onoff(d.fw_flow_offloading) ],
 					[ '硬件流量卸载', onoff(d.fw_flow_offloading_hw) ],
@@ -71,12 +98,18 @@ return view.extend({
 						? '已加载' : '未加载' ],
 					[ 'Full-cone NAT', d.fullcone === '1'
 						? '模块已加载，防火墙已按 fullcone 生成规则'
-						: '模块未加载 —— 开关打开也不会生效' ]
+						: '模块未加载 —— 开关打开也不会生效' ],
+					[ 'eBPF 内核支持', ebpfKernelText ],
+					[ 'eBPF cgroup 支持', ebpfCgroupText ],
+					[ 'eBPF 代理（Nikki-RS）', ebpfProxyText ]
 				];
 
 				var notes = [
 					'以上是内核与防火墙的实际状态，不是配置里的期望值。',
-					'硬件卸载依赖 PPE，并且必须与软件卸载同时开启；两者缺一，硬件卸载不会生效。'
+					'硬件卸载依赖 PPE，并且必须与软件卸载同时开启；两者缺一，硬件卸载不会生效。',
+					'eBPF 代理是 Nikki-RS（clash-rs）的透明代理快路径：TC 程序把转发决策放进内核。' +
+					'开启它之后，Nikki-RS 原来的 TProxy / Redirect 分流配置不再生效，这是上游的设计，' +
+					'不是本页的判断。'
 				];
 
 				if (d.fullcone === '1')
@@ -138,6 +171,21 @@ return view.extend({
 			'<br />其它协议不受影响，行为与 masquerade 相同。');
 		o.rmempty = false;
 		o.default = '1';
+
+		o = s.option(form.ListValue, 'ebpf_proxy', 'eBPF 代理（Nikki-RS）',
+			'把透明代理的快路径交给内核：Nikki-RS（clash-rs）在 LAN/WAN 网卡上挂 TC eBPF ' +
+			'程序，并可用 cgroup BPF 做本机/进程分流。' +
+			'<br />这需要固件内置 eBPF 内核支持（本固件默认包含），并且只在装了 Nikki-RS ' +
+			'时才有效果。' +
+			'<br /><strong>开启后 Nikki-RS 原来的 TProxy / Redirect 分流配置会失效</strong>，' +
+			'这是 clash-rs eBPF 模式的设计。' +
+			'<br />默认「不管理」：Nikki-RS 有自己的 eBPF 页面，本页不去覆盖它的选择；' +
+			'只有在这里明确选启用或禁用，本页才会写入并重启 Nikki-RS。');
+		o.value('keep', '不管理（由 Nikki-RS 页面决定）');
+		o.value('on', '启用');
+		o.value('off', '禁用');
+		o.default = 'keep';
+		o.rmempty = false;
 
 		o = s.option(form.Flag, 'bbr', 'BBR 拥塞控制',
 			'改善高丢包、长肥管道下的 TCP 吞吐。内核未提供 BBR 时会自动跳过并记录日志。');
