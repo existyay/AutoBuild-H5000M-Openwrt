@@ -214,6 +214,15 @@ jobs:
           exit $status
 
       - name: Verify the externally cloned repositories still exist
+        env:
+          # Authenticate the metadata call.  An unauthenticated request is
+          # capped at 60/hour per source IP, and GitHub-hosted runners share
+          # addresses, so the check intermittently failed with
+          #   CHKayanami/OpenWrt-nikki-rs is not reachable (HTTP 403)
+          # which is a rate limit, not a missing repository.  The workflow token
+          # raises the cap to 5000/hour and is already available with the
+          # workflow's `contents: read` permission.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # These are cloned straight from their upstreams into package/ at
@@ -228,6 +237,7 @@ jobs:
             CHKayanami/OpenWrt-nikki-rs
           do
             code="$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
               -H 'Accept: application/vnd.github+json' \
               "https://api.github.com/repos/${repo}")"
             if [ "$code" = "200" ]; then
