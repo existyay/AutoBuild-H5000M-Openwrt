@@ -735,6 +735,17 @@ jobs:
               "grep -q '^CONFIG_KERNEL_CGROUPS=y$' openwrt/.config"
             check "CONFIG_KERNEL_CGROUP_BPF=y" \
               "grep -q '^CONFIG_KERNEL_CGROUP_BPF=y$' openwrt/.config"
+            # BTF.  KERNEL_DEBUG_INFO_BTF is
+            # `depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED`, and
+            # DEBUG_INFO_REDUCED defaults to y — so all three symbols are
+            # asserted, not just BTF itself, since re-enabling REDUCED is enough
+            # to drop BTF with no other symptom.
+            check "CONFIG_KERNEL_DEBUG_INFO=y" \
+              "grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' openwrt/.config"
+            check "CONFIG_KERNEL_DEBUG_INFO_REDUCED=n" \
+              "grep -q '^CONFIG_KERNEL_DEBUG_INFO_REDUCED=n$' openwrt/.config"
+            check "CONFIG_KERNEL_DEBUG_INFO_BTF=y" \
+              "grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' openwrt/.config"
             # The kernel .config is $(LINUX_DIR)/.config, i.e.
             # build_dir/target-*/linux-<board>_<subtarget>/linux-<ver>/.config
             # (include/kernel.mk: KERNEL_BUILD_DIR = $(BUILD_DIR)/linux-$(BOARD)_$(SUBTARGET),
@@ -754,6 +765,15 @@ jobs:
               "grep -qE '^CONFIG_NET_ACT_BPF=[my]\$' $KCFG"
             check "kernel CONFIG_NET_SCH_INGRESS built" \
               "grep -qE '^CONFIG_NET_SCH_INGRESS=[my]\$' $KCFG"
+            # The real kernel .config is the last word: KCONFIG_ALLCONFIG and
+            # syncconfig both run after our symbols are written, so this is where
+            # a dropped BTF would actually show up.
+            check "kernel CONFIG_DEBUG_INFO=y" \
+              "grep -q '^CONFIG_DEBUG_INFO=y\$' $KCFG"
+            check "kernel CONFIG_DEBUG_INFO_BTF=y" \
+              "grep -q '^CONFIG_DEBUG_INFO_BTF=y\$' $KCFG"
+            check "kernel CONFIG_DEBUG_INFO_REDUCED is not set" \
+              "grep -qE '^# CONFIG_DEBUG_INFO_REDUCED is not set\$|^CONFIG_DEBUG_INFO_REDUCED=n\$' $KCFG"
           else
             echo "  (skipped: ENABLE_EBPF_PROXY_KERNEL is off)"
           fi

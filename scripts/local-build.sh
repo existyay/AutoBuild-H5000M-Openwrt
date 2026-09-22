@@ -1922,6 +1922,22 @@ EOF
 # The TC half rides on kmod-sched-core + kmod-sched-bpf.
 CONFIG_KERNEL_CGROUPS=y
 CONFIG_KERNEL_CGROUP_BPF=y
+
+# BTF (BPF Type Format) type information.
+#
+# CONFIG_DEBUG_INFO_BTF has two prerequisites and both have to be satisfied or
+# Kconfig silently drops it: `depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED`.
+# The tree already sets DEBUG_INFO=y, but DEBUG_INFO_REDUCED DEFAULTS TO y, so
+# BTF was being dropped without a word and the kernel shipped no BTF.
+#
+# Turning DEBUG_INFO_REDUCED off is not merely a switch: it makes gcc emit full
+# DWARF instead of the reduced structure information, which is what pahole needs
+# in order to generate BTF.  That costs real build time and a bigger vmlinux —
+# the same trade this project already accepts for the libbpf package.
+#
+# `select DWARVES` builds the pahole host tool automatically once BTF is on.
+CONFIG_KERNEL_DEBUG_INFO_REDUCED=n
+CONFIG_KERNEL_DEBUG_INFO_BTF=y
 EOF
 	fi
 }
@@ -2400,6 +2416,14 @@ configure_build() {
 	if is_true "$ENABLE_EBPF_PROXY_KERNEL"; then
 		config_set_symbol "CONFIG_KERNEL_CGROUPS" "y"
 		config_set_symbol "CONFIG_KERNEL_CGROUP_BPF" "y"
+		# DEBUG_INFO_REDUCED defaults to y, and KERNEL_DEBUG_INFO_BTF is
+		# `depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED` — so
+		# without turning it off first, defconfig drops BTF silently and the
+		# kernel ships without type information.  Order matters, and both are
+		# re-asserted here for the same reason as the cgroup pair above.
+		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO" "y"
+		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO_REDUCED" "n"
+		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO_BTF" "y"
 	fi
 
 	# ccache last, and after defconfig rather than in the seed, because its
@@ -2497,6 +2521,16 @@ verify_config() {
 			|| die "CONFIG_KERNEL_CGROUPS was dropped — the eBPF proxy's cgroup half cannot work"
 		grep -q '^CONFIG_KERNEL_CGROUP_BPF=y$' "$SRC/.config" \
 			|| die "CONFIG_KERNEL_CGROUP_BPF was dropped — the eBPF proxy's cgroup half cannot work"
+		# BTF rides on these two: KERNEL_DEBUG_INFO_BTF is
+		# `depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED`, and
+		# DEBUG_INFO_REDUCED defaults to y — a defconfig that re-enabled it
+		# would drop BTF without any other symptom, so all three are asserted.
+		grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' "$SRC/.config" \
+			|| die "CONFIG_KERNEL_DEBUG_INFO was dropped — CONFIG_DEBUG_INFO_BTF cannot be generated without full debug info"
+		grep -q '^CONFIG_KERNEL_DEBUG_INFO_REDUCED=n$' "$SRC/.config" \
+			|| die "CONFIG_KERNEL_DEBUG_INFO_REDUCED is not explicitly off — it defaults to y and silently disables CONFIG_DEBUG_INFO_BTF"
+		grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' "$SRC/.config" \
+			|| die "CONFIG_KERNEL_DEBUG_INFO_BTF was dropped — the kernel would ship no BTF type information"
 		for pkg in kmod-sched-core kmod-sched-bpf; do
 			config_symbol_is_set "$pkg" \
 				|| die "${pkg} is not in the image — the eBPF proxy's TC half cannot work"

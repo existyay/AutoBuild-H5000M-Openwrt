@@ -320,6 +320,14 @@ jobs:
             "local-build.sh requests CONFIG_KERNEL_CGROUP_BPF"
           want scripts/local-build.sh 'kmod-sched-bpf' \
             "local-build.sh carries the TC BPF modules"
+          # BTF is required, and it has two prerequisites that are easy to lose:
+          # DEBUG_INFO_REDUCED defaults to y and silently disables it.
+          want scripts/local-build.sh 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' \
+            "local-build.sh requests CONFIG_KERNEL_DEBUG_INFO_BTF"
+          want scripts/local-build.sh 'CONFIG_KERNEL_DEBUG_INFO_REDUCED' \
+            "local-build.sh explicitly disables CONFIG_KERNEL_DEBUG_INFO_REDUCED"
+          want .github/workflows/build.yml 'CONFIG_KERNEL_DEBUG_INFO_BTF' \
+            "build.yml asserts BTF survived into the kernel config"
           want scripts/local-build.sh 'kmod-veth' \
             "local-build.sh installs kmod-veth (the eBPF link pair)"
           want scripts/verify-apk-repo.sh 'kmod-veth' \

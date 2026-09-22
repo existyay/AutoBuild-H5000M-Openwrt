@@ -785,7 +785,7 @@ HiJpass、v2rayA。逐包的 Makefile 路径、行号与审计 commit 见
 | | Nikki-RS（clash-rs） | Daed |
 | --- | --- | --- |
 | eBPF 字节码 | 上游 release workflow 用 nightly + `bpf-linker` 编译，**嵌进预编译二进制**（`clash-ebpf-bpf`） | 运行时用 BTF/CO-RE 加载 |
-| 需要 BTF | **不需要**（所以 `CONFIG_DEBUG_INFO_BTF` 保持关闭，镜像不被 BTF 撑大） | 需要 |
+| 需要 BTF | 内核侧需要（本工程**已开启** `CONFIG_DEBUG_INFO_BTF`；同时把 `DEBUG_INFO_REDUCED=n`，否则 BTF 会被默认值静默挡掉） | 需要 |
 | 需要 XDP sockets | **不需要** | 需要 |
 | TC 程序 | `CONFIG_NET_SCH_INGRESS` + `CONFIG_NET_CLS_ACT` + `CONFIG_NET_CLS_BPF` + `CONFIG_NET_ACT_BPF`，全部由 `kmod-sched-core` / `kmod-sched-bpf` 的 KCONFIG 带出 | 同左（也依赖 `kmod-sched-*`） |
 | cgroup / host 分流 | `CONFIG_CGROUPS` + `CONFIG_CGROUP_BPF` | 同左 |
@@ -848,9 +848,11 @@ V2EX 的说明）是：劫持 DNS → 对域名预选路 → 直连的域名解�
   TC BPF（`cls_bpf`/`act_bpf`）、cgroup BPF 与 veth 编进内核。本工程用
   `ENABLE_EBPF_PROXY_KERNEL` 写 `CONFIG_KERNEL_CGROUPS/CGROUP_BPF`，`kmod-sched-core` /
   `kmod-sched-bpf` 带出 TC 那半，`kmod-veth` 固定进镜像；`dae` 在这里可有可无。
-* clash-rs 的 eBPF **不需要** `CONFIG_DEBUG_INFO_BTF` / `CONFIG_XDP_SOCKETS` /
-  `CONFIG_BPF_EVENTS`（字节码嵌在预编译二进制里，不走 CO-RE，也不用 AF_XDP），所以本工程
-  没有为它打开这几项。
+* clash-rs 的 eBPF 字节码嵌在预编译二进制里、不走 CO-RE，也不用 AF_XDP，所以
+  `CONFIG_KERNEL_BPF_EVENTS` / `CONFIG_XDP_SOCKETS` 没有为它打开。**BTF 则是打开的**：
+  `CONFIG_KERNEL_DEBUG_INFO_BTF=y`（配合 `DEBUG_INFO=y`、`DEBUG_INFO_REDUCED=n`），
+  因为内核需要携带 BTF 类型信息；代价是完整 DWARF + `pahole` 这一步会让 vmlinux 变大、
+  内核编译变慢，属于本工程有意接受的权衡。
 * **安全边界**：`bypass-dst-ips` 必须含路由器自己的内网网段（默认含 `192.168.0.0/16`），
   否则连管理页面都进不去；第一次调试**不要打开开机自启**（`boot_start`），确认策略无误后
   再开。eBPF 是内核钩子，错误策略不像 nftables reload 那样会随防火墙重启自动回滚。

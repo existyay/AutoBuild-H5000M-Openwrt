@@ -102,7 +102,26 @@ eBPF 页面打开即可；「网络加速」页面会报告 eBPF 内核支持是
 eBPF 是 **TUN/tproxy/redirect 之外的另一种入站**：内核钩子决定拦截还是放行，不再需要
 nftables/iptables 转发规则；打开后 `Proxy Config` 里的 TCP/UDP 模式会被绕过（所以
 那里没有、也不需要「eBPF 模式」选项）。本固件已经内置它需要的全部内核侧依赖，
-**不需要像社区里那样先装 `dae` 来补依赖**。三点注意：
+**不需要像社区里那样先装 `dae` 来补依赖**。
+
+关于内核选项，有三件事值得说清楚（上游 README 的依赖清单与我们的配置逐条对过）：
+
+* Nikki-RS 需要的 **`kmod-nft-tproxy`**（以及 `kmod-nft-socket`、`kmod-inet-diag`、
+  `kmod-tun`、`kmod-dummy`、`ip-full`、`yq`）**全部已 `=y` 装进镜像**，并在发布前的
+  三道门禁里逐条断言，所以不存在"还要自己补内核模块"的情况。
+* **`CONFIG_DEBUG_INFO_BTF` 已开启。** 它有两个前置条件，缺一个就会被 defconfig
+  静默丢掉：`depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED`。树里本来
+  就是 `DEBUG_INFO=y`，但 **`DEBUG_INFO_REDUCED` 默认是 `y`**，所以 BTF 一直被丢掉、
+  内核实际上没有 BTF。现在这三个符号一起写入、并在 defconfig 之后重新断言。代价是
+  gcc 要生成完整 DWARF，再由 `pahole`（`select DWARVES` 会自动构建）转成去重后的
+  BTF：vmlinux 会变大、内核编译会变慢，这是本工程有意接受的权衡。
+* 我们同时开的是 Nikki-RS 真正需要的 cgroup BPF 一半
+  （`CONFIG_KERNEL_CGROUPS` + `CONFIG_KERNEL_CGROUP_BPF`）。`clash-rs` 本身是
+  **预编译二进制**（包内 `Build/Compile` 为空，只下载上游 release 的 tarball），
+  它的 eBPF 字节码在上游发布流程里就已编译并嵌入二进制；BTF 是给内核侧与
+  BTF/CO-RE 类工具（如 Daed）用的。`CONFIG_BPF_EVENTS` / `XDP_SOCKETS` 仍保持关闭。
+
+三点注意：
 
 * eBPF 页的 `Bypass Destination IPs` **必须包含你的内网网段**（默认含 `192.168.0.0/16`），
   否则去往路由器本身的流量也会被拦，直接失去管理入口。
