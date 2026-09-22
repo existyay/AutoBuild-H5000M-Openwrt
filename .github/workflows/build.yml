@@ -32,14 +32,6 @@ on:
         description: 'Adblock 广告过滤'
         type: boolean
         default: false
-      apk_repo_url:
-        description: 'apk 仓库的托管地址 会被写入固件 留空则固件不带额外软件源'
-        type: string
-        default: ''
-      prebuild_packages:
-        description: '诊断用 先单独编译这些包（空格分隔 如 package/luci-app-ssr-plus/shadowsocks-libev）失败可提前暴露 留空则正常全量编译'
-        type: string
-        default: ''
       enable_dockerman:
         description: 'Docker 容器支持'
         type: boolean
@@ -52,14 +44,7 @@ on:
         description: 'eBPF 代理内核支持（Nikki-RS 的 cgroup BPF，会改变内核 ABI）'
         type: boolean
         default: true
-      enable_openclash:
-        description: 'OpenClash 代理'
-        type: boolean
-        default: false
-      enable_adguardhome:
-        description: 'AdGuardHome 广告过滤'
-        type: boolean
-        default: false
+
   push:
     tags:
       - 'openwrt-*'
@@ -237,7 +222,9 @@ jobs:
       # source mtimes are normalised: OpenWrt keys its stamps on a hash of path
       # plus mtime, so without that every stamp would miss on a fresh clone.
       - name: Install oras
-        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2- name: Restore build cache from GitHub Packages
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
+
+      - name: Restore build cache from GitHub Packages
         id: buildcache
         continue-on-error: true
         env:
@@ -354,23 +341,23 @@ jobs:
           ENABLE_THEME_ARGON: 'true'
           ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'false' }}
           ENABLE_REPO_PACKAGES: 'true'
-          H5000M_APK_REPO_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.apk_repo_url || '' }}
+          H5000M_APK_REPO_URL: ${{ vars.H5000M_APK_REPO_URL || '' }}
           ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
           ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
           # True on scheduled/tag builds: the eBPF kernel options are what make
           # the Nikki-RS eBPF page more than a switch that cannot work.  Only a
           # manual run can turn them off, for a deliberately minimal image.
           ENABLE_EBPF_PROXY_KERNEL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_ebpf_proxy_kernel) || 'true' }}
-          ENABLE_OPENCLASH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_openclash) || 'false' }}
+          ENABLE_OPENCLASH: ${{ vars.ENABLE_OPENCLASH || 'false' }}
           ENABLE_MOSDNS: 'true'
           ENABLE_HOMEPROXY: 'false'
-          ENABLE_ADGUARDHOME: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adguardhome) || 'false' }}
+          ENABLE_ADGUARDHOME: ${{ vars.ENABLE_ADGUARDHOME || 'false' }}
           # Optional, diagnostic.  `make world` reaches package/luci-app-* about
           # 160 minutes in, so a failure there costs a whole three-hour run to
           # find.  Naming packages here builds them (and their dependencies)
           # first, with the per-package logs on, so the same failure surfaces in
           # minutes.  Empty by default: the only thing that changes is order.
-          PREBUILD_PACKAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.prebuild_packages || '' }}
+          PREBUILD_PACKAGES: ${{ vars.PREBUILD_PACKAGES || '' }}
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
@@ -385,9 +372,16 @@ jobs:
           #
           # Derived from the repository the workflow is running in rather than
           # hard-coded, so a fork gets its own URL for free.  Override with the
-          # apk_repo_url input (or delete the entry on the device) if you host
-          # it somewhere else — an entry pointing at a host that does not serve
-          # the repository makes `apk update` report an error.
+          # H5000M_APK_REPO_URL repository variable (Settings -> Variables) if
+          # you host it elsewhere — an entry pointing at a host that does not
+          # serve the repository makes `apk update` report an error.
+          #
+          # It is a VARIABLE and not a dispatch input because GitHub allows at
+          # most 10 `workflow_dispatch` inputs and this workflow needs the
+          # budget for the switches people actually flip.  Same for
+          # ENABLE_OPENCLASH / ENABLE_ADGUARDHOME / PREBUILD_PACKAGES below:
+          # rare, per-repository decisions belong in vars, not in every run's
+          # form.
           if [ -z "${H5000M_APK_REPO_URL:-}" ]; then
             export H5000M_APK_REPO_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
           fi

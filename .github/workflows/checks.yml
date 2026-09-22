@@ -31,7 +31,9 @@ jobs:
     name: Repository and host checks
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7- name: Install configuration-stage dependencies
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install configuration-stage dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
