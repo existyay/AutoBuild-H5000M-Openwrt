@@ -4,7 +4,7 @@
 # visible instead of merely assumed.
 
 conf_get() { uci -q get "h5000m_accel.settings.$1" 2>/dev/null || echo ''; }
-fw_get()   { uci -q get "firewall.@defaults[0].$1" 2>/dev/null || echo ''; }
+fw_get() { uci -q get "firewall.@defaults[0].$1" 2>/dev/null || echo ''; }
 
 echo "profile=$(conf_get profile)"
 echo "flow_offload=$(conf_get flow_offload)"
@@ -24,7 +24,7 @@ cc="$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo unknown)
 echo "tcp_congestion_control=${cc}"
 case "${cc}" in
 	bbr) echo "bbr_active=1" ;;
-	*)   echo "bbr_active=0" ;;
+	*) echo "bbr_active=0" ;;
 esac
 echo "bbr_available=$(grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && echo 1 || echo 0)"
 
@@ -184,8 +184,8 @@ fi
 # usually absent on a perfectly working datapath.  This is therefore the strict
 # ("log-confirmed") signal; ebpf_datapath above is the weaker one the page falls
 # back to, and the two are reported separately so the page does not over-claim.
-if [ -f /var/log/nikki-rs/core.log ] \
-	&& grep -q 'TC/cgroup hooks successfully attached' /var/log/nikki-rs/core.log 2>/dev/null; then
+if [ -f /var/log/nikki-rs/core.log ] &&
+	grep -q 'TC/cgroup hooks successfully attached' /var/log/nikki-rs/core.log 2>/dev/null; then
 	echo "ebpf_attached=1"
 else
 	echo "ebpf_attached=0"

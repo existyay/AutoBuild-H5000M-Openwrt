@@ -25,7 +25,8 @@ fail=0
 failed_profiles=()
 
 run_profile() {
-	local name="$1"; shift
+	local name="$1"
+	shift
 	local log="${ROOT_DIR}/coverage-${name}.log"
 
 	printf '\n\033[1;36m== profile: %s ==\033[0m\n' "$name"
@@ -58,23 +59,23 @@ run_profile() {
 # The `services` and `proxy-stack` profiles below would have caught it, but they
 # live in `full`, which is not what CI runs on push.  One combined profile is
 # cheap (all switches on once) and covers every switch individually.
-run_profile default            env
-run_profile mt5700m            env ENABLE_WWAND=false ENABLE_MT5700M=true
-run_profile minimal            env ENABLE_UPNP=false ENABLE_ADBLOCK=false ENABLE_FANCONTROL=false ENABLE_NETMODE=false
-run_profile all-optional       env ENABLE_DOCKERMAN=true ENABLE_NIKKI=true ENABLE_EBPF_PROXY_KERNEL=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true ENABLE_ADBLOCK=true
+run_profile default env
+run_profile mt5700m env ENABLE_WWAND=false ENABLE_MT5700M=true
+run_profile minimal env ENABLE_UPNP=false ENABLE_ADBLOCK=false ENABLE_FANCONTROL=false ENABLE_NETMODE=false
+run_profile all-optional env ENABLE_DOCKERMAN=true ENABLE_NIKKI=true ENABLE_EBPF_PROXY_KERNEL=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true ENABLE_ADBLOCK=true
 
 if [ "$PROFILE_SET" = "full" ]; then
-	run_profile services        env ENABLE_DOCKERMAN=true ENABLE_ADGUARDHOME=true
+	run_profile services env ENABLE_DOCKERMAN=true ENABLE_ADGUARDHOME=true
 	# adblock and adblock-fast share the DNS backends (dnsmasq-full + ipset) the
 	# default profiles already carry; this exercises the ENABLE_ADBLOCK image path
 	# and its classic-adblock dependency set.
-	run_profile adblock         env ENABLE_ADBLOCK=true
-	run_profile proxy-stack     env ENABLE_NIKKI=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true
+	run_profile adblock env ENABLE_ADBLOCK=true
+	run_profile proxy-stack env ENABLE_NIKKI=true ENABLE_OPENCLASH=true ENABLE_MOSDNS=true ENABLE_HOMEPROXY=true ENABLE_ADGUARDHOME=true
 	# The eBPF kernel options are a separate code path (the CONFIG_KERNEL_*
 	# writes and verify_config's live check), so the off case is exercised too.
-	run_profile no-ebpf-kernel  env ENABLE_EBPF_PROXY_KERNEL=false
-	run_profile no-dialer       env ENABLE_WWAND=false ENABLE_MT5700M=false
-	run_profile no-argon        env ENABLE_THEME_ARGON=false
+	run_profile no-ebpf-kernel env ENABLE_EBPF_PROXY_KERNEL=false
+	run_profile no-dialer env ENABLE_WWAND=false ENABLE_MT5700M=false
+	run_profile no-argon env ENABLE_THEME_ARGON=false
 fi
 
 printf '\n\033[1m== coverage summary ==\033[0m\n'

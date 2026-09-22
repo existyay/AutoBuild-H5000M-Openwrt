@@ -35,17 +35,24 @@ repos:
     rev: v0.10.0
     hooks:
       - id: shellcheck
-        # Matches the CI invocation (-S error): real bugs fail, style does not.
-        args: ['-S', 'error', '--severity=error']
-        files: '^(scripts/|local-packages/).*\.sh$|^scripts/[^/]+$'
+        # Must match the CI invocation in checks.yml exactly, or a contributor
+        # passes locally and fails in CI.  It lints scripts/ AND the device-side
+        # scripts under local-packages/ (first boot, USB hotplug, uci-defaults,
+        # the accel applier) — the ones that run as root on the router.
+        args: ['-S', 'error']
+        files: '^(scripts/|local-packages/)'
 
   - repo: https://github.com/scop/pre-commit-shfmt
     rev: v3.10.0-1
     hooks:
       - id: shfmt
-        # Only checks; this codebase is deliberately tab-indented with a style
-        # that predates shfmt, so it must not rewrite files wholesale.
-        args: ['--check', '--indent', '0', '--space-redirects']
+        # `--check` does not exist in shfmt (verified against shfmt 3.10.0: the
+        # flags are -l/--list, -d/--diff, -w/--write).  `-d` prints the diff and
+        # exits non-zero, which is the "check" behaviour this hook wants.
+        #
+        # This codebase is deliberately tab-indented with a style that predates
+        # shfmt, so the hook reports rather than rewrites: no -w.
+        args: ['-d', '--indent', '0', '--space-redirects']
         files: '^(scripts/|local-packages/)'
 
   # ---- workflows -------------------------------------------------------

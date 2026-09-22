@@ -41,6 +41,11 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # zizmor artipacked: a checkout leaves GITHUB_TOKEN in .git/config,
+          # where any later step — including a third-party package's build
+          # script — can read it.  Nothing in these jobs pushes to the repo.
+          persist-credentials: false
 
       - name: Install dependencies
         run: |

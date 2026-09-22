@@ -40,7 +40,10 @@ TARGET=""
 for arg in "$@"; do
 	case "$arg" in
 		--with-official-feeds) WITH_FEEDS=true ;;
-		-h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h | --help)
+			sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+			exit 0
+			;;
 		*) TARGET="$arg" ;;
 	esac
 done
@@ -128,13 +131,13 @@ KMODS=(
 # Package -> the core it must resolve.  The whole point: the core has to be part
 # of the dependency resolution, not merely present in the repository.
 declare -A REQUIRED_CORES=(
-	[luci-app-ssr-plus]="xray-core mihomo"
-	[luci-app-passwall]="xray-core sing-box"
-	[luci-app-passwall2]="xray-core sing-box"
-	[luci-app-homeproxy]="sing-box"
-	[luci-app-nikki-rs]="nikki-rs clash-rs"
-	[luci-app-momo]="momo"
-	[luci-app-adblock-fast]="adblock-fast"
+	[luci - app - ssr - plus]="xray-core mihomo"
+	[luci - app - passwall]="xray-core sing-box"
+	[luci - app - passwall2]="xray-core sing-box"
+	[luci - app - homeproxy]="sing-box"
+	[luci - app - nikki - rs]="nikki-rs clash-rs"
+	[luci - app - momo]="momo"
+	[luci - app - adblock - fast]="adblock-fast"
 )
 
 # This project's only version pin, and the reason it has to be in the image.
@@ -165,7 +168,7 @@ fi
 {
 	printf '%s\n' "$TARGET"
 	[ "$WITH_FEEDS" = true ] && printf '%s\n' "${OFFICIAL_FEEDS[@]}"
-} > "$SCRATCH/etc/apk/repositories"
+} >"$SCRATCH/etc/apk/repositories"
 
 apk_() { "$APK" --root "$SCRATCH" --arch "$ARCH" --allow-untrusted --cache-dir "$SCRATCH/cache" "$@"; }
 
@@ -175,8 +178,11 @@ if ! apk_ update >/dev/null 2>&1; then
 fi
 
 FAILED=0
-ok()  { printf '  \033[32mOK\033[0m    %s\n' "$1"; }
-bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAILED=$((FAILED + 1)); }
+ok() { printf '  \033[32mOK\033[0m    %s\n' "$1"; }
+bad() {
+	printf '  \033[31mFAIL\033[0m  %s\n' "$1"
+	FAILED=$((FAILED + 1))
+}
 
 present() {
 	if [ -n "$(apk_ list "$1" 2>/dev/null)" ]; then ok "$1"; else bad "$1 is not in the repository"; fi
@@ -253,7 +259,10 @@ resolve() {
 		bad "$pkg does not resolve: $(printf '%s' "$err" | head -2 | tr '\n' ' ')"
 		return 1
 	fi
-	[ -n "$out" ] || { bad "$pkg resolved to nothing"; return 1; }
+	[ -n "$out" ] || {
+		bad "$pkg resolved to nothing"
+		return 1
+	}
 	return 0
 }
 for p in "${!REQUIRED_CORES[@]}"; do

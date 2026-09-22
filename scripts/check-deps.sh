@@ -61,7 +61,7 @@ awk -v hint="$DISK_HINT_GB" '
 
 avail_kb="$(df -Pk . 2>/dev/null | awk 'NR==2 { print $4 }')"
 if [ -n "${avail_kb:-}" ]; then
-	avail_gb=$(( avail_kb / 1024 / 1024 ))
+	avail_gb=$((avail_kb / 1024 / 1024))
 	printf '  disk: %s GiB free in the build directory (>= %s GiB recommended)\n' "$avail_gb" "$DISK_HINT_GB"
 	if [ "$avail_gb" -lt "$DISK_HINT_GB" ]; then
 		echo "  WARNING: a full toolchain + target build needs roughly ${DISK_HINT_GB} GiB"
