@@ -5,6 +5,8 @@ name: 配置覆盖测试
 on:
   schedule:
     - cron: '0 4 * * 1'   # Mondays 04:00 UTC (Beijing 12:00)
+  # Required by the ruleset's Required Status Checks (see checks.yml).
+  pull_request:
   push:
     tags:
       - 'openwrt-*'

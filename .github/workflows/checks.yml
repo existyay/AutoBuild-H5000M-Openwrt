@@ -8,6 +8,10 @@ name: 仓库与主机检查
 on:
   schedule:
     - cron: '0 4 * * 1'   # Mondays 04:00 UTC (Beijing 12:00)
+  # pull_request is required for the Required Status Checks in the
+  # master-protection ruleset to have anything to report: a branch
+  # ruleset can only require a check that PRs actually run.
+  pull_request:
   push:
     tags:
       - 'openwrt-*'
