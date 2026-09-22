@@ -278,10 +278,19 @@ jobs:
           fi
 
       - name: Build
-        # Run from /o, the short bind mount created above.  The script derives
-        # everything from its own location, so this is what shortens $SRC.
-        working-directory: /o
+        # Build from $BUILD_DIR: /o (the short bind mount created above) on a
+        # github-hosted runner, the real workspace on a self-hosted one.  The
+        # mount step is skipped there, so a hardcoded `working-directory: /o`
+        # made every self-hosted run die on a directory that does not exist;
+        # the script derives everything from its own location either way, and
+        # on the hosted runner the short path is what keeps the AF_UNIX socket
+        # under its 108-byte limit.
         env:
+          BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          args=()
           # Keep ccache from growing past what the repository's 10 GB cache
           # budget can hold alongside the toolchain and the downloads.
           CCACHE_MAXSIZE: 2G
@@ -447,9 +456,11 @@ jobs:
         if: failure()
         continue-on-error: true
         timeout-minutes: 40
-        working-directory: /o
+        env:
+          BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
         run: |
           set -uo pipefail
+          cd "$BUILD_DIR"
           echo "=== last 120 lines of build.log (script log + make output) ==="
           tail -120 build.log 2>/dev/null || echo "(no build.log)"
 
@@ -547,9 +558,11 @@ jobs:
       # expr_ops_fullcone undefined until something calls nftnl_expr_alloc().
       # Verified to fail on a library in that state and pass on a fixed one.
       - name: Verify the fullcone chain is really in the image
-        working-directory: /o
+        env:
+          BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
         run: |
           set -uo pipefail
+          cd "$BUILD_DIR"
           fail=0
           check() { if bash -c "$2" >/dev/null 2>&1; then echo "  OK    $1"; else echo "  FAIL  $1"; fail=$((fail+1)); fi; }
 
@@ -622,14 +635,15 @@ jobs:
       # them), and luci-app-ssr-plus gained the core dependency that makes a
       # plain install produce a working router.
       - name: Verify the proxy stack dependencies are in the image
-        working-directory: /o
         env:
+          BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
           # The same expression the Build step uses, so a run that turned the
           # eBPF kernel options off is not failed by a check that insists they
           # are on.  Nothing else here differs by switch.
           ENABLE_EBPF_PROXY_KERNEL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_ebpf_proxy_kernel) || 'true' }}
         run: |
           set -uo pipefail
+          cd "$BUILD_DIR"
           fail=0
           check() { if bash -c "$2" >/dev/null 2>&1; then echo "  OK    $1"; else echo "  FAIL  $1"; fail=$((fail+1)); fi; }
 
@@ -772,9 +786,11 @@ jobs:
       # exits 0 with no output, and `apk query --recursive` exits 0 with its
       # failure on stderr.  Neither the exit status nor stdout alone is enough.
       - name: Verify the built repository can satisfy every frontend on its own
-        working-directory: /o
+        env:
+          BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
         run: |
           set -uo pipefail
+          cd "$BUILD_DIR"
           APK=openwrt/staging_dir/host/bin/apk
           INDEX=artifacts/apk-repo/packages.adb
           ARCH=aarch64_cortex-a53
@@ -791,7 +807,11 @@ jobs:
             echo "::error::could not create a scratch apk database"
             exit 1
           fi
-          printf '%s\n' "/o/${INDEX}" > "$ROOT/etc/apk/repositories"
+          # Absolute, and derived from BUILD_DIR rather than a hardcoded /o:
+          # on a self-hosted runner the build ran in the real workspace, and an
+          # index path pointing at the non-existent /o would make this gate fail
+          # with "this apk cannot read ..." on a perfectly good repository.
+          printf '%s\n' "${BUILD_DIR}/${INDEX}" > "$ROOT/etc/apk/repositories"
           apk_() { "$APK" --root "$ROOT" --arch "$ARCH" --allow-untrusted --cache-dir "$ROOT/cache" "$@"; }
           if ! apk_ update >/dev/null 2>&1; then
             echo "::error::this tree's own apk cannot read ${INDEX} — devices would not either"

@@ -254,9 +254,9 @@ ENABLE_WWAND=true         # ddimension/wwand 拨号
 ENABLE_MT5700M=false      # luci-app-mt5700m（与 wwand 互斥）
 
 # 可选服务
-ENABLE_UPNP=true ENABLE_ADBLOCK=true
+ENABLE_UPNP=true ENABLE_ADBLOCK=false
 ENABLE_DOCKERMAN=false
-ENABLE_NIKKI=false ENABLE_OPENCLASH=false ENABLE_MOSDNS=false
+ENABLE_NIKKI=false ENABLE_OPENCLASH=false ENABLE_MOSDNS=true
 ENABLE_HOMEPROXY=false ENABLE_ADGUARDHOME=false
 ```
 
@@ -953,9 +953,11 @@ ERROR: kmod-tun-6.18.44-r1: unexpected end of file
   `downloads.openwrt.org/snapshots`，它的 kmod vermagic 不同，而且**文件会随 snapshot
   推进而消失** —— 那个下载注定失败，用户日志里的 `unexpected end of file` 就是它。
 - **钉版本的包不能只放仓库。** `sing-box` 是本工程唯一钉版本的包
-  （`patches/0003` = 1.12.25，因为 1.13 删掉了 legacy inbound 字段而 HomeProxy 还在写）。
+  （由 `scripts/local-build.sh` 的 `pin_sing_box` 直接改写 feed Makefile 钉在
+  1.12.25，因为 1.13 删掉了 legacy inbound 字段而 HomeProxy 还在写；曾是
+  `patches/0003`，但上下文补丁会被上游例行的版本 bump 打失效，故改为脚本改写）。
   而 apk 解析依赖时**在所有源之间取最高版本**，所以只放仓库会让它去官方镜像取
-  1.14.0 —— 正是这个补丁要防的崩溃。**版本钉住的前提是我们能决定装哪个版本。**
+  1.14.0 —— 正是这个钉要防的崩溃。**版本钉住的前提是我们能决定装哪个版本。**
 
 结论：**kmod 一律进镜像**（每个只有几十 KB，`=y` 只会提升符号、不会降级，因此没有"把
 基础系统已 `=y` 的模块降成仓库包"的风险），**钉版本的核（sing-box）也进镜像**；
@@ -1033,8 +1035,8 @@ luci-app-momo       → momo sing-box
 
 发布前门禁新增 `Verify the built repository can satisfy every frontend on its own`：
 只配置本仓库（不配官方源），用本机 apk 读**将被发布的** `artifacts/apk-repo/packages.adb`，
-断言 14 个前端、11 个核/守护进程、18 个 kmod 都在索引里，`sing-box` 是 1.12.25，
-并且 9 个前端各自都能**解析出它需要的核**。
+断言 15 个前端、12 个核/守护进程、20 个 kmod、12 个中文语言包都在索引里，
+`sing-box` 是 1.12.25，并且 10 个前端各自都能**解析出它需要的核**。
 
 ---
 

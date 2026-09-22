@@ -95,10 +95,11 @@ jobs:
             p="$(realpath "$p")"
 
             # Only patches against the OpenWrt tree itself can be checked here.
-            # Some of ours target feed packages — 0003-sing-box-pin targets
-            # feeds/packages/net/sing-box/Makefile — and this job clones the tree
-            # without installing any feed, so those files do not exist and the
-            # check reported "no longer applies to main" for a patch that was
+            # A patch may also target a feed package (0003-sing-box-pin used to,
+            # before that pin became the scripted pin_sing_box rewrite in
+            # scripts/local-build.sh), and this job clones the tree WITHOUT
+            # installing any feed, so such a file would not exist and the check
+            # would report "no longer applies to main" for a patch that was
             # perfectly fine.  Skip them, and say so, rather than fail.
             missing=0
             while IFS= read -r target; do

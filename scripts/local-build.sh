@@ -133,6 +133,15 @@ ENABLE_PROXY_REPOS="${ENABLE_PROXY_REPOS:-true}"
 # main() so that it exists before the first clone under `set -u`.
 CLONED_PACKAGE_DIRS=()
 
+# Every CONFIG_PACKAGE_* name emit_service writes, recorded as it is written.
+# verify_config() checks each against the build system's own package list,
+# because `make defconfig` drops an unknown CONFIG_PACKAGE_x line with exit 0
+# and NO diagnostic — so an upstream rename would otherwise shrink the
+# repository while every other gate stayed green.  Measured: three names in
+# these emit lists (shadowsocksr-libev, simple-obfs, shadowsocks-libev) were
+# bare names no package ever had, and every build dropped all three silently.
+EMITTED_PACKAGES=()
+
 # ------------------------------------------------- first-boot product setup ---
 # Applied once by /usr/sbin/h5000m-firstboot (uci-defaults + ieee80211 hotplug)
 # and written into the image as /etc/h5000m-defaults.conf.
@@ -749,7 +758,11 @@ install_signing_key() {
 
 	cp -f "$src" "${SRC}/private-key.pem"
 	chmod 0600 "${SRC}/private-key.pem"
-	if openssl ec -in "${SRC}/private-key.pem" -pubout -out "${SRC}/public-key.pem" 2>/dev/null; then
+	# `pkey`, not `ec`: the stored secret's type is never assumed — pkey handles
+	# EC, RSA and Ed25519 alike — so replacing the key material with a different
+	# type cannot silently degrade into "Could not derive the public key", where
+	# the index is signed but no device ever gets the matching public key.
+	if openssl pkey -in "${SRC}/private-key.pem" -pubout -out "${SRC}/public-key.pem" 2>/dev/null; then
 		log "Installed the fixed apk signing key (public key derived and shipped in the image)"
 	else
 		warn "Could not derive the public key; the image would not trust the index"
@@ -879,6 +892,73 @@ apply_patches() {
 	if [ "$applied" -gt 0 ]; then
 		log "Applied ${applied} tree patch(es)"
 	fi
+	return 0
+}
+
+# --------------------------------------------------------- version pins ------
+# Pin sing-box to the version the LuCI front-ends can actually drive.
+#
+# sing-box 1.13.0 removed the legacy inbound fields.  HomeProxy still emits
+# them on master and dev, and PassWall2 fails the same way, so the daemon dies
+# with:
+#
+#   FATAL decode config ... inbounds[1]: legacy inbound fields are deprecated
+#   in sing-box 1.11.0 and removed in 1.13.0
+#
+# 1.12.25 is the last release accepting them, and apk resolves dependencies to
+# the HIGHEST version across every configured repository — so the pin also has
+# to decide what gets installed (the package ships in the image; see the note
+# in append_board_stack_config).
+#
+# This used to be patches/0003, a context patch.  A context patch bakes the
+# CURRENT upstream version into its +/- lines, so the next routine upstream
+# bump (1.14.0 -> 1.15.0) makes it fail to apply and the scheduled build dies
+# at apply_patches — over a change whose entire point is to IGNORE what
+# upstream decided.  Rewriting the lines directly cannot go stale that way: it
+# pins whatever version is there, verifies the result, and dies loudly (not
+# silently) if upstream ever stops packaging sing-box the normal way.
+pin_sing_box() {
+	local mk="${SRC}/feeds/packages/net/sing-box/Makefile"
+	local want_v="1.12.25"
+	local want_h="881435f07b5ab8170ccf3cb69e87130759521dc0ed1ae4bfeacbe7772a93a158"
+
+	if [ ! -f "$mk" ]; then
+		die "cannot pin sing-box: ${mk} does not exist — the packages feed layout changed; update pin_sing_box in scripts/local-build.sh"
+	fi
+
+	# Idempotent: a tree from a previous run (or an already-pinned checkout)
+	# carries the pin, and `feeds update` on the next run restores upstream's
+	# version, which this then pins again.
+	if grep -q "^PKG_VERSION:=${want_v}$" "$mk" \
+		&& grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
+		log "sing-box already pinned to ${want_v}"
+		return 0
+	fi
+
+	# Refuse to guess: if upstream stopped writing plain PKG_VERSION / PKG_HASH
+	# lines (switched to a git proto, renamed the variables), a blind sed would
+	# silently pin nothing and the front-ends would break on a device instead of
+	# the build failing here.
+	if ! grep -q '^PKG_VERSION:=' "$mk" || ! grep -q '^PKG_HASH:=' "$mk"; then
+		die "cannot pin sing-box: ${mk} no longer has plain PKG_VERSION/PKG_HASH lines; re-check how upstream packages it and update pin_sing_box"
+	fi
+
+	sed -i \
+		-e "s|^PKG_VERSION:=.*|PKG_VERSION:=${want_v}|" \
+		-e "s|^PKG_HASH:=.*|PKG_HASH:=${want_h}|" \
+		"$mk"
+	# PKG_RELEASE, when present, is pinned to 1 as well: the repository gates
+	# (verify-apk-repo.sh and the build.yml publish gate) assert the exact
+	# `sing-box-1.12.25-r1` name, and upstream bumps PKG_RELEASE for packaging
+	# changes that have nothing to do with our pin.
+	grep -q '^PKG_RELEASE:=' "$mk" && sed -i 's|^PKG_RELEASE:=.*|PKG_RELEASE:=1|' "$mk"
+
+	if ! grep -q "^PKG_VERSION:=${want_v}$" "$mk" \
+		|| ! grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
+		die "pinning sing-box in ${mk} did not take; refusing to build an unpinned sing-box"
+	fi
+
+	log "sing-box pinned to ${want_v} (the front-ends still emit removed legacy inbound fields)"
 	return 0
 }
 
@@ -1874,6 +1954,7 @@ EOF
 		is_true "$on" && mode="y"
 		for pkg in "$@"; do
 			printf 'CONFIG_PACKAGE_%s=%s\n' "$pkg" "$mode" >> "$out"
+			EMITTED_PACKAGES+=("$pkg")
 		done
 	}
 
@@ -1913,17 +1994,25 @@ EOF
 
 	# Repository only, hence the empty switch — see the note on the block above.
 	#
-	# shadowsocks-libev is back in this list.  It was removed two commits ago as
-	# an undiagnosable CI blocker — "ERROR: package/luci-app-ssr-plus/
+	# The shadowsocks-libev tools are back in this list, under their real
+	# subpackage names.  The package was first removed two commits ago as an
+	# undiagnosable CI blocker — "ERROR: package/luci-app-ssr-plus/
 	# shadowsocks-libev failed to build", with no reason in the log.  That
 	# failure was never a compile error: it was a PKG_MIRROR_HASH mismatch in
 	# the *download* stage, and the compile failed a few seconds later only
 	# because there was no source tree.  The real cause is fixed in
 	# fix_mirror_hashes, the download and compile stages both pass now, and a
 	# workaround kept for a problem that no longer exists is just a missing
-	# package.  HiJpass selects shadowsocks-libev-ss-local and -ss-server, so it
-	# was being built anyway; this only makes the repository carry the config
-	# helpers and the tools alongside them.
+	# package.
+	#
+	# What is emitted are the real subpackages.  The bare `shadowsocks-libev`
+	# (and the bare `shadowsocksr-libev`, `simple-obfs`) was never a package —
+	# those are helloworld *directory* names — so the CONFIG lines for them were
+	# dropped by defconfig on every build without a word, and the old claim
+	# "the repository carries the config helpers and the tools" was never
+	# actually true.  HiJpass pulls ss-local and ss-server anyway; naming every
+	# variant here makes them installable standalone, and the existence check in
+	# verify_config keeps the list honest against upstream.
 	#
 	# SSR-Plus uses `select`, not `depends`, for the cores its INCLUDE_* options
 	# cover.  A select forces its target to =y even when the selecting package is
@@ -1937,9 +2026,12 @@ EOF
 	# alongside every other proxy core, so `apk add` finds them all.
 	emit_service "" \
 		luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn \
-		chinadns-ng dns2socks dns2tcp ipt2socks redsocks2 shadowsocksr-libev \
-		simple-obfs tcping shadow-tls tuic-client v2ray-plugin xray-plugin \
-		gn lua-neturl naiveproxy shadowsocks-libev \
+		chinadns-ng dns2socks dns2tcp ipt2socks redsocks2 \
+		tcping shadow-tls tuic-client v2ray-plugin xray-plugin \
+		gn lua-neturl naiveproxy \
+		shadowsocks-libev-config shadowsocks-libev-ss-local \
+		shadowsocks-libev-ss-redir shadowsocks-libev-ss-server \
+		shadowsocks-libev-ss-tunnel shadowsocks-libev-ss-rules \
 		3proxy v2ray-geoip v2ray-geosite \
 		shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir
 
@@ -1992,7 +2084,7 @@ EOF
 	#
 	# Both are small (kmod-tun is ~20 KB, ip-full ~200 KB), and sing-box is the
 	# core the app needs: it is also the one package this project PINS
-	# (patches/0003, 1.12.25) because 1.14 dropped the legacy inbound fields
+	# (pinned by pin_sing_box, 1.12.25) because 1.14 dropped the legacy inbound fields
 	# HomeProxy still writes.  A pin only holds if we control which version gets
 	# installed, and apk resolves dependencies to the HIGHEST version across all
 	# configured repositories — so leaving sing-box in the repository alone means
@@ -2386,6 +2478,21 @@ verify_config() {
 	is_true "$ENABLE_ADGUARDHOME" || { assert_repo_only adguardhome; assert_repo_only luci-app-adguardhome; }
 	is_true "$ENABLE_DOCKERMAN"   || { assert_repo_only docker; assert_repo_only luci-app-dockerman; }
 	is_true "$ENABLE_NIKKI"       || { assert_repo_only nikki-rs; assert_repo_only clash-rs; }
+
+	# Every name emit_service wrote has to be a real package.  defconfig drops
+	# an unknown CONFIG_PACKAGE_x line with exit 0 and no diagnostic, so an
+	# upstream rename would otherwise shrink the repository while every check
+	# above stayed green.  tmp/.packageinfo is the build system's own package
+	# list — the same source the emit lists were taken from.
+	if [ -s "${SRC}/tmp/.packageinfo" ]; then
+		for pkg in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
+			grep -qFx "Package: ${pkg}" "${SRC}/tmp/.packageinfo" \
+				|| die "emit_service wrote CONFIG_PACKAGE_${pkg}, but no package by that name exists — upstream renamed or removed it; update the emit lists in scripts/local-build.sh"
+		done
+		log "Verified ${#EMITTED_PACKAGES[@]} emitted package names exist upstream"
+	else
+		warn "no ${SRC}/tmp/.packageinfo — skipping the emitted-package existence check"
+	fi
 
 	log "Verified ${#REQUIRED_PACKAGES[@]} required packages and target profile ${TARGET_PROFILE}"
 
@@ -2847,6 +2954,9 @@ main() {
 	seed_cached_build_state
 	prepare_feeds
 	apply_patches
+	# After the feeds exist and before anything reads the Makefile: the pin is a
+	# rewrite of feeds/packages/net/sing-box/Makefile (see pin_sing_box).
+	pin_sing_box
 	install_local_packages
 	install_board_plugins
 	install_theme
