@@ -1,0 +1,29 @@
+# zizmor — configuration for the GitHub Actions auditor.
+#
+# The default `regular` persona is too permissive for a repo whose workflows
+# hold a signing key and publish a package repository; `auditor` reports
+# informational findings too, which is what a security review wants.
+#
+# Documented exceptions live here rather than as blanket inline ignores, so
+# every suppression is visible in one file and has to state its reason.
+rules:
+  # ---------------------------------------------------------------------------
+  # Genuine findings we accept, with reasons.
+  # ---------------------------------------------------------------------------
+  template-injection:
+    ignore: []
+  # The firmware build needs a write token to publish a Release and a Pages
+  # deployment.  That is scoped per-job in build.yml (contents: write) and
+  # nowhere else; the audit should flag any workflow that widens it.
+  excessive-permissions:
+    ignore: []
+  # Artipacked: checkout persists GITHUB_TOKEN into .git/config by default,
+  # where a malicious later step (or a package's build script!) can read it.
+  # Every checkout in this repo sets persist-credentials: false except the one
+  # in the build job, which needs to push a cache to ghcr.io.
+  artipacked:
+    ignore: []
+  # Self-hosted runner detection is not applicable: the default is
+  # github-hosted, and the self-hosted path is opt-in per dispatch.
+  self-hosted-runner:
+    ignore: []

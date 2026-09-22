@@ -1,0 +1,45 @@
+name: Release Please
+
+# Release Please turns Conventional Commits into a release PR: it maintains a
+# changelog and a version bump, and only when that PR is merged does it tag.
+#
+# Why this project wants it: the firmware build is triggered by tags
+# (`openwrt-*`, `v*`), and the release notes for a flashed image should say what
+# changed in Chinese, grouped by feat/fix/perf — not "commits since last time".
+# It also gives every release a single reviewable diff before it ships.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Maintain the release PR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      # The minimum this automation needs: read the repo, write the release PR
+      # and the tag.  No `packages`, no `actions`, no `id-token`.
+      contents: write
+      pull-requests: write
+    steps:
+      # A Reusable-Workflow-style call is not used here because Release Please
+      # publishes its own action; it is pinned by SHA like everything else.
+      - name: Run Release Please
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # `simple` for a repository whose artefact is not an npm/pypi package:
+          # it bumps a VERSION-bearing release and writes CHANGELOG.md, and the
+          # tag it creates (`v*`) matches build.yml's trigger.
+          release-type: simple
+          include-component-in-tag: false
+          # The firmware itself is versioned by its upstream revision
+          # (openwrt-<sha>), which Release Please cannot know.  So this manages
+          # the PROJECT version and the changelog; build.yml keeps naming the
+          # firmware after the upstream commit it was built from.

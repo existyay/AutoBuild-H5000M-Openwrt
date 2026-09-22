@@ -14,6 +14,11 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Concurrency: cheap and idempotent, so superseded runs are pure waste.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -26,9 +31,7 @@ jobs:
     name: Repository and host checks
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Install configuration-stage dependencies
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7- name: Install configuration-stage dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -501,3 +504,57 @@ jobs:
             exit 1
           fi
           echo "the fullcone module packaging workaround is present."
+
+  # ---------------------------------------------------------------------------
+  # Conventional Commits.  The commit log IS the release log here: Release
+  # Please derives the version bump and the changelog from it, and build.yml
+  # names firmware releases after the upstream revision.  A mislabelled commit
+  # therefore becomes a wrong release note, so the message format is a gate and
+  # not a preference.
+  #
+  # Runs against the PR's commit range rather than HEAD: commitlint is about
+  # every commit that will land, not just the tip.
+  commitlint:
+    name: Conventional Commits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The full history is needed to walk the commit range.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install commitlint
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-audit --no-fund \
+            @commitlint/cli@19.6.1 @commitlint/config-conventional@19.6.0
+
+      - name: Lint the commits
+        env:
+          # Passed through the environment rather than interpolated into the
+          # shell: `${{ github.event... }}` inside a `run:` is the classic
+          # script-injection vector (a branch named `$(rm -rf /)` would execute),
+          # and zizmor's template-injection rule flags it.  An env var is data.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA}" ] || [ -z "${HEAD_SHA}" ]; then
+            # Not a PR (schedule/dispatch/tag): lint the tip commit, which is
+            # the one this run was triggered by.
+            echo "no PR range; linting HEAD"
+            npx commitlint --config commitlint.config.mjs --from HEAD~1 --to HEAD --verbose
+          else
+            echo "linting ${BASE_SHA}..${HEAD_SHA}"
+            npx commitlint --config commitlint.config.mjs --from "${BASE_SHA}" --to "${HEAD_SHA}" --verbose
+          fi
