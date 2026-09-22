@@ -240,7 +240,10 @@ jobs:
           # rebuilt from scratch and the cache bought nothing.
           rm -rf .buildcache
           mkdir -p .buildcache
-          if ! oras pull "${image}:${tag}" -o .buildcache 2>/dev/null; then
+          # Keep oras's stderr: the previous version sent it to /dev/null, which
+          # is precisely why a cache that came back truncated on every single run
+          # could never be explained from the logs.
+          if ! oras pull "${image}:${tag}" -o .buildcache; then
             echo "no build cache at ${image}:${tag} yet — this run will create it"
             rm -rf .buildcache
             mkdir -p .buildcache
@@ -265,10 +268,16 @@ jobs:
           fi
           if [ -n "$reason" ]; then
             echo "::warning::build cache rejected (${reason}) — discarding it and building from scratch"
+            if [ -f .buildcache/build-cache.tar.zst ]; then
+              echo "rejected archive: $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes"
+              [ -f .buildcache/build-cache.sha256 ] \
+                && echo "expected: $(cat .buildcache/build-cache.sha256)"
+            fi
             rm -rf .buildcache
             mkdir -p .buildcache
           else
             echo "cache is complete and intact; the build will reuse it"
+            echo "archive: $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes, sha256 $(cut -d' ' -f1 .buildcache/build-cache.sha256)"
           fi
 
       - name: Restore ccache
@@ -453,11 +462,17 @@ jobs:
           # moved for nothing and no indication of why.
           ( cd .buildcache && sha256sum build-cache.tar.zst > build-cache.sha256 )
           ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst build-cache.sha256 )
+          # Record the exact size and digest being stored.  A build cache that
+          # comes back "truncated" every single time is otherwise impossible to
+          # localise: these two lines say what was pushed, and the restore step
+          # says what came back, so the next run can tell a bad push from a bad
+          # pull instead of guessing.
+          echo "pushed $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes, sha256 $(cut -d' ' -f1 .buildcache/build-cache.sha256) as ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
           # Confirm the push actually landed.  This step is continue-on-error, so
           # a half-finished upload is otherwise invisible — and it is not free:
           # the next run transfers the whole archive before rejecting it.
           if oras manifest fetch "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" >/dev/null 2>&1; then
-            echo "pushed and verified ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
+            echo "the pushed cache manifest is readable"
           else
             echo "::warning::the build cache push could not be verified; the next run will rebuild from scratch"
           fi
