@@ -636,6 +636,7 @@ jobs:
           echo "=== kernel modules a frontend needs, in the image (=y) ==="
           for sym in kmod-tun kmod-inet-diag kmod-dummy \
                      kmod-nft-queue kmod-nfnetlink-queue kmod-nft-tproxy \
+                     kmod-nft-socket \
                      kmod-ipt-tproxy kmod-ipt-conntrack-extra \
                      kmod-netlink-diag kmod-nf-nathelper kmod-macvlan \
                      kmod-sched-core kmod-ifb kmod-sched-bpf kmod-ipt-filter \
@@ -805,6 +806,20 @@ jobs:
                    luci-app-nikki-rs luci-app-momo luci-app-openclash luci-app-mosdns \
                    luci-app-nekobox luci-app-xray luci-app-hijpass luci-app-fchomo \
                    luci-app-v2raya luci-app-adblock luci-app-adblock-fast; do
+            if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
+          done
+          echo
+          echo "=== Chinese translations (upstream ships them separately) ==="
+          # The promise to the user is "本体 + 核 + 中文翻译".  A renamed or
+          # dropped translation package is otherwise invisible: everything
+          # else installs cleanly and the UI merely comes up in English.
+          # Kept in step with TRANSLATIONS in scripts/verify-apk-repo.sh.
+          for p in luci-i18n-passwall-zh-cn luci-i18n-passwall2-zh-cn \
+                   luci-i18n-ssr-plus-zh-cn luci-i18n-homeproxy-zh-cn \
+                   luci-i18n-nikki-rs-zh-cn luci-i18n-momo-zh-cn \
+                   luci-i18n-mosdns-zh-cn luci-i18n-hijpass-zh-cn \
+                   luci-i18n-fchomo-zh-cn luci-i18n-v2raya-zh-cn \
+                   luci-i18n-adblock-zh-cn luci-i18n-adblock-fast-zh-cn; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
           echo

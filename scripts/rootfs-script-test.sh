@@ -33,7 +33,21 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ROOTFS_TARBALL="${1:-${ROOT_DIR}/artifacts/openwrt-mediatek-filogic-hiveton_h5000m-rootfs.tar.gz}"
+# The real artifact name ends in -targz-rootfs.tar.gz: image.mk builds device
+# images as $(IMG_PREFIX)-$(PROFILE)-<fs>-<image>, i.e.
+# openwrt-mediatek-filogic-hiveton_h5000m-targz-rootfs.tar.gz.  A hardcoded
+# ...-rootfs.tar.gz guess made this script refuse its own build output, so with
+# no argument pick whatever rootfs tarball the last local build produced.
+ROOTFS_TARBALL="${1:-}"
+if [ -z "$ROOTFS_TARBALL" ]; then
+	for f in "${ROOT_DIR}"/artifacts/*-targz-rootfs.tar.gz "${ROOT_DIR}"/artifacts/*-rootfs.tar.gz; do
+		if [ -f "$f" ]; then
+			ROOTFS_TARBALL="$f"
+			break
+		fi
+	done
+fi
+: "${ROOTFS_TARBALL:=${ROOT_DIR}/artifacts/openwrt-mediatek-filogic-hiveton_h5000m-targz-rootfs.tar.gz}"
 QEMU_AARCH64="${QEMU_AARCH64:-$(command -v qemu-aarch64-static || true)}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

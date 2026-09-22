@@ -57,7 +57,3 @@ jobs:
             artifacts-coverage/enabled-packages.txt
           if-no-files-found: warn
           retention-days: 14
-
-  # ---------------------------------------------------------------------------
-  # The firmware build.
-  # ---------------------------------------------------------------------------

@@ -61,7 +61,11 @@ find_mt5700m() {
 		[ "$vendor" = "$MT5700M_VENDOR" ] || continue
 		[ "$product" = "$MT5700M_PRODUCT" ] || continue
 
-		for net in "$dev"*/net/*; do
+		# The interface directory is always "<device>:<config>", so match the
+		# colon explicitly.  The looser "$dev"* used before would also glob a
+		# prefix-sharing sibling device (1-1 matches 1-10, 1-1.2 ...) and could
+		# hand back that device's netdev for this modem's slot.
+		for net in "$dev":*/net/*; do
 			[ -d "$net" ] || continue
 			printf '%s %s\n' "${dev##*/}" "${net##*/}"
 			return 0

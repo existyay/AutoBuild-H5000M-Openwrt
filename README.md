@@ -155,8 +155,12 @@ Docker、各代理前端等）。
 | `H5000M_APK_REPO_URL` | 空 | 软件源基址；留空则固件不带额外源 |
 | `ENABLE_ADBLOCK` / `ENABLE_HOMEPROXY` | `false` | 关闭时编进软件源（`=m`），打开时装进固件（`=y`） |
 | `ENABLE_DOCKERMAN` / `ENABLE_NIKKI` / `ENABLE_OPENCLASH` / `ENABLE_ADGUARDHOME` | `false` | 可选服务（`ENABLE_NIKKI` 会克隆并构建 Nikki-RS / clash-rs） |
+| `ENABLE_MOSDNS` | `true` | MosDNS 是否直接装进固件（在线构建同样默认内置） |
 | `ENABLE_EBPF_PROXY_KERNEL` | `true` | 写入 `CONFIG_KERNEL_CGROUPS` / `CONFIG_KERNEL_CGROUP_BPF`，给 Nikki-RS 的 eBPF 代理补齐 cgroup BPF 内核支持（会改变内核 ABI，关闭则只有 TC 快路径） |
 | `THREADS` | CPU 核数 | 并行度 |
+
+其余开关（`ENABLE_WWAND` / `ENABLE_MT5700M` / `ENABLE_EASYMESH` / `ENABLE_THEME_ARGON`
+等）及各自默认值以 `scripts/local-build.sh --help` 为准。
 
 想把软件源指向自己的服务器：
 
@@ -206,10 +210,10 @@ H5000M_APK_REPO_URL=http://<你的地址>:8099 ./scripts/local-build.sh
 ./scripts/verify-apk-repo.sh https://<地址>/packages.adb   # 查已经发布的源
 ```
 
-它会只配置指定的源，用构建出的 `apk` 建一个临时数据库，逐条断言：14 个面板都在、
-核与守护进程都在、18 个 kmod 都在、`sing-box` 是钉住的 1.12.25，以及**每个面板都能
-解析出它需要的核**。`--with-official-feeds` 还会显示 `apk policy`，把"官方源里更新的
-版本会被优先选中"这件事直接摆出来。
+它会只配置指定的源，用构建出的 `apk` 建一个临时数据库，逐条断言：15 个面板、12 个核
+与守护进程、20 个 kmod、12 个中文语言包都在，`sing-box` 是钉住的 1.12.25，以及**每个
+面板都能解析出它需要的核**。`--with-official-feeds` 还会显示 `apk policy`，把"官方源里
+更新的版本会被优先选中"这件事直接摆出来。
 
 ## 许可证
 

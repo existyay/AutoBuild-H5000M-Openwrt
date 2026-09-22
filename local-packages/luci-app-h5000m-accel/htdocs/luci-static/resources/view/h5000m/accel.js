@@ -99,7 +99,9 @@ return view.extend({
 					[ '流表模块', (d.fw4_offload_kmod === '2' || d.fw4_offload_kmod === '1')
 						? '已加载' : '未加载' ],
 					[ 'Full-cone NAT', d.fullcone === '1'
-						? '模块已加载，防火墙已按 fullcone 生成规则'
+						? (d.fw_fullcone === '1'
+							? '模块已加载，防火墙已按 fullcone 生成规则'
+							: '模块已加载，但开关未开启 —— 当前仍是 masquerade')
 						: '模块未加载 —— 开关打开也不会生效' ],
 					[ 'eBPF 内核支持', ebpfKernelText ],
 					[ 'eBPF cgroup 支持', ebpfCgroupText ],
@@ -114,12 +116,14 @@ return view.extend({
 					'不是本页的判断。'
 				];
 
-				if (d.fullcone === '1')
-					notes.push('Full-cone NAT：模块已加载。');
+				if (d.fullcone === '1' && d.fw_fullcone === '1')
+					notes.push('Full-cone NAT：模块已加载，防火墙已按 fullcone 生成规则。');
+				else if (d.fullcone === '1')
+					notes.push('Full-cone NAT：模块已加载，但开关未开启，当前仍是 masquerade。');
 				else
-					notes.push('Full-cone NAT：主线 OpenWrt 不提供 nft-fullcone，内核也没有相应的 ' +
-						'conntrack 支持，因此本页不提供该开关 —— 一个打开也不会有任何作用的开关，' +
-						'比没有这个开关更糟。需要使用 full-cone 的场景，请改用具完整实现的第三方固件。');
+					notes.push('Full-cone NAT：nft_fullcone 模块未加载，此时上面的开关不会产生任何效果。' +
+						'本固件默认包含完整四层（内核模块、libnftnl、nftables、firewall4），' +
+						'出现此状态说明镜像被裁剪过，重新刷入本项目的完整固件即可。');
 
 				statusBox.replaceChildren(
 					E('h3', {}, '当前状态'),

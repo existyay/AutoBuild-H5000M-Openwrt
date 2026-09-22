@@ -79,6 +79,23 @@ FRONTENDS=(
 	luci-app-v2raya luci-app-adblock luci-app-adblock-fast
 )
 
+# The Chinese translation for every front-end above that ships one: upstream
+# publishes translations as their own package and nothing pulls them in, so the
+# promise "本体 + luci + 中文翻译" has to be asserted, not assumed.  The names
+# are fixed feed package names — NOT luci.mk-generated ones, which rename with
+# LuCI's language suffix (easymesh ships luci-i18n-easymesh-zh_Hans), which is
+# why the build treats the generated ones as warnings instead.  openclash,
+# nekobox and xray carry no separate translation upstream (verified against the
+# published index), so they are absent from this list on purpose.
+TRANSLATIONS=(
+	luci-i18n-passwall-zh-cn luci-i18n-passwall2-zh-cn
+	luci-i18n-ssr-plus-zh-cn luci-i18n-homeproxy-zh-cn
+	luci-i18n-nikki-rs-zh-cn luci-i18n-momo-zh-cn
+	luci-i18n-mosdns-zh-cn luci-i18n-hijpass-zh-cn
+	luci-i18n-fchomo-zh-cn luci-i18n-v2raya-zh-cn
+	luci-i18n-adblock-zh-cn luci-i18n-adblock-fast-zh-cn
+)
+
 # Cores and daemons: a front-end without one of these installs and then cannot
 # start a node.
 DAEMONS=(
@@ -206,6 +223,10 @@ echo
 
 echo "=== front-ends ==="
 for p in "${FRONTENDS[@]}"; do present "$p"; done
+echo
+
+echo "=== Chinese translations ==="
+for p in "${TRANSLATIONS[@]}"; do present "$p"; done
 echo
 
 echo "=== daemons and cores ==="

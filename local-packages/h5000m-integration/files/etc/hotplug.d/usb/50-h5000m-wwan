@@ -10,8 +10,16 @@
 
 [ "$ACTION" = "add" ] || exit 0
 [ "$DEVTYPE" = "usb_device" ] || exit 0
-[ "$ID_VENDOR_ID" = "3466" ] || exit 0
-[ "$ID_MODEL_ID" = "3301" ] || exit 0
+# PRODUCT is the "vendor/product/<bcdDevice>" string the kernel puts on every
+# USB uevent.  ID_VENDOR_ID / ID_MODEL_ID are udev-synthesized names that procd
+# never provides — checking those made this hook exit on every single event, so
+# the late-enumeration path this file exists for never ran once.  The mt5700m
+# panel's own hook (60-mt5700m) and wwand's hotplug both match PRODUCT; they
+# are the reference for what the environment actually carries.
+case "${PRODUCT:-}" in
+	3466/3301/*|3466/3301) ;;
+	*) exit 0 ;;
+esac
 [ -x /usr/sbin/h5000m-wwan-provision ] || exit 0
 
 # netifd may still be enumerating the netdev; one short retry is enough and

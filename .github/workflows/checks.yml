@@ -228,13 +228,39 @@ jobs:
           # These are cloned straight from their upstreams into package/ at
           # build time, so a rename, a force-push to a different default branch,
           # or a deletion would only surface deep inside a build.  Check here.
+          #
+          # The list mirrors every clone in scripts/local-build.sh
+          # (install_board_plugins, install_theme, install_external_packages,
+          # install_proxy_repos and the QModem feed): the board plugins and the
+          # theme are on the DEFAULT path, and the proxy trees are cloned on
+          # every default build because ENABLE_REPO_PACKAGES defaults to on —
+          # so a dead URL among them fails every build, not only the optional
+          # profiles.  All entries verified reachable when this list was
+          # extended (GitHub answers 200/301 for a live repository).
           fail=0
           for repo in \
             FAN789/luci-app-h5000m-fancontrol \
             FAN789/luci-app-h5000m-netmode \
             FAN789/luci-app-mt5700m \
             ddimension/openwrt-repo \
-            CHKayanami/OpenWrt-nikki-rs
+            CHKayanami/OpenWrt-nikki-rs \
+            jerrykuku/luci-theme-argon \
+            jerrykuku/luci-app-argon-config \
+            coolsnowwolf/luci \
+            Openwrt-Passwall/openwrt-passwall \
+            Openwrt-Passwall/openwrt-passwall2 \
+            Openwrt-Passwall/openwrt-passwall-packages \
+            nikkinikki-org/OpenWrt-momo \
+            fcshark-org/openwrt-fchomo \
+            fw876/helloworld \
+            immortalwrt/packages \
+            immortalwrt/homeproxy \
+            Thaolga/openwrt-nekobox \
+            yichya/luci-app-xray \
+            WROIATE/luci-app-hijpass \
+            vernesong/OpenClash \
+            sbwml/luci-app-mosdns \
+            FUjr/QModem
           do
             code="$(curl -s -o /dev/null -w '%{http_code}' \
               -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -412,9 +438,3 @@ jobs:
             exit 1
           fi
           echo "the fullcone module packaging workaround is present."
-
-  # ---------------------------------------------------------------------------
-  # Configuration coverage: every ENABLE_* profile must still produce a valid
-  # .config.  Independent of the firmware build, so a config regression does not
-  # stop a release.
-  # ---------------------------------------------------------------------------

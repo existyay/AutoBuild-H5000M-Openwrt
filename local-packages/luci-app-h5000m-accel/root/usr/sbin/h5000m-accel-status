@@ -14,6 +14,10 @@ echo "bbr=$(conf_get bbr)"
 # Effective firewall state — this is what decides whether offload happens.
 echo "fw_flow_offloading=$(fw_get flow_offloading)"
 echo "fw_flow_offloading_hw=$(fw_get flow_offloading_hw)"
+# The fullcone switch is written into the same section; reporting only the
+# module (below) let the page claim "firewall is generating fullcone rules"
+# while the switch itself was off and masquerade was still in force.
+echo "fw_fullcone=$(fw_get fullcone)"
 
 # Effective congestion control.
 cc="$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo unknown)"
@@ -79,9 +83,11 @@ echo "ppe_signal=${ppe_signal:-none}"
 entries="$(grep -c 'OFFLOAD' /proc/net/nf_conntrack 2>/dev/null || echo 0)"
 echo "flow_entries=${entries}"
 
-# Full-cone NAT.  Mainline OpenWrt has no nft-fullcone package and the kernel
-# carries no full-cone conntrack support, so this is reported as unavailable
-# rather than offered as a switch that would do nothing.
+# Full-cone NAT.  This firmware ships all four layers (kernel module, libnftnl,
+# nftables, firewall4 — see the nft-fullcone package), so "1" here means a real,
+# working feature; "0" means the module is not loaded and the page's switch
+# would do nothing.  Both facts are reported separately from the switch itself
+# (fw_fullcone above), because they fail independently.
 if [ -d /sys/module/nft_fullcone ] || grep -q '^nft_fullcone' /proc/modules 2>/dev/null; then
 	echo "fullcone=1"
 else
