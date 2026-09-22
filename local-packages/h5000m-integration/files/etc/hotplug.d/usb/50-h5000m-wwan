@@ -17,7 +17,7 @@
 # panel's own hook (60-mt5700m) and wwand's hotplug both match PRODUCT; they
 # are the reference for what the environment actually carries.
 case "${PRODUCT:-}" in
-	3466/3301/*|3466/3301) ;;
+	3466/3301/* | 3466/3301) ;;
 	*) exit 0 ;;
 esac
 [ -x /usr/sbin/h5000m-wwan-provision ] || exit 0

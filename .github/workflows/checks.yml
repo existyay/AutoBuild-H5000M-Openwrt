@@ -36,6 +36,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # zizmor artipacked: a checkout leaves GITHUB_TOKEN in .git/config,
+          # where any later step — including a third-party package's build
+          # script — can read it.  Nothing in these jobs pushes to the repo.
+          persist-credentials: false
 
       - name: Install configuration-stage dependencies
         run: |
@@ -55,10 +60,49 @@ jobs:
 
       - name: ShellCheck (errors only)
         run: |
+          set -euo pipefail
           # -S error: fail on real bugs (unbound variables, bad expansions) but
           # not on style.  This is the class of bug that `local a="$1" b="${a}"`
           # is: every argument is expanded before any of them is assigned.
-          shellcheck -S error scripts/*.sh
+          #
+          # Coverage gap this closes: the step used to lint ONLY scripts/*.sh,
+          # which left the nine device-side scripts under local-packages/
+          # unchecked — and those are the ones that run as ROOT on the router
+          # (first boot, USB hotplug, uci-defaults, the acceleration applier).
+          # A bug there is strictly worse than one in a build script.
+          mapfile -t files < <(
+            printf '%s\n' scripts/*.sh
+            find local-packages -type f \
+              \( -path '*/usr/sbin/*' -o -path '*/uci-defaults/*' \
+                 -o -path '*/hotplug.d/*' -o -path '*/etc/init.d/*' \) \
+              -not -name '*.json' -not -name '*.js'
+          )
+          printf 'linting %d file(s):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          shellcheck -S error "${files[@]}"
+
+      - name: actionlint (workflow schema)
+        run: |
+          set -euo pipefail
+          # Mirrors the pre-commit hook exactly (same version, same args), so a
+          # contributor who runs `pre-commit install` cannot pass locally and
+          # fail here.  `-shellcheck=` because shellcheck runs as its own step
+          # over a wider file set.
+          #
+          # This is the tool that catches what a YAML parse cannot: the
+          # `workflow_dispatch` 10-input ceiling (this repo had 13), `uses` and
+          # `run` in one step, unknown expression contexts.
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -shellcheck= .github/workflows/*.yml
+
+      - name: zizmor (workflow supply chain)
+        run: |
+          set -euo pipefail
+          # Same version and persona as the security.yml job and the pre-commit
+          # hook.  Kept here too so the CHEAP gate on every PR catches a
+          # supply-chain regression without waiting for the security workflow.
+          pip install --disable-pip-version-check "zizmor==1.5.2"
+          zizmor --persona=auditor .github/workflows/
 
       - name: Verify target support upstream
         run: |
@@ -195,7 +239,7 @@ jobs:
             name=$(sed -n 's/^PKG_NAME:=//p' "$SRC/$pkgdir/Makefile" | head -1)
             sha=$(sed -n 's/^PKG_SOURCE_VERSION:=//p' "$SRC/$pkgdir/Makefile" | head -1)
             echo "--- $(basename "$patch") against $name ${sha:0:12}"
-            rm -rf "$WORK/$name"; mkdir -p "$WORK/$name"
+            rm -rf "${WORK:?}/${name:?}"; mkdir -p "$WORK/$name"
             git -C "$WORK/$name" init -q .
             git -C "$WORK/$name" remote add origin "$repo"
             if ! git -C "$WORK/$name" fetch -q --depth 1 origin "$sha"; then

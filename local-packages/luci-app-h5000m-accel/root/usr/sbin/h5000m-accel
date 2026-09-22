@@ -35,9 +35,9 @@ apply_ebpf_proxy() {
 	modprobe veth 2>/dev/null
 
 	case "$want" in
-		on|1)  want=1 ;;
-		off|0) want=0 ;;
-		*)     return 0 ;;   # keep / empty / unknown: this page does not manage it
+		on | 1) want=1 ;;
+		off | 0) want=0 ;;
+		*) return 0 ;; # keep / empty / unknown: this page does not manage it
 	esac
 
 	# Nothing to drive unless Nikki-RS is installed.  Touching its UCI anyway
@@ -79,9 +79,17 @@ apply_settings() {
 	profile="$(uci -q get ${CONF}.settings.profile || echo performance)"
 	fullcone="$(uci -q get ${CONF}.settings.fullcone || echo 0)"
 	case "$profile" in
-		performance) offload=1; hw=1; bbr=1 ;;
-		compat)      offload=1; hw=0; bbr=0 ;;
-		*)           # custom: read the switches, defaulting to the safe value
+		performance)
+			offload=1
+			hw=1
+			bbr=1
+			;;
+		compat)
+			offload=1
+			hw=0
+			bbr=0
+			;;
+		*) # custom: read the switches, defaulting to the safe value
 			offload="$(uci -q get ${CONF}.settings.flow_offload || echo 1)"
 			hw="$(uci -q get ${CONF}.settings.flow_offload_hw || echo 0)"
 			bbr="$(uci -q get ${CONF}.settings.bbr || echo 0)"
@@ -117,8 +125,8 @@ apply_settings() {
 		# reporting "cubic" on a device where BBR had been switched on.
 		modprobe tcp_bbr 2>/dev/null
 		if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-			sysctl -qw net.ipv4.tcp_congestion_control=bbr 2>/dev/null \
-				|| log "could not switch to bbr"
+			sysctl -qw net.ipv4.tcp_congestion_control=bbr 2>/dev/null ||
+				log "could not switch to bbr"
 		else
 			log "bbr is not available (kmod-tcp-bbr missing?); staying on $(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)"
 		fi

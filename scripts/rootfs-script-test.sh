@@ -55,27 +55,45 @@ trap 'rm -rf "$WORK"' EXIT
 pass=0
 fail=0
 
-ok()   { printf '  \033[1;32mPASS\033[0m %s\n' "$1"; pass=$((pass + 1)); }
-bad()  { printf '  \033[1;31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
+ok() {
+	printf '  \033[1;32mPASS\033[0m %s\n' "$1"
+	pass=$((pass + 1))
+}
+bad() {
+	printf '  \033[1;31mFAIL\033[0m %s\n' "$1"
+	fail=$((fail + 1))
+}
 check() { # check <description> <expected> <actual>
 	if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1 — expected [$2], got [$3]"; fi
 }
 
-[ -n "$QEMU_AARCH64" ] || { echo "qemu-aarch64-static not found; see the header of this script" >&2; exit 2; }
-[ -f "$ROOTFS_TARBALL" ] || { echo "rootfs tarball not found: $ROOTFS_TARBALL" >&2; exit 2; }
+[ -n "$QEMU_AARCH64" ] || {
+	echo "qemu-aarch64-static not found; see the header of this script" >&2
+	exit 2
+}
+[ -f "$ROOTFS_TARBALL" ] || {
+	echo "rootfs tarball not found: $ROOTFS_TARBALL" >&2
+	exit 2
+}
 
 echo "== extracting $(basename "$ROOTFS_TARBALL")"
 mkdir -p "$WORK/root"
 tar -xzf "$ROOTFS_TARBALL" -C "$WORK/root"
 
 UCI="$WORK/root/sbin/uci"
-[ -x "$UCI" ] || { echo "no uci in the rootfs" >&2; exit 2; }
-file "$UCI" | grep -q aarch64 || { echo "$UCI is not aarch64 — wrong artifact?" >&2; exit 2; }
+[ -x "$UCI" ] || {
+	echo "no uci in the rootfs" >&2
+	exit 2
+}
+file "$UCI" | grep -q aarch64 || {
+	echo "$UCI is not aarch64 — wrong artifact?" >&2
+	exit 2
+}
 
 # The real uci, with -c so it reads and writes our scratch config dir and never
 # the host's /etc/config.
 mkdir -p "$WORK/bin" "$WORK/config"
-cat > "$WORK/bin/uci" <<EOF
+cat >"$WORK/bin/uci" <<EOF
 #!/bin/sh
 exec "${QEMU_AARCH64}" -L "$WORK/root" "$UCI" -c "$WORK/config" "\$@"
 EOF
@@ -85,13 +103,16 @@ export PATH="$WORK/bin:$PATH"
 # The script under test, with its absolute runtime paths redirected.  Only the
 # paths change; the uci invocations are exactly what ships.
 SCRIPT="$WORK/root/usr/sbin/h5000m-firstboot"
-[ -f "$SCRIPT" ] || { echo "h5000m-firstboot missing from the rootfs" >&2; exit 2; }
+[ -f "$SCRIPT" ] || {
+	echo "h5000m-firstboot missing from the rootfs" >&2
+	exit 2
+}
 sed -e "s|/etc/config/|$WORK/config/|g" \
-    -e "s|/etc/h5000m-defaults.conf|$WORK/h5000m-defaults.conf|g" \
-    -e "s|/etc/h5000m-wifi-applied|$WORK/marker-wifi|g" \
-    -e "s|/etc/h5000m-offload-applied|$WORK/marker-offload|g" \
-    -e 's|^\[ -n "${IPKG_INSTROOT:-}" \]|false|' \
-    "$SCRIPT" > "$WORK/firstboot"
+	-e "s|/etc/h5000m-defaults.conf|$WORK/h5000m-defaults.conf|g" \
+	-e "s|/etc/h5000m-wifi-applied|$WORK/marker-wifi|g" \
+	-e "s|/etc/h5000m-offload-applied|$WORK/marker-offload|g" \
+	-e 's|^\[ -n "${IPKG_INSTROOT:-}" \]|false|' \
+	"$SCRIPT" >"$WORK/firstboot"
 
 # /etc/h5000m-defaults.conf as the package installs it.
 cp "$WORK/root/etc/h5000m-defaults.conf" "$WORK/h5000m-defaults.conf"
@@ -99,7 +120,7 @@ cp "$WORK/root/etc/h5000m-defaults.conf" "$WORK/h5000m-defaults.conf"
 . "$WORK/h5000m-defaults.conf"
 
 seed_wireless() { # seed_wireless <ssid>
-	cat > "$WORK/config/wireless" <<EOF
+	cat >"$WORK/config/wireless" <<EOF
 config wifi-device 'radio0'
 	option type 'mac80211'
 	option band '2g'
@@ -120,7 +141,7 @@ config wifi-iface 'default_radio1'
 	option mode 'ap'
 	option ssid '$1'
 EOF
-	printf "config defaults\n\toption input 'REJECT'\n" > "$WORK/config/firewall"
+	printf "config defaults\n\toption input 'REJECT'\n" >"$WORK/config/firewall"
 	rm -f "$WORK/marker-wifi" "$WORK/marker-offload"
 }
 
@@ -129,15 +150,15 @@ echo "== profile: untouched first boot — WiFi must come up and offload turn on
 seed_wireless OpenWrt
 sh "$WORK/firstboot"
 
-check "radio0.country"       "$H5000M_WIFI_COUNTRY"  "$(uci -q get wireless.radio0.country)"
-check "radio0.disabled"      "0"                     "$(uci -q get wireless.radio0.disabled)"
-check "radio0.htmode"        "$H5000M_WIFI_HTMODE_2G" "$(uci -q get wireless.radio0.htmode)"
-check "radio1.htmode"        "$H5000M_WIFI_HTMODE_5G" "$(uci -q get wireless.radio1.htmode)"
-check "default_radio0.ssid"  "$H5000M_WIFI_SSID"     "$(uci -q get wireless.default_radio0.ssid)"
-check "default_radio0.key"   "$H5000M_WIFI_KEY"      "$(uci -q get wireless.default_radio0.key)"
-check "default_radio0.enc"   "$H5000M_WIFI_ENCRYPTION" "$(uci -q get wireless.default_radio0.encryption)"
-check "flow_offloading"      "$H5000M_FLOW_OFFLOAD"  "$(uci -q get firewall.@defaults[0].flow_offloading)"
-check "flow_offloading_hw"   "$H5000M_FLOW_OFFLOAD_HW" "$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
+check "radio0.country" "$H5000M_WIFI_COUNTRY" "$(uci -q get wireless.radio0.country)"
+check "radio0.disabled" "0" "$(uci -q get wireless.radio0.disabled)"
+check "radio0.htmode" "$H5000M_WIFI_HTMODE_2G" "$(uci -q get wireless.radio0.htmode)"
+check "radio1.htmode" "$H5000M_WIFI_HTMODE_5G" "$(uci -q get wireless.radio1.htmode)"
+check "default_radio0.ssid" "$H5000M_WIFI_SSID" "$(uci -q get wireless.default_radio0.ssid)"
+check "default_radio0.key" "$H5000M_WIFI_KEY" "$(uci -q get wireless.default_radio0.key)"
+check "default_radio0.enc" "$H5000M_WIFI_ENCRYPTION" "$(uci -q get wireless.default_radio0.encryption)"
+check "flow_offloading" "$H5000M_FLOW_OFFLOAD" "$(uci -q get firewall.@defaults[0].flow_offloading)"
+check "flow_offloading_hw" "$H5000M_FLOW_OFFLOAD_HW" "$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
 
 # The bug this test was written for: a value stored with literal quotes still
 # reads back looking plausible, so assert on the raw file too.
@@ -151,8 +172,8 @@ echo
 echo "== profile: owner already changed the SSID — nothing may be touched"
 seed_wireless MyOwnWiFi
 sh "$WORK/firstboot"
-check "ssid preserved"        "MyOwnWiFi" "$(uci -q get wireless.default_radio0.ssid)"
-check "radio0.disabled kept"  "1"         "$(uci -q get wireless.radio0.disabled)"
+check "ssid preserved" "MyOwnWiFi" "$(uci -q get wireless.default_radio0.ssid)"
+check "radio0.disabled kept" "1" "$(uci -q get wireless.radio0.disabled)"
 check "offload still applied" "$H5000M_FLOW_OFFLOAD" "$(uci -q get firewall.@defaults[0].flow_offloading)"
 
 echo
@@ -160,11 +181,11 @@ echo "== profile: /etc/config/wireless exists but is EMPTY (as the image ships i
 # The image ships an empty wireless file.  If the marker is written on the
 # strength of the file merely existing, the ieee80211 hotplug that later fills in
 # the radios finds the marker and skips for ever, and WiFi is never enabled.
-cat > "$WORK/config/firewall" <<'FWEOS'
+cat >"$WORK/config/firewall" <<'FWEOS'
 config defaults
 	option input 'REJECT'
 FWEOS
-: > "$WORK/config/wireless"
+: >"$WORK/config/wireless"
 rm -f "$WORK/marker-wifi" "$WORK/marker-offload"
 sh "$WORK/firstboot"
 if [ -e "$WORK/marker-wifi" ]; then
@@ -179,8 +200,8 @@ echo "== profile: marker present — second boot must be a no-op"
 seed_wireless OpenWrt
 touch "$WORK/marker-wifi" "$WORK/marker-offload"
 sh "$WORK/firstboot"
-check "radio0.disabled kept"  "1"  "$(uci -q get wireless.radio0.disabled)"
-check "offload not applied"   ""   "$(uci -q get firewall.@defaults[0].flow_offloading)"
+check "radio0.disabled kept" "1" "$(uci -q get wireless.radio0.disabled)"
+check "offload not applied" "" "$(uci -q get firewall.@defaults[0].flow_offloading)"
 
 printf '\n\033[1m== summary ==\033[0m\n  passed: %s\n  failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
