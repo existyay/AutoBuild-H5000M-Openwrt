@@ -705,6 +705,20 @@ verify_wwand_feed() {
 # The timestamp is mapped into 2000-2019 so it stays behind the stamps the build
 # writes, rather than landing in the future where it would look newer than
 # everything.
+#
+# The hash is converted with pure POSIX arithmetic and the subprocess is BASH,
+# not sh, and both of those are load-bearing.
+#
+# `$((16#$h))` is a bash-ism that dash rejects — `arithmetic expression:
+# expecting EOF: " 946684800 + 16#cc85f855 % 630720000 "` — and it fails once
+# per file, so the whole normalisation silently did nothing.  Debian/Ubuntu's
+# /bin/sh is dash, so this never reproduced on a machine whose sh is bash, but
+# every CI run printed it and every source file kept its checkout mtime.  Since
+# OpenWrt's package stamp is a hash of path AND mtime, that alone was enough to
+# make the restored build cache useless even when its bytes were intact.
+#
+# THE WHOLE POINT of this function is that the mtime is a pure function of the
+# content, so it must not depend on a shell whose arithmetic syntax varies.
 normalize_source_mtimes() {
 	[ -d "$SRC" ] || return 0
 
@@ -723,12 +737,28 @@ normalize_source_mtimes() {
 
 	log "Normalizing mtimes of ${count} source files (content-derived, for cache reuse)"
 	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null \
-		| xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 sh -c '
+		| xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 bash -c '
 			for f do
 				h=$(sha1sum "$f" 2>/dev/null | cut -c1-8) || continue
 				[ -n "$h" ] || continue
+				# 8 hex digits as an unsigned value: 16# is bash-only, so fold
+				# the nibbles explicitly.
+				n=0
+				i=0
+				while [ "$i" -lt 8 ]; do
+					c=${h:$i:1}
+					case "$c" in
+						[0-9]) d=$c ;;
+						a|A) d=10 ;; b|B) d=11 ;; c|C) d=12 ;; d|D) d=13 ;;
+						e|E) d=14 ;; f|F) d=15 ;;
+						*) n=""; break ;;
+					esac
+					n=$(( n * 16 + d ))
+					i=$(( i + 1 ))
+				done
+				[ -n "$n" ] || continue
 				# 2000-01-01 + (hash mod 20 years), always in the past.
-				touch -d "@$(( 946684800 + 16#$h % 630720000 ))" "$f" 2>/dev/null || true
+				touch -d "@$(( 946684800 + n % 630720000 ))" "$f" 2>/dev/null || true
 			done
 		' _ || warn "Some source mtimes could not be normalized"
 
