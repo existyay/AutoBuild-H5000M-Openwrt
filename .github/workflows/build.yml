@@ -1003,6 +1003,66 @@ jobs:
           fi
           echo "The published repository satisfies every front-end on its own."
 
+      # A loud build hides real problems.  The previous run printed 1722
+      # arithmetic errors and 68 Makefile warnings; the 1722 are fixed (they
+      # were normalize_source_mtimes using a bash-only `16#` under dash), and
+      # the rest are upstream feed metadata that we neither build nor select.
+      # This step separates the two so that a warning about something WE build
+      # fails the run instead of drowning in feed noise.
+      - name: Audit build warnings
+        working-directory: /o
+        run: |
+          set -uo pipefail
+          LOG=build.log
+          [ -f "$LOG" ] || { echo "::warning::no build.log to audit"; exit 0; }
+
+          strip() { sed 's/\x1b\[[0-9;]*m//g' "$LOG"; }
+
+          # Anything our own script printed as a warning.  These are intentional
+          # (mutually-exclusive switches, a missing optional tool) and the count
+          # is reported rather than failed on.
+          own="$(strip | grep -ac 'h5000m:warn' || true)"
+
+          # Arithmetic errors: this class is what made the log unreadable, and it
+          # means the mtime normalisation silently did nothing.
+          arith="$(strip | grep -ac 'arithmetic expression: expecting EOF' || true)"
+          if [ "$arith" != 0 ]; then
+            echo "::error::${arith} arithmetic errors in the build — normalize_source_mtimes is broken again (it must not use bash-only arithmetic under sh)"
+          fi
+
+          # Makefile metadata warnings, split three ways:
+          #   * feeds/*            upstream feed metadata, not our business
+          #   * baseline in-tree   OpenWrt's own packages warning about OPTIONAL
+          #                        deps that are simply not selected (busybox ->
+          #                        libpam, lldpd -> libnetsnmp, ...).  Normal,
+          #                        and not a defect; counted, not failed.
+          #   * this project       the trees we clone in and patch (ssr-plus,
+          #                        pas*wall, h5000m-*, nft-fullcone).  A
+          #                        dangling dependency here IS ours to fix.
+          strip | grep -aoE "WARNING: Makefile '[^']+'" \
+            | sed "s|^.*WARNING: Makefile '||; s|'$||" | sort -u > /tmp/warned.txt || true
+          upstream=0; baseline=0; ours=0
+          while IFS= read -r mk; do
+            [ -n "$mk" ] || continue
+            case "$mk" in
+              package/feeds/*) upstream=$((upstream + 1)) ;;
+              package/luci-app-ssr-plus/*|package/openwrt-passwall*/*|package/luci-app-h5000m-*/*|package/h5000m-*/*|package/nft-fullcone/*|package/luci-theme-argon/*|package/luci-app-argon-config/*|package/openwrt-nekobox/*|package/OpenWrt-*/*|package/OpenClash/*|package/homeproxy/*|package/openwrt-fchomo/*|package/luci-app-mosdns/*|package/luci-ssr-plus-3proxy/*|package/luci-easymesh/*)
+                ours=$((ours + 1))
+                echo "::error::${mk} has an unsatisfiable dependency — fix it here (see prune_dangling_depends in scripts/local-build.sh)"
+                ;;
+              *) baseline=$((baseline + 1)) ;;
+            esac
+          done < /tmp/warned.txt
+
+          echo "warning audit: ${own} script warning(s), ${arith} arithmetic error(s), ${ours} of this project's Makefiles, ${baseline} baseline OpenWrt (optional deps), ${upstream} upstream feed Makefiles"
+          echo "upstream/baseline warnings are informational:"
+          sed 's/^/  /' /tmp/warned.txt | head -20
+
+          if [ "$arith" != 0 ] || [ "$ours" != 0 ]; then
+            exit 1
+          fi
+          echo "No warnings about packages this project builds."
+
       - name: Collect build info
         if: always()
         run: |

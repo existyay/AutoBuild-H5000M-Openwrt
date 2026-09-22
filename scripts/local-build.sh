@@ -1589,6 +1589,51 @@ ensure_frontend_cores() {
 		mv "${mk}.tmp" "$mk"
 		log "  ${spec%%|*} now depends on: ${cores}"
 	done
+
+	# Drop dependencies on packages that no feed in this tree defines.
+	#
+	# luci-app-ssr-plus declares `+PACKAGE_..._INCLUDE_Kcptun:kcptun-client`,
+	# and no feed here has ever packaged kcptun-client, so every build prints
+	#
+	#   WARNING: Makefile 'package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile'
+	#            has a dependency on 'kcptun-client', which does not exist
+	#
+	# five times and the warning can never be satisfied.  We already force that
+	# INCLUDE_* switch off, so the clause is unreachable — but leaving it means a
+	# real dangling dependency would hide in the same noise.  Removing the
+	# `+PACKAGE_x:name` clause is safe: it only ever resolves to `name` when the
+	# switch is on, and we keep the switch off.
+	prune_dangling_depends
+	return 0
+}
+
+# Remove `+PACKAGE_<switch>:<pkg>` clauses whose <pkg> this tree cannot supply.
+#
+# The check is against what the tree actually defines rather than a hard-coded
+# list of bad names, so the rewrite stays correct if upstream renames or adds
+# one.  Deleting the whole line is enough and needs no continuation fixup: the
+# preceding line already ends in `\`, so make continues straight into the line
+# that follows the deleted one.
+prune_dangling_depends() {
+	local mk="${SRC}/package/luci-app-ssr-plus/luci-app-ssr-plus/Makefile"
+	local pkg pruned=0
+
+	[ -f "$mk" ] || return 0
+
+	for pkg in kcptun-client; do
+		grep -q ":${pkg}\b" "$mk" 2>/dev/null || continue
+		# A real package definition anywhere in the tree means the dependency
+		# is satisfiable and must be left alone.
+		if grep -rq "define Package/${pkg}\$" "${SRC}/package" "${SRC}/feeds" \
+			--include=Makefile 2>/dev/null; then
+			continue
+		fi
+		sed -i "\|:${pkg}|d" "$mk"
+		log "  pruned the dangling dependency on ${pkg} (no feed in this tree provides it)"
+		pruned=$((pruned + 1))
+	done
+
+	[ "$pruned" -eq 0 ] || log "Pruned ${pruned} unsatisfiable dependency clause(s)"
 	return 0
 }
 
