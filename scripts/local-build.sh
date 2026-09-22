@@ -2424,7 +2424,10 @@ configure_build() {
 	append_optional_config .config
 
 	log "Running defconfig"
-	run_with_timeout "$CONFIG_TIMEOUT" make defconfig \
+	# Keep defconfig's stderr: this is where OpenWrt reports
+	# "WARNING: Makefile ... has a dependency on X, which does not exist" for
+	# every package in the tree, and the audit below needs to see them.
+	run_with_timeout "$CONFIG_TIMEOUT" make defconfig 2>&1 | tee -a "$LOG_FILE" \
 		|| die "make defconfig failed"
 
 	# defconfig silently drops symbols whose dependencies were not satisfied.
@@ -2447,7 +2450,7 @@ configure_build() {
 	for pkg in "${REQUIRED_PACKAGES[@]}"; do
 		config_enable "$pkg"
 	done
-	run_with_timeout "$CONFIG_TIMEOUT" make defconfig \
+	run_with_timeout "$CONFIG_TIMEOUT" make defconfig 2>&1 | tee -a "$LOG_FILE" \
 		|| die "second make defconfig failed"
 
 	# Kernel symbols are read out of .config by the kernel build (see
@@ -2618,6 +2621,53 @@ verify_config() {
 	for pkg in "${EXPECTED_PACKAGES[@]}"; do
 		config_symbol_is_set "$pkg" || warn "expected package is absent: ${pkg}"
 	done
+
+	audit_own_warnings
+}
+
+# Fail early on a warning that is OUR defect, while ignoring upstream noise.
+#
+# `make defconfig` prints two kinds of text we cannot fix:
+#
+#   * upstream feed metadata — luci-app-bmx7/babeld declare bmx7/babeld, which
+#     the routing feed does not package.  Informational.
+#   * baseline OpenWrt packages warning about OPTIONAL dependencies that are
+#     simply not selected (busybox -> libpam, lldpd -> libnetsnmp,
+#     kexec-tools -> liblzma).  Perfectly normal.
+#
+# and one kind we can: a Makefile from a tree THIS project clones in and patches
+# carrying a dependency nothing in the tree provides.  luci-app-ssr-plus's
+# `+PACKAGE_..._INCLUDE_Kcptun:kcptun-client` was exactly that, printed five
+# times per build.  Running the audit here means such a defect stops the build
+# in the configuration stage (minutes) rather than after a three-hour compile.
+audit_own_warnings() {
+	local line mk ours=0 upstream=0 baseline=0 arith=0
+
+	# The arithmetic errors are counted separately: they come from our own
+	# mtime normalisation, and any occurrence means it silently did nothing.
+	arith="$(grep -ac 'arithmetic expression: expecting EOF' "$LOG_FILE" 2>/dev/null || true)"
+
+	# only the Makefile paths, deduplicated
+	while IFS= read -r mk; do
+		[ -n "$mk" ] || continue
+		case "$mk" in
+			package/feeds/*) upstream=$((upstream + 1)) ;;
+			package/luci-app-ssr-plus/*|package/openwrt-passwall*/*|package/luci-app-h5000m-*/*|package/h5000m-*/*|package/nft-fullcone/*|package/luci-theme-argon/*|package/luci-app-argon-config/*|package/openwrt-nekobox/*|package/OpenWrt-*/*|package/OpenClash/*|package/homeproxy/*|package/openwrt-fchomo/*|package/luci-app-mosdns/*|package/luci-ssr-plus-3proxy/*|package/luci-easymesh/*)
+				ours=$((ours + 1))
+				warn "our Makefile has an unsatisfiable dependency: ${mk}"
+				;;
+			*) baseline=$((baseline + 1)) ;;
+		esac
+	done < <(sed 's/\x1b\[[0-9;]*m//g' "$LOG_FILE" 2>/dev/null \
+		| grep -aoE "WARNING: Makefile '[^']+'" \
+		| sed "s|^.*WARNING: Makefile '||; s|'$||" | sort -u)
+
+	if [ "$ours" -ne 0 ]; then
+		die "${ours} Makefile(s) of ours declare dependencies this tree cannot satisfy — see prune_dangling_depends() and the emit lists in this script"
+	fi
+
+	log "Warning audit: ${ours} of ours, ${baseline} baseline OpenWrt (unselected optional deps), ${upstream} upstream feed, ${arith} arithmetic error(s)"
+	return 0
 }
 
 dump_enabled_packages() {
