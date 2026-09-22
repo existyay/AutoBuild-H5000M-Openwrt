@@ -311,6 +311,8 @@ jobs:
             "the accel apply script loads veth"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_kernel' \
             "the accel status script reports eBPF readiness"
+          want "$accel/root/usr/sbin/h5000m-accel-status" 'ls -d /sys/module/nf_flow_table' \
+            "the accel status counts module dirs, not their contents"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_veth' \
             "the accel status script reports veth readiness"
           want "$accel/htdocs/luci-static/resources/view/h5000m/accel.js" 'ebpf_proxy' \
@@ -376,6 +378,36 @@ jobs:
             exit 1
           fi
           echo "adblock DNS backend wiring is consistent."
+
+      # A real device found this one: kmod-nft-fullcone was installed and
+      # CONFIG_PACKAGE_kmod-nft-fullcone was =y, yet nft_fullcone.ko did not
+      # exist and `modprobe nft_fullcone` answered "failed to find a module".
+      # CONFIG_NFT_FULLCONE is not a symbol the kernel's own Kconfig knows, so
+      # `make syncconfig` strips it and include/kernel.mk generates an empty
+      # package.  local-packages/nft-fullcone/Makefile re-declares the symbol
+      # for the packaging decision; this asserts that workaround and the
+      # build-time gate that proves the module is staged.
+      - name: Verify the fullcone module packaging workaround is present
+        run: |
+          set -euo pipefail
+          fail=0
+          want() { if grep -q "$2" "$1"; then echo "  OK    $3"; else echo "  FAIL  $3"; fail=1; fi; }
+
+          want local-packages/nft-fullcone/Makefile '^CONFIG_NFT_FULLCONE=m$' \
+            "nft-fullcone Makefile sets CONFIG_NFT_FULLCONE for the install rule"
+          want local-packages/nft-fullcone/Makefile 'nft_fullcone.$(LINUX_KMOD_SUFFIX)' \
+            "nft-fullcone Makefile still declares the module file"
+          want .github/workflows/build.yml 'kmod-nft-fullcone carries nft_fullcone.ko' \
+            "build.yml asserts the module is really in the package"
+          want .github/workflows/build.yml 'kmod-nft-fullcone in the assembled rootfs' \
+            "build.yml asserts the module is in the rootfs"
+
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::the fullcone module packaging workaround is missing"
+            exit 1
+          fi
+          echo "the fullcone module packaging workaround is present."
 
   # ---------------------------------------------------------------------------
   # Configuration coverage: every ENABLE_* profile must still produce a valid

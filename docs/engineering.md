@@ -1430,6 +1430,34 @@ nftables 时代实现 fullcone 需要四层同时正确，缺任何一层都不�
   破坏既有规则串接的可能（模板的空格控制 `{%-` `-%}` 很容易在这一步出错）。
   `fw4.uc` 另用 `ucode -c` 做语法编译检查。
 
+**真机上又抓出第 6 个缺陷：`kmod-nft-fullcone` 是个空包。** 设备上
+`apk list -I kmod-nft-fullcone` 显示已安装、`.config` 里 `=y`、build_dir 里也有
+229 KB 的 `nft_fullcone.ko`，但 `modprobe nft_fullcone` 报
+`failed to find a module named nft_fullcone`，`find /lib/modules -name '*fullcone*'`
+为空——包本身只有 **1066 字节**，除元数据外什么都没有。
+
+根因是 out-of-tree 模块的 Kconfig 符号被 `syncconfig` 丢掉：
+
+```
+src/Kconfig 从未被内核树 source  ->  NFT_FULLCONE 不是内核已知符号
+scripts/package-metadata.pl kconfig 写入 CONFIG_NFT_FULLCONE=m
+  -> make syncconfig 从 $(LINUX_DIR)/.config 里删掉这个未知符号
+  -> include/kernel.mk 的 $(filter m y,$(CONFIG_NFT_FULLCONE)) 为空
+  -> 走 "not available in the kernel config - generating empty package" 分支
+  -> Package/kmod-nft-fullcone/install 被定义成 `true`
+```
+
+`Build/Compile` 里显式传的 `CONFIG_NFT_FULLCONE=m` 只保证 `.ko` 被编出来，**管不到
+打包判定**，所以「编译成功」与「模块进包」是两件事。*修*：在
+`local-packages/nft-fullcone/Makefile` 的 `$(eval $(call KernelPackage,…))` 之前补一行
+`CONFIG_NFT_FULLCONE=m`，让打包判定也看到该符号。修复后 `.apk` 从 1066 B 变成 10 KB，
+`.pkgdir`、rootfs 与 `.list` 里都出现 `lib/modules/6.18.52/nft_fullcone.ko` 与
+`/etc/modules.d/nft-fullcone`。
+
+发布门禁也一起改了：旧断言只看「`bin/.../kmod-nft-fullcone*.apk` 是否存在」，空包
+照样通过；现在断言 **`.pkgdir` 与 rootfs 里真的有 `nft_fullcone.ko`**。这类「包在、
+文件不在」的缺陷只有看文件才能抓出来，配置符号和包名都是对的。
+
 **qemu-user 的两条硬边界**（踩到就会浪费很多时间，记下来）：
 
 * **开了 `pack-relative-relocs` 的动态链接目标程序跑不起来**。OpenWrt 的

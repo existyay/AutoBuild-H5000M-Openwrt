@@ -558,10 +558,19 @@ jobs:
             'find openwrt/build_dir/target-*/linux-*/nft-fullcone -name nft_fullcone.ko | grep -q .'
           check "the module registers the fullcone expression" \
             'strings $(find openwrt/build_dir/target-*/linux-*/nft-fullcone -name nft_fullcone.ko | head -1) | grep -qx fullcone'
-          check "kmod-nft-fullcone is in the image root or packaged for it" \
+          # The previous version of this check accepted any
+          # bin/.../kmod-nft-fullcone*.apk, and a real device exposed what that
+          # misses: CONFIG_NFT_FULLCONE is not a symbol the kernel's own Kconfig
+          # knows, `make syncconfig` stripped it from $(LINUX_DIR)/.config, and
+          # include/kernel.mk then generated a 1066-byte package with the right
+          # metadata and NO nft_fullcone.ko.  Everything else — the userspace
+          # layers, the =y symbol — looked correct.  The .pkgdir / rootfs
+          # assertions are the ones that prove the module can actually load.
+          check "kmod-nft-fullcone carries nft_fullcone.ko (package not empty)" \
+            'find openwrt/build_dir/target-*/linux-*/nft-fullcone/.pkgdir/kmod-nft-fullcone -name nft_fullcone.ko | grep -q .'
+          check "kmod-nft-fullcone in the assembled rootfs" \
             'find openwrt/build_dir/target-*/root-* -name nft_fullcone.ko | grep -q . ||
-             grep -rqs kmod-nft-fullcone openwrt/build_dir/target-*/root-*/usr/lib/apk/db/installed ||
-             find openwrt/bin -name "kmod-nft-fullcone*" | grep -q .'
+             find openwrt/staging_dir/target-*/root-* -name nft_fullcone.ko | grep -q .'
 
           echo; echo "=== layer 2+3: libnftnl and nftables userspace ==="
           # This is the assertion that the broken patch fails: without src/expr/fullcone.c

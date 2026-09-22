@@ -88,7 +88,12 @@ else
 	echo "fullcone=0"
 fi
 
-echo "fw4_offload_kmod=$(ls /sys/module/nf_flow_table /sys/module/nft_flow_offload 2>/dev/null | wc -l)"
+# -d: list the two module directories themselves, not their contents.  Without
+# it `ls /sys/module/nf_flow_table` prints every file inside the module
+# directory, `wc -l` returns a number far larger than 2, and the LuCI page —
+# which only accepts 1 or 2 — reported "流表模块 未加载" on a device where both
+# modules were loaded and 7 conntrack entries were already offloaded.
+echo "fw4_offload_kmod=$(ls -d /sys/module/nf_flow_table /sys/module/nft_flow_offload 2>/dev/null | wc -l)"
 
 # --- eBPF proxy (Nikki-RS / clash-rs) ----------------------------------------
 #

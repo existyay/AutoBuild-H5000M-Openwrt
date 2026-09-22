@@ -83,4 +83,30 @@ define Build/Compile
 		modules
 endef
 
+# Make the module's Kconfig symbol visible to include/kernel.mk, or the package
+# is generated EMPTY.
+#
+# CONFIG_NFT_FULLCONE is not a symbol the kernel's own Kconfig knows about — the
+# module is out-of-tree, its src/Kconfig is never sourced by the kernel tree —
+# so `make syncconfig` strips CONFIG_NFT_FULLCONE out of $(LINUX_DIR)/.config no
+# matter what scripts/package-metadata.pl kconfig wrote into .config.override.
+# include/kernel.mk then evaluates
+#
+#   $(if $(filter-out %=y %=n %=m,$(KCONFIG)),$(filter m y,$($(c))),.)
+#
+# with `$($(c))` empty, takes the "not available in the kernel config" branch,
+# and defines Package/kmod-nft-fullcone/install as `true` — an .apk with the
+# right metadata, the right kernel-version dependency, and NO nft_fullcone.ko.
+# Measured: the package was 1066 bytes and `modprobe nft_fullcone` on a real
+# device answered "failed to find a module named nft_fullcone".
+#
+# Build/Compile above already passes CONFIG_NFT_FULLCONE=m to the kernel make, so
+# the .ko itself exists in $(PKG_BUILD_DIR); only the packaging decision needs
+# the symbol.  Setting it as a make variable here (after the includes, before the
+# eval) is what turns the empty package back into one that carries the module.
+# Do not "simplify" this away: nothing else in the tree re-adds the symbol, and
+# the failure is silent — the build succeeds and ships a fullcone that cannot
+# load.
+CONFIG_NFT_FULLCONE=m
+
 $(eval $(call KernelPackage,nft-fullcone))
