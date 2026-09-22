@@ -410,6 +410,60 @@ jobs:
           fi
           echo "adblock DNS backend wiring is consistent."
 
+      # A build-time measurement, not a style rule: luci-theme-spectra is a pure
+      # CSS/JS theme whose Makefile declares +php8 +php8-cgi +ffmpeg.  Emitting
+      # it dragged ffmpeg into the build, and ffmpeg alone was ~72 of the 211
+      # minutes a full build measured — 34% of the run.  It is not in the README
+      # and nothing selects it, so it stays out; this keeps it out on purpose.
+      - name: Verify the heavyweight optional theme is not built
+        run: |
+          set -euo pipefail
+          fail=0
+          if grep -qE '^[^#]*emit_service.*luci-theme-spectra' scripts/local-build.sh; then
+            echo "  FAIL  luci-theme-spectra is emitted again (pulls php8 + ffmpeg; ~72 min of build)"
+            fail=1
+          else
+            echo "  OK    luci-theme-spectra is not emitted"
+          fi
+          if grep -qE '^[^#]*[[:space:]]emit_service|^[[:space:]]*luci-theme-spectra[[:space:]]*\\?$' scripts/local-build.sh \
+             && grep -qE '^[[:space:]]*luci-theme-spectra[[:space:]]*\\?$' scripts/local-build.sh; then
+            echo "  FAIL  luci-theme-spectra still appears in an emit list"
+            fail=1
+          else
+            echo "  OK    luci-theme-spectra is absent from every emit list"
+          fi
+          # The theme's cost only stays out if ffmpeg is not requested by name
+          # anywhere else in the build either.
+          if grep -qE '^[^#]*emit_service.*\bffmpeg\b' scripts/local-build.sh; then
+            echo "  FAIL  ffmpeg is emitted by name"
+            fail=1
+          else
+            echo "  OK    ffmpeg is not emitted by name"
+          fi
+          # The host-tool half of the toolchain cache is what stops cmake and
+          # friends from being rebuilt every run.
+          if grep -q 'build_dir/host' .github/workflows/build.yml \
+             && grep -q 'exclude=.build_dir/host/rustc' .github/workflows/build.yml; then
+            echo "  OK    build_dir/host is cached (minus the rust host tree)"
+          else
+            echo "  FAIL  build_dir/host is not cached, or the rust exclusion was dropped"
+            fail=1
+          fi
+          # A rejected cache has to be REMOVED, not merely reported: leaving a
+          # partial 9 GB blob behind makes the next transfer pointless.
+          if grep -q 'cache is complete and intact' .github/workflows/build.yml; then
+            echo "  OK    the build cache is validated and rejected copies are removed"
+          else
+            echo "  FAIL  the build cache is not pre-validated in the workflow"
+            fail=1
+          fi
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::the heavyweight theme / cache wiring regressed"
+            exit 1
+          fi
+          echo "The heavyweight optional theme is not built and the caches are wired."
+
       # A real device found this one: kmod-nft-fullcone was installed and
       # CONFIG_PACKAGE_kmod-nft-fullcone was =y, yet nft_fullcone.ko did not
       # exist and `modprobe nft_fullcone` answered "failed to find a module".

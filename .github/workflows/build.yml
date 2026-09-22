@@ -232,24 +232,43 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
           echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Clean slate first.  A failed or interrupted pull leaves a partial
+          # blob in .buildcache, and the build then picks it up and tries to
+          # unpack it.  Measured on a real run: a truncated 9.4 GB tar cost the
+          # entire transfer and was thrown away by the build's own zstd -t check
+          # ("truncated or corrupt; ignoring it"), so all 342 packages were
+          # rebuilt from scratch and the cache bought nothing.
+          rm -rf .buildcache
           mkdir -p .buildcache
-          if oras pull "${image}:${tag}" -o .buildcache 2>/dev/null; then
-            echo "restored $(du -sh .buildcache | cut -f1) from ${image}:${tag}"
-            # Verify before the build trusts it.  A cache that is present but
-            # damaged is worse than no cache at all: it costs the transfer and
-            # then fails late.
-            if [ -f .buildcache/build-cache.sha256 ]; then
-              if ( cd .buildcache && sha256sum -c build-cache.sha256 ); then
-                echo "cache checksum OK"
-              else
-                echo "::warning::build cache checksum FAILED — discarding it and building from scratch"
-                rm -rf .buildcache
-              fi
-            else
-              echo "::warning::no checksum sidecar; cannot verify the build cache"
-            fi
-          else
+          if ! oras pull "${image}:${tag}" -o .buildcache 2>/dev/null; then
             echo "no build cache at ${image}:${tag} yet — this run will create it"
+            rm -rf .buildcache
+            mkdir -p .buildcache
+            exit 0
+          fi
+          echo "downloaded $(du -sh .buildcache | cut -f1) from ${image}:${tag}"
+
+          # Verify before the build trusts it.  A present-but-damaged cache is
+          # worse than none at all: it costs the transfer and then fails late.
+          # The sidecar alone is not sufficient — an interrupted pull carries a
+          # partial sidecar too — so the archive's own integrity is checked as
+          # well, and anything that fails is removed rather than left for the
+          # build to find.
+          reason=""
+          if [ ! -f .buildcache/build-cache.sha256 ]; then
+            reason="no checksum sidecar"
+          elif ! ( cd .buildcache && sha256sum -c build-cache.sha256 ); then
+            reason="checksum mismatch"
+          elif command -v zstd >/dev/null 2>&1 \
+            && ! zstd -t .buildcache/build-cache.tar.zst >/dev/null 2>&1; then
+            reason="zstd integrity check failed"
+          fi
+          if [ -n "$reason" ]; then
+            echo "::warning::build cache rejected (${reason}) — discarding it and building from scratch"
+            rm -rf .buildcache
+            mkdir -p .buildcache
+          else
+            echo "cache is complete and intact; the build will reuse it"
           fi
 
       - name: Restore ccache
@@ -374,10 +393,19 @@ jobs:
           (
             cd openwrt
             shopt -s nullglob
-            dirs=(build_dir/toolchain-* staging_dir/host staging_dir/toolchain-*)
+            # build_dir/host carries the host tools' .built stamps.  Without it
+            # every run recompiles all ~55 host tools even though
+            # staging_dir/host was restored — measured at 18 minutes, 10 of them
+            # in cmake alone.  rust is excluded: its HOST_BUILD_DIR is
+            # build_dir/host/rustc-<ver>-src, and a host build tree captured at
+            # a different moment is the documented reason a restored cache once
+            # broke `package/feeds/packages/rust [host]` 72 seconds into a
+            # build.  The host tools themselves are cheap and safe to reuse.
+            dirs=(build_dir/toolchain-* build_dir/host staging_dir/host staging_dir/toolchain-*)
             [ "${#dirs[@]}" -gt 0 ] || { echo "::warning::no toolchain to cache"; exit 0; }
             echo "caching: ${dirs[*]}"
-            tar -I 'zstd -1' -cf ../.toolchain-cache/toolchain.tar.zst "${dirs[@]}"
+            tar -I 'zstd -1' --exclude='build_dir/host/rustc*' \
+              -cf ../.toolchain-cache/toolchain.tar.zst "${dirs[@]}"
           )
           echo "packed $(du -h .toolchain-cache/toolchain.tar.zst | cut -f1)"
 
@@ -425,7 +453,14 @@ jobs:
           # moved for nothing and no indication of why.
           ( cd .buildcache && sha256sum build-cache.tar.zst > build-cache.sha256 )
           ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst build-cache.sha256 )
-          echo "pushed to ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
+          # Confirm the push actually landed.  This step is continue-on-error, so
+          # a half-finished upload is otherwise invisible — and it is not free:
+          # the next run transfers the whole archive before rejecting it.
+          if oras manifest fetch "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" >/dev/null 2>&1; then
+            echo "pushed and verified ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
+          else
+            echo "::warning::the build cache push could not be verified; the next run will rebuild from scratch"
+          fi
 
       # This is the step that has to work, because everything else about a
       # failure is guesswork without it.

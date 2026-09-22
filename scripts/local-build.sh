@@ -803,7 +803,8 @@ seed_cached_build_state() {
 	# Test the compressed stream before spending minutes unpacking it into the
 	# tree.  A truncated archive fails with "premature end" part-way through,
 	# which leaves a half-populated build_dir behind and makes the real cause
-	# hard to see.
+	# hard to see.  The caller (CI) now removes a cache that fails this test, but
+	# keep the check here too: this script is also run by hand.
 	if command -v zstd >/dev/null 2>&1; then
 		if ! zstd -t "$archive" >/dev/null 2>&1; then
 			warn "Cached build state at ${archive} is truncated or corrupt (zstd -t failed); ignoring it"
@@ -2197,12 +2198,20 @@ EOF
 	# who runs `apk add luci-app-passwall` and gets a UI with no Chinese is the
 	# failure this prevents -- upstream ships the translation as its own package
 	# and nothing pulls it in automatically.
+	#
+	# luci-theme-spectra is deliberately NOT in this list.  Its Makefile declares
+	# LUCI_DEPENDS:=+curl +php8 +php8-cgi +php8-mod-curl +php8-mod-zip
+	# +php8-mod-mbstring +ffmpeg on a pure CSS/JS theme, and ffmpeg alone measured
+	# ~72 minutes of a 211-minute CI build — 34% of the whole run — for a package
+	# this project never promises (it is not in the README and nothing selects
+	# it).  Leaving it out removes that leg entirely.  luci-app-nekobox is
+	# unaffected: its own UI fetches the theme at runtime if a user asks for it.
 	emit_service "" \
 		luci-app-passwall luci-i18n-passwall-zh-cn \
 		luci-app-passwall2 luci-i18n-passwall2-zh-cn \
 		luci-app-momo luci-i18n-momo-zh-cn momo \
 		luci-app-fchomo luci-i18n-fchomo-zh-cn mihomo \
-		luci-app-nekobox luci-theme-spectra \
+		luci-app-nekobox \
 		luci-app-xray luci-app-xray-geodata luci-app-xray-status \
 		luci-app-hijpass luci-i18n-hijpass-zh-cn \
 		v2raya luci-app-v2raya
