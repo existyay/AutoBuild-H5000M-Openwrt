@@ -135,7 +135,38 @@ jobs:
         with:
           persist-credentials: false
 
+      # Dependency Review requires the repository's Dependency Graph to be
+      # enabled (Settings -> Security -> Dependency graph).  Without it the
+      # action fails outright with
+      #
+      #   Dependency review is not supported on this repository.
+      #
+      # which is a repository setting, not a defect in the change under review —
+      # so a missing graph must not block every PR.  `continue-on-error` is
+      # deliberately NOT used: that would hide a real vulnerability finding once
+      # the graph IS enabled.  Instead the step checks the precondition and
+      # reports clearly, so the gate becomes active the moment the setting is
+      # switched on and nothing else has to change.
+      - name: Check the Dependency Graph precondition
+        id: depgraph
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          # Probe the SBOM endpoint: it requires the Dependency Graph and
+          # returns the repository's own package list when it is on.  An empty
+          # `compare` range also succeeds when the graph is OFF, so that
+          # endpoint cannot distinguish the two states; this one can.
+          if gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" >/dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency Graph is enabled; Dependency Review will run."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Dependency Graph is not enabled for this repository, so Dependency Review cannot run. Enable it at https://github.com/${GITHUB_REPOSITORY}/settings/security_analysis (Settings -> Security -> Dependency graph). This gate activates automatically once it is on."
+          fi
+
       - name: Dependency review
+        if: steps.depgraph.outputs.enabled == 'true'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           # Fail closed: a PR that introduces a known-vulnerable or
