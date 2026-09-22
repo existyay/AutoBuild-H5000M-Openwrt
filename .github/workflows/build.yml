@@ -287,10 +287,6 @@ jobs:
         # under its 108-byte limit.
         env:
           BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
-        run: |
-          set -euo pipefail
-          cd "$BUILD_DIR"
-          args=()
           # Keep ccache from growing past what the repository's 10 GB cache
           # budget can hold alongside the toolchain and the downloads.
           CCACHE_MAXSIZE: 2G
@@ -331,6 +327,7 @@ jobs:
           PREBUILD_PACKAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.prebuild_packages || '' }}
         run: |
           set -euo pipefail
+          cd "$BUILD_DIR"
           args=()
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.pinned }}" = "true" ]; then
             args+=(--pinned)
