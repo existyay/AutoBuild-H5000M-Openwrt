@@ -175,10 +175,13 @@ return view.extend({
 		o = s.option(form.ListValue, 'ebpf_proxy', 'eBPF 代理（Nikki-RS）',
 			'把透明代理的快路径交给内核：Nikki-RS（clash-rs）在 LAN/WAN 网卡上挂 TC eBPF ' +
 			'程序，并可用 cgroup BPF 做本机/进程分流。' +
-			'<br />这需要固件内置 eBPF 内核支持（本固件默认包含），并且只在装了 Nikki-RS ' +
-			'时才有效果。' +
+			'<br />这需要固件内置 eBPF 内核支持（本固件默认包含，' +
+			'<strong>不需要额外装 dae 去补依赖</strong>），并且只在装了 Nikki-RS 时才有效果。' +
 			'<br /><strong>开启后 Nikki-RS 原来的 TProxy / Redirect 分流配置会失效</strong>，' +
-			'这是 clash-rs eBPF 模式的设计。' +
+			'这是 clash-rs eBPF 模式的设计；eBPF 是独立开关，不在 TCP/UDP 模式里选。' +
+			'<br /><strong>首次调试请勿打开 Nikki-RS 的开机自启</strong>，' +
+			'并确认 eBPF 页的 Bypass Destination IPs 含你的内网网段（默认含 192.168.0.0/16），' +
+			'否则拦截策略一旦出错会无法访问路由器。' +
 			'<br />默认「不管理」：Nikki-RS 有自己的 eBPF 页面，本页不去覆盖它的选择；' +
 			'只有在这里明确选启用或禁用，本页才会写入并重启 Nikki-RS。');
 		o.value('keep', '不管理（由 Nikki-RS 页面决定）');

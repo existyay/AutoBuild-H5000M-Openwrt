@@ -99,6 +99,17 @@ TC eBPF 所需的全部内核选项（`CONFIG_CGROUP_BPF` 以及 kmod-sched-core
 eBPF 页面打开即可；「网络加速」页面会报告 eBPF 内核支持是否就绪，并可代为开关
 （默认「不管理」，由 Nikki-RS 自己的页面决定）。
 
+eBPF 是 **TUN/tproxy/redirect 之外的另一种入站**：内核钩子决定拦截还是放行，不再需要
+nftables/iptables 转发规则；打开后 `Proxy Config` 里的 TCP/UDP 模式会被绕过（所以
+那里没有、也不需要「eBPF 模式」选项）。本固件已经内置它需要的全部内核侧依赖，
+**不需要像社区里那样先装 `dae` 来补依赖**。三点注意：
+
+* eBPF 页的 `Bypass Destination IPs` **必须包含你的内网网段**（默认含 `192.168.0.0/16`），
+  否则去往路由器本身的流量也会被拦，直接失去管理入口。
+* **第一次调试不要打开 Nikki-RS 的开机自启**（`boot_start`）；确认策略没问题之后再开。
+* `dnsmasq.ipset`（adblock）与 eBPF 无关；eBPF 的透明代理端口是它自己的 `tproxy-port`
+  （默认 12345），不用去配 Proxy Config 的 tproxy 端口。
+
 ## 自己编译
 
 ### 在线编译（推荐，也是本项目的默认方式）

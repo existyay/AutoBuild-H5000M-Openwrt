@@ -833,6 +833,28 @@ eBPF inbound 在初始化阶段就退出。修法是把 `kmod-veth` 加进 `emit
 `luci-app-h5000m-accel` 的「网络加速」页会读内核状态并报告 eBPF 是否就绪，
 另有一个默认「不管理」的三态开关，避免保存加速页时覆盖 Nikki-RS 自己 eBPF 页面的设置。
 
+**eBPF 是独立入站，不在 TCP/UDP 模式里选，也不需要装 `dae`。**
+clash-rs 的 eBPF 入站在 LAN ingress / WAN egress 上挂 TC 程序，由内核钩子决定拦截还是
+放行，替代 nftables/iptables 的转发规则。它的实现思路（见上游 `clash-rs` 与作者在
+V2EX 的说明）是：劫持 DNS → 对域名预选路 → 直连的域名解析出的 IP 动态下发到 eBPF map
+→ 这些目标的后续流量在内核层直接放行，也就是把 dae 的内核选路简化成「只做直连流量的
+动态绕过」。因此：
+
+* 上游 `ebpf.js` 的开关说明就是 *"When enabled, the Proxy Config will be ineffective."*；
+  `nikki-rs.init` 里 `ebpf_enabled=1` 时直接 `return`，跳过 tproxy/redirect/tun 的检查与
+  nftables/策略路由。**TCP/UDP 模式显示 TPROXY 只是残留值，不生效**，也没有「eBPF 模式」
+  这个取值。eBPF 同时接管 TCP 与 UDP，透明代理端口用它自己的 `tproxy-port`（默认 12345）。
+* **不需要先装 `dae` 补依赖。** 社区里"装 dae 会自动装依赖"的说法，是因为那些固件没有把
+  TC BPF（`cls_bpf`/`act_bpf`）、cgroup BPF 与 veth 编进内核。本工程用
+  `ENABLE_EBPF_PROXY_KERNEL` 写 `CONFIG_KERNEL_CGROUPS/CGROUP_BPF`，`kmod-sched-core` /
+  `kmod-sched-bpf` 带出 TC 那半，`kmod-veth` 固定进镜像；`dae` 在这里可有可无。
+* clash-rs 的 eBPF **不需要** `CONFIG_DEBUG_INFO_BTF` / `CONFIG_XDP_SOCKETS` /
+  `CONFIG_BPF_EVENTS`（字节码嵌在预编译二进制里，不走 CO-RE，也不用 AF_XDP），所以本工程
+  没有为它打开这几项。
+* **安全边界**：`bypass-dst-ips` 必须含路由器自己的内网网段（默认含 `192.168.0.0/16`），
+  否则连管理页面都进不去；第一次调试**不要打开开机自启**（`boot_start`），确认策略无误后
+  再开。eBPF 是内核钩子，错误策略不像 nftables reload 那样会随防火墙重启自动回滚。
+
 预编译的 `clash-rs` 二进制自 v0.20.0-alpha 起，aarch64-musl 的 minimal 包就带
 `ebpf` feature（release workflow 的 `features: minimal,jemallocator,ebpf`），
 所以本工程不需要在固件构建里引入 Rust / LLVM / bpf-linker 工具链，只是下载并打包。
