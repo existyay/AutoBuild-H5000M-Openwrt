@@ -164,11 +164,20 @@ else
 	echo "ebpf_running=0"
 fi
 
-# Attachment heuristic: clash-rs logs the attach once the TC/cgroup programs are
-# live.  There is no pinned object to look at (the core does not use
-# /sys/fs/bpf), and `tc` is not required by this firmware, so the core log is
-# the only portable signal.  A missing/rotated log reports "not attached"
-# rather than guessing.
+# eBPF datapath: the manager creates the host side of the dae0/dae0peer link pair
+# before it loads any program, so its existence means the datapath is up even
+# when the log line below is suppressed.
+if [ -e /sys/class/net/dae0 ]; then
+	echo "ebpf_datapath=1"
+else
+	echo "ebpf_datapath=0"
+fi
+
+# Attachment: clash-rs logs the attach once the TC/cgroup programs are live, but
+# that line is INFO and the Nikki-RS default is `log_level 'error'`, so it is
+# usually absent on a perfectly working datapath.  This is therefore the strict
+# ("log-confirmed") signal; ebpf_datapath above is the weaker one the page falls
+# back to, and the two are reported separately so the page does not over-claim.
 if [ -f /var/log/nikki-rs/core.log ] \
 	&& grep -q 'TC/cgroup hooks successfully attached' /var/log/nikki-rs/core.log 2>/dev/null; then
 	echo "ebpf_attached=1"

@@ -315,6 +315,10 @@ jobs:
             "the accel status counts module dirs, not their contents"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_veth' \
             "the accel status script reports veth readiness"
+          want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_datapath' \
+            "the accel status script reports the eBPF datapath interface"
+          want "$accel/htdocs/luci-static/resources/view/h5000m/accel.js" 'ebpf_datapath' \
+            "the accel page distinguishes datapath-up from log-confirmed attach"
           want "$accel/htdocs/luci-static/resources/view/h5000m/accel.js" 'ebpf_proxy' \
             "the accel page exposes the eBPF option"
           want "$accel/Makefile" 'kmod-sched-bpf' \

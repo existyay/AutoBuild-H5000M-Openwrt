@@ -77,6 +77,8 @@ return view.extend({
 				else if (d.ebpf_enabled === '1') {
 					if (d.ebpf_attached === '1')
 						ebpfProxyText = '已启用，内核已挂载';
+					else if (d.ebpf_datapath === '1')
+						ebpfProxyText = '已启用，数据面已建立（日志级别为 error，未见挂载成功行）';
 					else if (d.ebpf_running === '1')
 						ebpfProxyText = '已启用，等待挂载';
 					else
