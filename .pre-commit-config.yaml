@@ -1,0 +1,75 @@
+# pre-commit — the local half of the gate.
+#
+# Every hook here mirrors a CI check, so a contributor finds out in one second
+# what the pipeline would have told them in ten minutes.  The rule for this
+# file: a hook is only added if CI also enforces it.  A hook that CI does not
+# run trains people to bypass CI.
+#
+# Install:  pipx install pre-commit && pre-commit install --install-hooks
+#           pre-commit install --hook-type commit-msg
+default_install_hook_types: [pre-commit, commit-msg]
+fail_fast: false
+repos:
+  # ---- generic hygiene -------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        # This repo must stay pure source: no firmware, no build tree.  A
+        # committed 40 MB sysupgrade image is not recoverable cheaply.
+        args: ['--maxkb=2048']
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: ['--allow-multiple-documents']
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: ['--markdown-linebreak-ext=md']
+      - id: mixed-line-ending
+        # .gitattributes already normalises these; this catches a file added
+        # before that rule existed.
+        args: ['--fix=lf']
+
+  # ---- shell -----------------------------------------------------------
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+        # Matches the CI invocation (-S error): real bugs fail, style does not.
+        args: ['-S', 'error', '--severity=error']
+        files: '^(scripts/|local-packages/).*\.sh$|^scripts/[^/]+$'
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.10.0-1
+    hooks:
+      - id: shfmt
+        # Only checks; this codebase is deliberately tab-indented with a style
+        # that predates shfmt, so it must not rewrite files wholesale.
+        args: ['--check', '--indent', '0', '--space-redirects']
+        files: '^(scripts/|local-packages/)'
+
+  # ---- workflows -------------------------------------------------------
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+        # Catches what a YAML parse cannot: bad expression contexts, unknown
+        # `needs`, shell/action input mismatches.  This is the class of bug
+        # that produced "'run' is already defined" on a real push.
+        args: ['-shellcheck=']
+
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.5.2
+    hooks:
+      - id: zizmor
+        # Supply-chain audit of the workflows themselves: unpinned actions,
+        # template injection, credential persistence, over-broad permissions.
+        args: ['--persona=auditor']
+
+  # ---- commits ---------------------------------------------------------
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+    rev: v9.18.0
+    hooks:
+      - id: commitlint
+        stages: [commit-msg]
+        additional_dependencies: ['@commitlint/config-conventional@19.6.0']

@@ -1,0 +1,81 @@
+name: Reusable — device script test
+
+# A Reusable Workflow exists for units that need their OWN JOB: a runner, a
+# matrix, its own permissions.  This one runs the firmware's own first-boot
+# scripts against the REAL aarch64 uci under qemu, which is the only way to
+# catch the class of bug the repo has already shipped once (a value written as
+# `'0'` instead of `0`, which looks right in /etc/config and does nothing).
+#
+# Called by build.yml once a rootfs exists, and by checks.yml when a rootfs is
+# supplied as an input.  `on: workflow_call` is what makes it reusable rather
+# than merely dispatchable.
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: Artifact containing the rootfs tarball.
+        type: string
+        required: true
+      tarball-glob:
+        description: Glob (within the artifact) matching the rootfs tarball.
+        type: string
+        required: false
+        default: '**/*-targz-rootfs.tar.gz'
+      runner:
+        description: Runner label.
+        type: string
+        required: false
+        default: ubuntu-24.04
+    outputs:
+      status:
+        description: pass or fail
+        value: ${{ jobs.script-test.outputs.status }}
+    # No `secrets:` block on purpose.  `secrets: none: required: false` is NOT
+    # valid — it declares a secret literally named "none" whose value is the
+    # boolean `false`, which GitHub rejects at parse time and the whole workflow
+    # silently disappears from the Actions list.  A reusable workflow that needs
+    # no secrets simply omits the key.
+
+permissions: {}
+
+jobs:
+  script-test:
+    name: First-boot scripts under real uci
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      status: ${{ steps.test.outputs.status }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download the rootfs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: artifacts
+
+      - name: Install qemu-user-static
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static file
+
+      - name: Run the test
+        id: test
+        run: |
+          set -uo pipefail
+          tarball="$(find artifacts -name '*-targz-rootfs.tar.gz' | head -1)"
+          if [ -z "$tarball" ]; then
+            echo "::error::no rootfs tarball in the artifact (looked for '*-targz-rootfs.tar.gz')"
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "testing $tarball"
+          ./scripts/rootfs-script-test.sh "$tarball"
+          echo "status=pass" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,35 @@
+# CODEOWNERS — who must review what.
+#
+# On a public repository whose artefacts are flashed onto routers, the files
+# that decide WHAT SHIPS are more sensitive than the source they build:
+#
+#   * the workflows decide what is compiled, signed and published;
+#   * the config decides which packages end up in the image;
+#   * the patches and fullcone chain are the security-relevant deltas from
+#     upstream (a fullcone expression bug is a packet-path bug).
+#
+# GitHub requires a code owner to be a user or team with write access; a
+# ruleset then makes these paths require review.
+
+# Default: everything.
+*                                       @existyay
+
+# CI/CD and supply chain — the highest-leverage place to inject something.
+/.github/                               @existyay
+/.github/workflows/                     @existyay
+/.github/actions/                       @existyay
+
+# What goes into the image, and with which kernel options.
+/configs/                               @existyay
+/scripts/local-build.sh                 @existyay
+/feeds.conf.default                     @existyay
+
+# Security-relevant deltas from upstream.
+/patches/                               @existyay
+/nftables-patches/                      @existyay
+/libnftnl-patches/                      @existyay
+/firewall4-patches/                     @existyay
+/local-packages/nft-fullcone/           @existyay
+
+# Anything that runs as root on the device.
+/local-packages/                        @existyay

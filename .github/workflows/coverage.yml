@@ -5,6 +5,8 @@ name: 配置覆盖测试
 on:
   schedule:
     - cron: '0 4 * * 1'   # Mondays 04:00 UTC (Beijing 12:00)
+  # Required by the ruleset's Required Status Checks (see checks.yml).
+  pull_request:
   push:
     tags:
       - 'openwrt-*'
@@ -16,6 +18,11 @@ on:
         type: choice
         options: [quick, full]
         default: quick
+
+# Concurrency: config-only, minutes not hours; cancel superseded runs.
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -33,7 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install dependencies
         run: |
@@ -49,7 +56,7 @@ jobs:
 
       - name: Upload coverage logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-logs
           path: |

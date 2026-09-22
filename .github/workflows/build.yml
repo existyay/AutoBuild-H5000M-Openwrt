@@ -32,14 +32,6 @@ on:
         description: 'Adblock 广告过滤'
         type: boolean
         default: false
-      apk_repo_url:
-        description: 'apk 仓库的托管地址 会被写入固件 留空则固件不带额外软件源'
-        type: string
-        default: ''
-      prebuild_packages:
-        description: '诊断用 先单独编译这些包（空格分隔 如 package/luci-app-ssr-plus/shadowsocks-libev）失败可提前暴露 留空则正常全量编译'
-        type: string
-        default: ''
       enable_dockerman:
         description: 'Docker 容器支持'
         type: boolean
@@ -52,21 +44,29 @@ on:
         description: 'eBPF 代理内核支持（Nikki-RS 的 cgroup BPF，会改变内核 ABI）'
         type: boolean
         default: true
-      enable_openclash:
-        description: 'OpenClash 代理'
-        type: boolean
-        default: false
-      enable_adguardhome:
-        description: 'AdGuardHome 广告过滤'
-        type: boolean
-        default: false
+
   push:
     tags:
       - 'openwrt-*'
       - 'v*'
 
+# Concurrency: a firmware build costs ~2-3 hours and a runner.  Two builds of
+# the same ref must never run at once — they would contend for the ghcr.io cache
+# tag and the release, and the second would waste the first's work.  Cancelling
+# a superseded run is correct here: only the newest commit's output matters.
+# NOT cancelled for a tag, because a tag build is a release and must finish.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+# Least privilege at the WORKFLOW level, then widen per job.  A top-level
+# `contents: write` grants every job — and every third-party action inside
+# them — the ability to push to master.  Only the `build` job needs write (to
+# publish a Release) and only `publish-apk-repo` needs Pages; both say so
+# themselves.  This is the single highest-value supply-chain change in the
+# file: a compromised action now gets a read-only token.
 permissions:
-  contents: write
+  contents: read
 
 # Action majors are pinned deliberately: checkout v7 / upload-artifact v7 /
 # cache v6 are the first majors whose action.yml declares `using: node24`.  The
@@ -87,6 +87,11 @@ jobs:
       # Push the build cache to GitHub Packages (ghcr.io).  Public packages are
       # free and, unlike actions/cache, have no 10 GB per-repository ceiling.
       packages: write
+      # Attestations: OIDC is the signing identity and `attestations: write`
+      # stores the provenance.  Neither is a long-lived secret, which is the
+      # point — there is no release-signing key to leak or rotate.
+      id-token: write
+      attestations: write
     # No `needs:` — the checks now live in checks.yml, so each workflow runs on
     # its own.  local-build.sh still runs check_environment and verify_config
     # within the first few minutes of this job, which is where a broken
@@ -96,11 +101,11 @@ jobs:
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && fromJSON('["self-hosted","linux","x64","h5000m"]') || 'ubuntu-24.04' }}
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Free disk space
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
           android: true
@@ -190,7 +195,7 @@ jobs:
       # therefore rebuilds itself instead of being used.
       - name: Restore toolchain
         id: toolchain
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .toolchain-cache
           key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
@@ -199,7 +204,7 @@ jobs:
             h5000m-toolchain-
 
       - name: Restore download cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/dl
           # Deliberately NOT keyed on the upstream revision.  Downloads are
@@ -217,7 +222,7 @@ jobs:
       # source mtimes are normalised: OpenWrt keys its stamps on a hash of path
       # plus mtime, so without that every stamp would miss on a fresh clone.
       - name: Install oras
-        uses: oras-project/setup-oras@v2
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
 
       - name: Restore build cache from GitHub Packages
         id: buildcache
@@ -281,7 +286,7 @@ jobs:
           fi
 
       - name: Restore ccache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.ccache
@@ -336,23 +341,23 @@ jobs:
           ENABLE_THEME_ARGON: 'true'
           ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'false' }}
           ENABLE_REPO_PACKAGES: 'true'
-          H5000M_APK_REPO_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.apk_repo_url || '' }}
+          H5000M_APK_REPO_URL: ${{ vars.H5000M_APK_REPO_URL || '' }}
           ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
           ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
           # True on scheduled/tag builds: the eBPF kernel options are what make
           # the Nikki-RS eBPF page more than a switch that cannot work.  Only a
           # manual run can turn them off, for a deliberately minimal image.
           ENABLE_EBPF_PROXY_KERNEL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_ebpf_proxy_kernel) || 'true' }}
-          ENABLE_OPENCLASH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_openclash) || 'false' }}
+          ENABLE_OPENCLASH: ${{ vars.ENABLE_OPENCLASH || 'false' }}
           ENABLE_MOSDNS: 'true'
           ENABLE_HOMEPROXY: 'false'
-          ENABLE_ADGUARDHOME: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adguardhome) || 'false' }}
+          ENABLE_ADGUARDHOME: ${{ vars.ENABLE_ADGUARDHOME || 'false' }}
           # Optional, diagnostic.  `make world` reaches package/luci-app-* about
           # 160 minutes in, so a failure there costs a whole three-hour run to
           # find.  Naming packages here builds them (and their dependencies)
           # first, with the per-package logs on, so the same failure surfaces in
           # minutes.  Empty by default: the only thing that changes is order.
-          PREBUILD_PACKAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.prebuild_packages || '' }}
+          PREBUILD_PACKAGES: ${{ vars.PREBUILD_PACKAGES || '' }}
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
@@ -367,9 +372,16 @@ jobs:
           #
           # Derived from the repository the workflow is running in rather than
           # hard-coded, so a fork gets its own URL for free.  Override with the
-          # apk_repo_url input (or delete the entry on the device) if you host
-          # it somewhere else — an entry pointing at a host that does not serve
-          # the repository makes `apk update` report an error.
+          # H5000M_APK_REPO_URL repository variable (Settings -> Variables) if
+          # you host it elsewhere — an entry pointing at a host that does not
+          # serve the repository makes `apk update` report an error.
+          #
+          # It is a VARIABLE and not a dispatch input because GitHub allows at
+          # most 10 `workflow_dispatch` inputs and this workflow needs the
+          # budget for the switches people actually flip.  Same for
+          # ENABLE_OPENCLASH / ENABLE_ADGUARDHOME / PREBUILD_PACKAGES below:
+          # rare, per-repository decisions belong in vars, not in every run's
+          # form.
           if [ -z "${H5000M_APK_REPO_URL:-}" ]; then
             export H5000M_APK_REPO_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
           fi
@@ -1082,7 +1094,7 @@ jobs:
       - name: Upload build logs on failure
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: build-logs
           path: |
@@ -1092,7 +1104,7 @@ jobs:
           retention-days: 7
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: H5000M-mainline-openwrt
           path: |
@@ -1101,8 +1113,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Attest what we are about to publish.  A device that installs from this
+      # repository trusts the index; provenance lets anyone verify WHICH run and
+      # WHICH commit produced it, and the SBOM records what went into it.  OIDC
+      # means no long-lived signing secret is involved.
+      - name: Attest the firmware and the apk repository
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            artifacts/*squashfs-sysupgrade.bin
+            artifacts/apk-repo/packages.adb
+
       - name: Upload apk repository
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: apk-repo
           path: artifacts/apk-repo/
@@ -1187,6 +1211,7 @@ jobs:
   # settings.  A build that produced a perfectly good firmware must not be
   # marked failed because the optional hosting step was not configured yet.
   publish-apk-repo:
+    name: Publish the apk repository
     needs: build
     # Always: the firmware's built-in source entry points here, so
     # publishing it is part of producing a usable firmware.
@@ -1200,13 +1225,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Download the apk repository
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: apk-repo
           path: apk-repo
 
       - name: Configure Pages
-        uses: actions/configure-pages@v6
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
         with:
           # Turn Pages on if it is off.  Without this the step dies with
           # "Get Pages site failed" and — because the job is continue-on-error so
@@ -1275,10 +1300,31 @@ jobs:
           echo "index.html written ($(wc -c < apk-repo/index.html) bytes)"
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: apk-repo
 
       - name: Deploy to Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+
+  # ---------------------------------------------------------------------------
+  # Reusable Workflow call: run the firmware's own first-boot scripts against
+  # the real aarch64 uci under qemu.
+  #
+  # This is the reuse boundary that matters on this project.  The first-boot
+  # defaults have already shipped one bug that a shell mock could not catch (a
+  # value stored as `'0'` instead of `0` — correct-looking config, radio stays
+  # off), and the test needs a built rootfs.  Keeping it in its own reusable
+  # workflow means build.yml calls it, a future release gate can call it with
+  # a different artifact, and the test itself is not duplicated.
+  #
+  # `secrets: inherit` is deliberately NOT used: the callee declares no secrets
+  # and needs none, so passing them would widen exposure for nothing.
+  script-test:
+    name: Device scripts (reusable)
+    needs: build
+    uses: ./.github/workflows/reusable-script-test.yml
+    with:
+      artifact-name: H5000M-mainline-openwrt
+      tarball-glob: '**/*-targz-rootfs.tar.gz'

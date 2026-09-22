@@ -1,0 +1,30 @@
+# Dependabot — keeps the pinned actions and the pinned tool versions current.
+#
+# This repository pins every action to a commit SHA, which is the correct
+# supply-chain posture but has one real cost: nothing tells you when a pinned
+# SHA is outdated or has a security fix.  Dependabot is that signal, and it is
+# the reason pinning is sustainable rather than a snapshot that rots.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    # Group the bump into ONE PR: a dozen individual action bumps for a
+    # firmware repo is noise, and the whole set is verified together by the
+    # same CI run anyway.
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      # Conventional Commit, so Release Please treats it as `deps` and does not
+      # invent a feature release from a routine bump.
+      prefix: 'chore'
+      include: scope
+    labels: [dependencies, ci]
+    # Grouping is only safe because CI runs the same gates on the PR.
+    rebase-strategy: auto

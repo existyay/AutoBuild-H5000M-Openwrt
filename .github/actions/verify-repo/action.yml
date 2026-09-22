@@ -1,0 +1,59 @@
+name: Verify apk repository
+description: >-
+  Point a throw-away apk database at one package repository and assert the
+  front-ends, cores, translations, kernel modules and dependency resolution the
+  project promises.  Wraps scripts/verify-apk-repo.sh so the same check can be
+  reused by build.yml, a release gate and a manual dispatch without copying the
+  shell.
+
+# A Composite Action is the right tool when the reusable unit is a SEQUENCE OF
+# STEPS that needs no runner or job of its own.  A Reusable Workflow would be
+# wrong here: it would spin up a second runner just to run a 5-second check.
+
+inputs:
+  apk:
+    description: Path to the apk binary built by this tree.
+    required: false
+    default: openwrt/staging_dir/host/bin/apk
+  target:
+    description: Repository index (path or URL) to verify. Empty = auto-detect.
+    required: false
+    default: ''
+  with-official-feeds:
+    description: Also configure the snapshot sources the firmware ships with.
+    required: false
+    default: 'false'
+  working-directory:
+    description: Directory the paths are relative to.
+    required: false
+    default: /o
+
+outputs:
+  result:
+    description: pass or fail
+    value: ${{ steps.run.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify the repository
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        APK_BIN: ${{ inputs.apk }}
+        APK_TARGET: ${{ inputs.target }}
+        WITH_FEEDS: ${{ inputs.with-official-feeds }}
+      run: |
+        set -uo pipefail
+        args=()
+        [ "$WITH_FEEDS" = "true" ] && args+=(--with-official-feeds)
+        [ -n "$APK_TARGET" ] && args+=("$APK_TARGET")
+        # The script prefers openwrt/staging_dir/host/bin/apk itself; APK_BIN
+        # is accepted so a caller can point at a different build.
+        if [ -n "$APK_BIN" ] && [ -x "$APK_BIN" ]; then
+          APK_OVERRIDE="$APK_BIN" ./scripts/verify-apk-repo.sh "${args[@]}"
+        else
+          ./scripts/verify-apk-repo.sh "${args[@]}"
+        fi
+        echo "result=pass" >> "$GITHUB_OUTPUT"
