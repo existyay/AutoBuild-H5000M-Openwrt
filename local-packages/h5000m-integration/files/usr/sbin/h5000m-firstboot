@@ -70,7 +70,7 @@ configure_wireless() {
 		[ "$(uci -q get "${iface}.mode")" = 'ap' ] || continue
 		ssid="$(uci -q get "${iface}.ssid" 2>/dev/null || true)"
 		case "$ssid" in
-			''|OpenWrt|openwrt) configured=1 ;;
+			'' | OpenWrt | openwrt) configured=1 ;;
 			*) custom=1 ;;
 		esac
 	done

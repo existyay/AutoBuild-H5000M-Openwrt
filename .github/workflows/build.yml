@@ -102,6 +102,11 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # zizmor artipacked: a checkout leaves GITHUB_TOKEN in .git/config,
+          # where any later step — including a third-party package's build
+          # script — can read it.  Nothing in these jobs pushes to the repo.
+          persist-credentials: false
 
       - name: Free disk space
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
@@ -156,10 +161,16 @@ jobs:
 
       - name: Resolve the upstream revision
         id: upstream
+        env:
+          # Passed through the environment, never interpolated into the shell.
+          # `${{ ... }}` inside `run:` is text substitution BEFORE bash parses
+          # the line, so any dispatch input would be attacker-controlled code
+          # (zizmor: template-injection).  An env var is data.
+          PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.pinned || false }}
         run: |
           set -euo pipefail
           . configs/upstream.env
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.pinned }}" = "true" ]; then
+          if [ "${PINNED}" = "true" ]; then
             rev="${OPENWRT_PINNED_REVISION}"
           else
             rev="$(git ls-remote "${OPENWRT_REPO_URL}" "refs/heads/${OPENWRT_REPO_BRANCH}" | cut -f1)"
@@ -193,9 +204,19 @@ jobs:
       # mtimes, and make rebuilds anything whose Makefile or patches are newer
       # than its .built stamp.  A toolchain that is genuinely out of date
       # therefore rebuilds itself instead of being used.
+      # Cache-poisoning mitigation (zizmor: cache-poisoning).
+      #
+      # This workflow PUBLISHES a firmware image and a package repository, so a
+      # cache entry is an input to a trusted release.  `actions/cache` could
+      # otherwise be written by an untrusted run (a fork PR or any ref) and then
+      # consumed here, which would let that run influence what gets shipped.
+      #
+      # The official pattern: `restore` only, and `save` guarded to trusted refs.
+      # Split into two steps so a PR can READ an existing cache but can never
+      # WRITE one.  The build below is unaffected on master/tags.
       - name: Restore toolchain
-        id: toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: toolchain-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .toolchain-cache
           key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
@@ -203,8 +224,20 @@ jobs:
             h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-
             h5000m-toolchain-
 
+      - name: Save toolchain
+        # Only from a trusted ref: `refs/heads/master` or a release tag.  A pull
+        # request — including one from a fork — must not be able to seed a cache
+        # that a later trusted build will unpack.
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .toolchain-cache
+          key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
+
       - name: Restore download cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: dl-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/dl
           # Deliberately NOT keyed on the upstream revision.  Downloads are
@@ -214,6 +247,15 @@ jobs:
           # towards its 10 GB cache ceiling.
           key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
           restore-keys: h5000m-dl-
+
+      - name: Save download cache
+        # Same cache-poisoning rule as the toolchain above: trusted refs only.
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: openwrt/dl
+          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
 
       # The build tree is the expensive part: 40 GB of per-package build
       # directories and their .built stamps.  actions/cache cannot hold it —
@@ -229,6 +271,8 @@ jobs:
         continue-on-error: true
         env:
           IMAGE: ghcr.io/${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
           image="$(echo "${IMAGE}" | tr '[:upper:]' '[:lower:]')/buildcache"
@@ -236,7 +280,12 @@ jobs:
           echo "image=${image}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
-          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # `github.actor` is a login name, but it reaches the shell only via
+          # the environment: interpolating it here would be template injection
+          # (zizmor flags it as High confidence because the actor string is
+          # attacker-influenced in a fork PR).  The token itself likewise goes
+          # through the environment rather than being pasted into the script.
+          printf '%s' "${GH_TOKEN}" | oras login ghcr.io -u "${GH_ACTOR}" --password-stdin
           # Clean slate first.  A failed or interrupted pull leaves a partial
           # blob in .buildcache, and the build then picks it up and tries to
           # unpack it.  Measured on a real run: a truncated 9.4 GB tar cost the
@@ -286,13 +335,24 @@ jobs:
           fi
 
       - name: Restore ccache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.ccache
             openwrt/.ccache
           key: h5000m-ccache-${{ github.run_id }}
           restore-keys: h5000m-ccache-
+
+      - name: Save ccache
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.ccache
+            openwrt/.ccache
+          key: h5000m-ccache-${{ github.run_id }}
 
       # The same signing key for every build.  secrets cannot be used in an
       # `if:`, so the step always runs and decides from the environment.
@@ -358,11 +418,14 @@ jobs:
           # first, with the per-package logs on, so the same failure surfaces in
           # minutes.  Empty by default: the only thing that changes is order.
           PREBUILD_PACKAGES: ${{ vars.PREBUILD_PACKAGES || '' }}
+          # Same reason as the Resolve step: an input must reach the shell as
+          # data, not as interpolated source text.
+          PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.pinned || false }}
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
           args=()
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.pinned }}" = "true" ]; then
+          if [ "${PINNED:-false}" = "true" ]; then
             args+=(--pinned)
           fi
 
@@ -436,6 +499,16 @@ jobs:
       - name: Save build cache to GitHub Packages
         if: success()
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+          # Step outputs are attacker-influenced in principle (they derive from
+          # the repository name and a hash), so they cross into the shell as
+          # DATA via the environment, never as interpolated source text.  This
+          # was the last `info`-level template-injection finding zizmor
+          # reported; the workflow is now clean at every severity.
+          CACHE_IMAGE: ${{ steps.buildcache.outputs.image }}
+          CACHE_TAG: ${{ steps.buildcache.outputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p .buildcache
@@ -458,7 +531,7 @@ jobs:
           )
           size="$(du -h .buildcache/build-cache.tar.zst | cut -f1)"
           echo "packed ${size}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf '%s' "${GH_TOKEN}" | oras login ghcr.io -u "${GH_ACTOR}" --password-stdin
           # Push from INSIDE .buildcache.  oras takes the blob's title from the
           # path it is given, so `oras push image .buildcache/x.tar.zst` stores
           # the title as ".buildcache/x.tar.zst" — and `oras pull -o .buildcache`
@@ -473,17 +546,17 @@ jobs:
           # "premature end", and the run silently rebuilds everything: 15 GB
           # moved for nothing and no indication of why.
           ( cd .buildcache && sha256sum build-cache.tar.zst > build-cache.sha256 )
-          ( cd .buildcache && oras push "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" build-cache.tar.zst build-cache.sha256 )
+          ( cd .buildcache && oras push "${CACHE_IMAGE}:${CACHE_TAG}" build-cache.tar.zst build-cache.sha256 )
           # Record the exact size and digest being stored.  A build cache that
           # comes back "truncated" every single time is otherwise impossible to
           # localise: these two lines say what was pushed, and the restore step
           # says what came back, so the next run can tell a bad push from a bad
           # pull instead of guessing.
-          echo "pushed $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes, sha256 $(cut -d' ' -f1 .buildcache/build-cache.sha256) as ${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }} (${size})"
+          echo "pushed $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes, sha256 $(cut -d' ' -f1 .buildcache/build-cache.sha256) as ${CACHE_IMAGE}:${CACHE_TAG} (${size})"
           # Confirm the push actually landed.  This step is continue-on-error, so
           # a half-finished upload is otherwise invisible — and it is not free:
           # the next run transfers the whole archive before rejecting it.
-          if oras manifest fetch "${{ steps.buildcache.outputs.image }}:${{ steps.buildcache.outputs.tag }}" >/dev/null 2>&1; then
+          if oras manifest fetch "${CACHE_IMAGE}:${CACHE_TAG}" >/dev/null 2>&1; then
             echo "the pushed cache manifest is readable"
           else
             echo "::warning::the build cache push could not be verified; the next run will rebuild from scratch"

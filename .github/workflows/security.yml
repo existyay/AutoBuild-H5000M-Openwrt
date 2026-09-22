@@ -60,16 +60,23 @@ jobs:
           python-version: '3.12'
 
       - name: Run zizmor
-        # zizmor is the dedicated GitHub Actions auditor: it catches template
-        # injection, unpinned third-party actions, credential persistence,
-        # over-broad permissions and known action pwn-requests.  Installed by
-        # version rather than via a floating action so the auditor itself is
-        # subject to the same supply-chain discipline it enforces.
+        # zizmor is the dedicated GitHub Actions auditor: template injection,
+        # unpinned third-party actions, credential persistence, over-broad
+        # permissions, cache poisoning, known action pwn-requests.
+        #
+        # This is a REAL gate, not advisory: `continue-on-error` used to make it
+        # purely decorative, which is how the four template-injection findings
+        # and three cache-poisoning findings in this very repository went
+        # unnoticed.  A finding now fails the job.
+        #
+        # `--persona=auditor` matches .github/zizmor.yml, and `--min-severity`
+        # keeps the signal at the level the config documents.
         run: |
           set -euo pipefail
           pip install --disable-pip-version-check "zizmor==1.5.2"
-          zizmor --format sarif .github/workflows/ > zizmor.sarif
-        continue-on-error: true
+          zizmor --persona=auditor --format sarif .github/workflows/ > zizmor.sarif
+          echo "--- human-readable summary ---"
+          zizmor --persona=auditor --format plain .github/workflows/
 
       - name: Upload zizmor SARIF
         uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1

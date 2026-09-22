@@ -290,30 +290,44 @@ while [ "$#" -gt 0 ]; do
 		--install-deps) INSTALL_DEPS=true ;;
 		--prepare-only) PREPARE_ONLY=true ;;
 		--config-only) CONFIG_ONLY=true ;;
-		--pinned) FORCE_PINNED=true; OPENWRT_TRACK=pinned ;;
+		--pinned)
+			FORCE_PINNED=true
+			OPENWRT_TRACK=pinned
+			;;
 		--skip-toolchain) SKIP_TOOLCHAIN=true ;;
 		--skip-download) SKIP_DOWNLOAD=true ;;
 		--skip-feeds-update) SKIP_FEEDS_UPDATE=true ;;
-		-h|--help) usage; exit 0 ;;
-		*) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*)
+			echo "Unknown argument: $1" >&2
+			usage
+			exit 2
+			;;
 	esac
 	shift
 done
 
 # ------------------------------------------------------------- logging -------
-log()  { printf '\033[1;34m[h5000m]\033[0m %s\n' "$*" | tee -a "$LOG_FILE"; }
+log() { printf '\033[1;34m[h5000m]\033[0m %s\n' "$*" | tee -a "$LOG_FILE"; }
 warn() { printf '\033[1;33m[h5000m:warn]\033[0m %s\n' "$*" | tee -a "$LOG_FILE" >&2; }
-die()  { printf '\033[1;31m[h5000m:error]\033[0m %s\n' "$*" | tee -a "$LOG_FILE" >&2; exit 1; }
+die() {
+	printf '\033[1;31m[h5000m:error]\033[0m %s\n' "$*" | tee -a "$LOG_FILE" >&2
+	exit 1
+}
 
 is_true() {
 	case "${1,,}" in
-		1|true|yes|y|on) return 0 ;;
+		1 | true | yes | y | on) return 0 ;;
 		*) return 1 ;;
 	esac
 }
 
 run_with_timeout() {
-	local timeout_s="$1"; shift
+	local timeout_s="$1"
+	shift
 	if command -v timeout >/dev/null 2>&1; then
 		timeout --foreground -k 30 "$timeout_s" "$@"
 	else
@@ -396,9 +410,9 @@ install_deps() {
 		for group in "${apt_groups[@]}"; do
 			log "apt: installing ${group}"
 			# shellcheck disable=SC2086
-			sudo -E apt-get "${apt_opts[@]}" install -y --no-install-recommends $group \
-				|| die "apt-get failed for: ${group}"
-			done
+			sudo -E apt-get "${apt_opts[@]}" install -y --no-install-recommends $group ||
+				die "apt-get failed for: ${group}"
+		done
 		return 0
 	fi
 
@@ -524,25 +538,25 @@ prepare_source() {
 		# only the first had no cache to restore.  Merging keeps the caches.
 		staging="${SRC}.clone.$$"
 		rm -rf "$staging"
-		git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$staging" \
-			|| die "Unable to clone ${REPO_URL}"
+		git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$staging" ||
+			die "Unable to clone ${REPO_URL}"
 
 		mkdir -p "$SRC"
-		( cd "$staging" && tar -cf - . ) | ( cd "$SRC" && tar -xf - ) \
-			|| die "Could not move the fresh checkout into ${SRC}"
+		(cd "$staging" && tar -cf - .) | (cd "$SRC" && tar -xf -) ||
+			die "Could not move the fresh checkout into ${SRC}"
 		rm -rf "$staging"
 	fi
 
 	if [ "${OPENWRT_TRACK}" = "pinned" ]; then
 		rev="${OPENWRT_PINNED_REVISION}"
 		log "Fetching pinned revision ${rev}"
-		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$rev" \
-			|| die "Cannot fetch pinned revision ${rev}"
+		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$rev" ||
+			die "Cannot fetch pinned revision ${rev}"
 		git -C "$SRC" checkout -f FETCH_HEAD
 	else
 		log "Updating ${REPO_BRANCH} to the current upstream head"
-		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$REPO_BRANCH" \
-			|| die "Cannot fetch ${REPO_BRANCH}"
+		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$REPO_BRANCH" ||
+			die "Cannot fetch ${REPO_BRANCH}"
 		git -C "$SRC" checkout -f FETCH_HEAD
 	fi
 
@@ -555,11 +569,11 @@ prepare_source() {
 	local head
 	head="$(git -C "$SRC" rev-parse HEAD)"
 	log "Source at $(git -C "$SRC" log --oneline -1)"
-	printf '%s\n' "$head" > "${ROOT_DIR}/.upstream-revision"
+	printf '%s\n' "$head" >"${ROOT_DIR}/.upstream-revision"
 
 	local desc
 	desc="$(git -C "$SRC" describe --tags --always 2>/dev/null || echo "$head")"
-	printf '%s\n' "$desc" > "${ROOT_DIR}/.upstream-describe"
+	printf '%s\n' "$desc" >"${ROOT_DIR}/.upstream-describe"
 }
 
 write_feeds_conf() {
@@ -575,7 +589,7 @@ write_feeds_conf() {
 			printf '# ubus-at-daemon and sms-tool_q, which are only packaged here.\n'
 			printf 'src-git qmodem %s;%s\n' "$QMODEM_REPO_URL" "$QMODEM_REPO_BRANCH"
 		fi
-	} > "$SRC/feeds.conf.default"
+	} >"$SRC/feeds.conf.default"
 }
 
 # `feeds install` symlinks packages into package/feeds/<feed>/ but never removes
@@ -594,11 +608,11 @@ prune_stale_feeds() {
 		configured=false
 		while read -r entry fname _; do
 			case "$entry" in
-				src-git|src-link|src-svn|src-hg)
+				src-git | src-link | src-svn | src-hg)
 					[ "$fname" = "$name" ] && configured=true
 					;;
 			esac
-		done < "$SRC/feeds.conf.default"
+		done <"$SRC/feeds.conf.default"
 
 		if [ "$configured" = false ]; then
 			log "Removing package links for the now-unconfigured feed ${name}"
@@ -615,11 +629,11 @@ feed_tree_is_complete() {
 	local entry name
 	while read -r entry name _; do
 		case "$entry" in
-			src-git|src-link|src-svn|src-hg)
+			src-git | src-link | src-svn | src-hg)
 				[ -d "${SRC}/feeds/${name}" ] || return 1
 				;;
 		esac
-	done < "$SRC/feeds.conf.default"
+	done <"$SRC/feeds.conf.default"
 	return 0
 }
 
@@ -637,13 +651,13 @@ prepare_feeds() {
 		else
 			log "Updating feeds"
 		fi
-		run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds update -a \
-			|| die "feeds update failed — refusing to build a firmware with missing packages"
+		run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds update -a ||
+			die "feeds update failed — refusing to build a firmware with missing packages"
 	fi
 
 	log "Installing feeds"
-	run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds install -a \
-		|| die "feeds install failed"
+	run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds install -a ||
+		die "feeds install failed"
 
 	verify_wwand_feed
 }
@@ -667,8 +681,8 @@ verify_wwand_feed() {
 	fi
 
 	for pkg in wwand wwand-qmi wwand-ncm wwand-mbim wwand-mhi; do
-		grep -q "^define Package/${pkg}\$" "$mk" \
-			|| warn "wwand feed no longer defines the ${pkg} package"
+		grep -q "^define Package/${pkg}\$" "$mk" ||
+			warn "wwand feed no longer defines the ${pkg} package"
 	done
 
 	for pkg in luci-app-wwand luci-proto-wwand; do
@@ -736,8 +750,8 @@ normalize_source_mtimes() {
 	[ "$count" -gt 0 ] || return 0
 
 	log "Normalizing mtimes of ${count} source files (content-derived, for cache reuse)"
-	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null \
-		| xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 bash -c '
+	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null |
+		xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 bash -c '
 			for f do
 				h=$(sha1sum "$f" 2>/dev/null | cut -c1-8) || continue
 				[ -n "$h" ] || continue
@@ -784,7 +798,10 @@ install_signing_key() {
 	local src="${H5000M_SIGNING_KEY_FILE:-}"
 
 	[ -n "$src" ] || return 0
-	[ -f "$src" ] || { warn "H5000M_SIGNING_KEY_FILE=${src} does not exist; signing with a per-build key"; return 0; }
+	[ -f "$src" ] || {
+		warn "H5000M_SIGNING_KEY_FILE=${src} does not exist; signing with a per-build key"
+		return 0
+	}
 
 	cp -f "$src" "${SRC}/private-key.pem"
 	chmod 0600 "${SRC}/private-key.pem"
@@ -864,15 +881,18 @@ seed_cached_toolchain() {
 	local archive="${TOOLCHAIN_CACHE_ARCHIVE:-}"
 
 	[ -n "$archive" ] || return 0
-	[ -f "$archive" ] || { log "No cached toolchain at ${archive}"; return 0; }
+	[ -f "$archive" ] || {
+		log "No cached toolchain at ${archive}"
+		return 0
+	}
 
 	log "Seeding toolchain from cache ($(du -h "$archive" | cut -f1))"
 	# Unpacked at the source root: the archive holds build_dir/toolchain-* as
 	# well as staging_dir/*, and both are needed.  The stamps that make `make`
 	# skip the toolchain live in build_dir, not in staging_dir.
 	mkdir -p "${SRC}"
-	if tar -I zstd -xf "$archive" -C "${SRC}" 2>/dev/null \
-		|| tar -xf "$archive" -C "${SRC}"; then
+	if tar -I zstd -xf "$archive" -C "${SRC}" 2>/dev/null ||
+		tar -xf "$archive" -C "${SRC}"; then
 		log "Toolchain cache applied; the toolchain build should be skipped"
 	else
 		warn "Could not unpack the cached toolchain; building it from scratch"
@@ -902,8 +922,8 @@ apply_patches() {
 		# paths, because prepare_feeds legitimately rewrites it before this
 		# point.
 		paths="$(git -C "$SRC" apply --numstat "$patch_file" 2>/dev/null | cut -f3-)"
-		if [ -n "$paths" ] \
-			&& [ -n "$(git -C "$SRC" status --porcelain --untracked-files=no -- $paths)" ]; then
+		if [ -n "$paths" ] &&
+			[ -n "$(git -C "$SRC" status --porcelain --untracked-files=no -- $paths)" ]; then
 			die "${name} targets files that are already modified in ${SRC} — the tree was not reset; applying it would duplicate inserted blocks"
 		fi
 
@@ -918,7 +938,6 @@ apply_patches() {
 		fi
 	done
 	shopt -u nullglob
-
 
 	if [ "$applied" -gt 0 ]; then
 		log "Applied ${applied} tree patch(es)"
@@ -960,8 +979,8 @@ pin_sing_box() {
 	# Idempotent: a tree from a previous run (or an already-pinned checkout)
 	# carries the pin, and `feeds update` on the next run restores upstream's
 	# version, which this then pins again.
-	if grep -q "^PKG_VERSION:=${want_v}$" "$mk" \
-		&& grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
+	if grep -q "^PKG_VERSION:=${want_v}$" "$mk" &&
+		grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
 		log "sing-box already pinned to ${want_v}"
 		return 0
 	fi
@@ -984,8 +1003,8 @@ pin_sing_box() {
 	# changes that have nothing to do with our pin.
 	grep -q '^PKG_RELEASE:=' "$mk" && sed -i 's|^PKG_RELEASE:=.*|PKG_RELEASE:=1|' "$mk"
 
-	if ! grep -q "^PKG_VERSION:=${want_v}$" "$mk" \
-		|| ! grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
+	if ! grep -q "^PKG_VERSION:=${want_v}$" "$mk" ||
+		! grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
 		die "pinning sing-box in ${mk} did not take; refusing to build an unpinned sing-box"
 	fi
 
@@ -1065,7 +1084,7 @@ write_h5000m_runtime_config() {
 		fi
 	done
 
-	cat > "$conf" <<EOF
+	cat >"$conf" <<EOF
 # Generated by scripts/local-build.sh — do not edit; edit the build instead.
 H5000M_WIFI_SSID='${H5000M_WIFI_SSID}'
 H5000M_WIFI_KEY='${H5000M_WIFI_KEY}'
@@ -1092,7 +1111,7 @@ EOF
 			printf '# The repository is the apk-repo/ artifact; serve that directory\n'
 			printf '# over HTTP(S) and point H5000M_APK_REPO_URL at it.\n'
 			printf '%s/packages.adb\n' "${H5000M_APK_REPO_URL%/}"
-		} > "${repo_dir}/50-h5000m.list"
+		} >"${repo_dir}/50-h5000m.list"
 		log "Firmware apk source: ${H5000M_APK_REPO_URL%/}/packages.adb"
 	else
 		# No URL configured.  Remove any file a previous run left behind rather
@@ -1128,8 +1147,8 @@ clone_external() {
 
 	if [ -d "${dest}/.git" ]; then
 		log "Updating external package ${name}"
-		if run_with_timeout "$GIT_TIMEOUT" git -C "$dest" fetch --depth 1 origin "$branch" \
-			&& git -C "$dest" checkout -f FETCH_HEAD; then
+		if run_with_timeout "$GIT_TIMEOUT" git -C "$dest" fetch --depth 1 origin "$branch" &&
+			git -C "$dest" checkout -f FETCH_HEAD; then
 			return 0
 		fi
 		# A usable checkout already exists; a transient fetch failure should not
@@ -1156,28 +1175,28 @@ install_board_plugins() {
 
 	if is_true "$ENABLE_FANCONTROL"; then
 		clone_external luci-app-h5000m-fancontrol \
-			https://github.com/FAN789/luci-app-h5000m-fancontrol.git main \
-			|| failed=1
+			https://github.com/FAN789/luci-app-h5000m-fancontrol.git main ||
+			failed=1
 	fi
 
 	if is_true "$ENABLE_NETMODE"; then
 		clone_external luci-app-h5000m-netmode \
-			https://github.com/FAN789/luci-app-h5000m-netmode.git main \
-			|| failed=1
+			https://github.com/FAN789/luci-app-h5000m-netmode.git main ||
+			failed=1
 	fi
 
 	if is_true "$ENABLE_EASYMESH"; then
 		# Only this one directory is wanted out of coolsnowwolf/luci.
 		clone_only_paths luci-easymesh \
 			https://github.com/coolsnowwolf/luci.git master \
-			applications/luci-app-easymesh \
-			|| failed=1
+			applications/luci-app-easymesh ||
+			failed=1
 	fi
 
 	if is_true "$ENABLE_MT5700M"; then
 		clone_external luci-app-mt5700m \
-			https://github.com/FAN789/luci-app-mt5700m.git main \
-			|| failed=1
+			https://github.com/FAN789/luci-app-mt5700m.git main ||
+			failed=1
 	fi
 
 	if [ "$failed" -ne 0 ]; then
@@ -1202,10 +1221,10 @@ install_theme() {
 		return 0
 	fi
 
-	clone_external luci-theme-argon "$ARGON_THEME_REPO_URL" "$ARGON_THEME_REPO_BRANCH" \
-		|| die "Could not fetch luci-theme-argon from ${ARGON_THEME_REPO_URL}"
-	clone_external luci-app-argon-config "$ARGON_CONFIG_REPO_URL" "$ARGON_CONFIG_REPO_BRANCH" \
-		|| die "Could not fetch luci-app-argon-config from ${ARGON_CONFIG_REPO_URL}"
+	clone_external luci-theme-argon "$ARGON_THEME_REPO_URL" "$ARGON_THEME_REPO_BRANCH" ||
+		die "Could not fetch luci-theme-argon from ${ARGON_THEME_REPO_URL}"
+	clone_external luci-app-argon-config "$ARGON_CONFIG_REPO_URL" "$ARGON_CONFIG_REPO_BRANCH" ||
+		die "Could not fetch luci-app-argon-config from ${ARGON_CONFIG_REPO_URL}"
 
 	return 0
 }
@@ -1229,8 +1248,8 @@ install_optional_external() {
 	local switch="$1" name="$2" url="$3" branch="$4"
 	local hint="${switch:+ (required by ${switch})}"
 
-	clone_external "$name" "$url" "$branch" \
-		|| die "${name} could not be fetched from ${url}${hint}. Fix the URL or pick another source, or turn off the option that requires it."
+	clone_external "$name" "$url" "$branch" ||
+		die "${name} could not be fetched from ${url}${hint}. Fix the URL or pick another source, or turn off the option that requires it."
 	return 0
 }
 
@@ -1246,7 +1265,8 @@ install_optional_external() {
 # the packages never reached the repository at all.  It stayed hidden locally only
 # because earlier runs had left the clones in package/.
 clone_for_repo_or_image() {
-	local switch_value="$1"; shift
+	local switch_value="$1"
+	shift
 
 	if is_true "$ENABLE_REPO_PACKAGES" || is_true "$switch_value"; then
 		install_optional_external "ENABLE_$1" "${@:2}"
@@ -1260,10 +1280,10 @@ install_external_packages() {
 	# an eBPF fast path.  The repository is a monorepo — clash-rs/, nikki-rs/
 	# and luci-app-nikki-rs/ — and OpenWrt's package scanner picks up all three
 	# Makefiles from the one checkout, so the whole stack lands in package/.
-	clone_for_repo_or_image "$ENABLE_NIKKI"     NIKKI     OpenWrt-nikki-rs https://github.com/CHKayanami/OpenWrt-nikki-rs.git main
-	clone_for_repo_or_image "$ENABLE_OPENCLASH" OPENCLASH OpenClash       https://github.com/vernesong/OpenClash.git master
-	clone_for_repo_or_image "$ENABLE_MOSDNS"    MOSDNS    luci-app-mosdns https://github.com/sbwml/luci-app-mosdns.git v5
-	clone_for_repo_or_image "$ENABLE_HOMEPROXY" HOMEPROXY homeproxy       https://github.com/immortalwrt/homeproxy.git master
+	clone_for_repo_or_image "$ENABLE_NIKKI" NIKKI OpenWrt-nikki-rs https://github.com/CHKayanami/OpenWrt-nikki-rs.git main
+	clone_for_repo_or_image "$ENABLE_OPENCLASH" OPENCLASH OpenClash https://github.com/vernesong/OpenClash.git master
+	clone_for_repo_or_image "$ENABLE_MOSDNS" MOSDNS luci-app-mosdns https://github.com/sbwml/luci-app-mosdns.git v5
+	clone_for_repo_or_image "$ENABLE_HOMEPROXY" HOMEPROXY homeproxy https://github.com/immortalwrt/homeproxy.git master
 
 	# AdGuardHome deliberately has NO clone here.  Its packages — adguardhome,
 	# luci-app-adguardhome and luci-i18n-adguardhome-zh-cn — are all in the
@@ -1282,12 +1302,13 @@ install_external_packages() {
 # keeping.  Dropping the duplicates leaves exactly the helpers the official feeds
 # lack, and the frontends resolve xray-core/sing-box from the feeds instead.
 clone_and_prune() {
-	local name="$1" url="$2" branch="$3"; shift 3
+	local name="$1" url="$2" branch="$3"
+	shift 3
 	local dest="${SRC}/package/${name}"
 	local drop
 
-	clone_external "$name" "$url" "$branch" \
-		|| die "${name} could not be fetched from ${url} (required to build the proxy repository). Fix the URL or pick another source, or turn off ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES."
+	clone_external "$name" "$url" "$branch" ||
+		die "${name} could not be fetched from ${url} (required to build the proxy repository). Fix the URL or pick another source, or turn off ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES."
 
 	for drop in "$@"; do
 		if [ -e "${dest}/${drop}" ]; then
@@ -1310,12 +1331,13 @@ clone_and_prune() {
 # entirely and left a tree with no package in it at all — which is what the
 # first version did, silently, because pruning files is not something it does.
 clone_only_paths() {
-	local name="$1" url="$2" branch="$3"; shift 3
+	local name="$1" url="$2" branch="$3"
+	shift 3
 	local dest="${SRC}/package/${name}"
 	local entry sub keep found
 
-	clone_external "$name" "$url" "$branch" \
-		|| die "${name} could not be fetched from ${url} (required by this build's options). Fix the URL or pick another source, or turn off the option that requires it — ENABLE_EASYMESH, or the proxy-repository switches ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES."
+	clone_external "$name" "$url" "$branch" ||
+		die "${name} could not be fetched from ${url} (required by this build's options). Fix the URL or pick another source, or turn off the option that requires it — ENABLE_EASYMESH, or the proxy-repository switches ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES."
 
 	shopt -s nullglob
 
@@ -1552,8 +1574,7 @@ ensure_frontend_cores() {
 	for spec in \
 		"luci-app-ssr-plus/luci-app-ssr-plus|+xray-core +mihomo +coreutils-timeout" \
 		"openwrt-passwall/luci-app-passwall|+xray-core +sing-box" \
-		"openwrt-passwall2/luci-app-passwall2|+xray-core +sing-box"
-	do
+		"openwrt-passwall2/luci-app-passwall2|+xray-core +sing-box"; do
 		mk="${SRC}/package/${spec%%|*}/Makefile"
 		cores="${spec##*|}"
 
@@ -1581,7 +1602,7 @@ ensure_frontend_cores() {
 			}
 			{ print }
 			END { exit(done ? 0 : 1) }
-		' "$mk" > "${mk}.tmp"; then
+		' "$mk" >"${mk}.tmp"; then
 			rm -f "${mk}.tmp"
 			warn "could not find the luci.mk include in ${spec%%|*}; it would install without a core"
 			continue
@@ -1629,6 +1650,23 @@ prune_dangling_depends() {
 			continue
 		fi
 		sed -i "\|:${pkg}|d" "$mk"
+		# Invalidate OpenWrt's metadata cache for this package.
+		#
+		# `prepare-tmpinfo` scans package/*/Makefile INCREMENTALLY: include/
+		# scan.mk keeps per-file results under tmp/info/ and only rescans a
+		# Makefile it considers stale.  Editing the file is not always enough —
+		# the first defconfig of a run can reuse a tmp/.config-package.in built
+		# BEFORE this edit, so it still reports
+		#
+		#   WARNING: Makefile '.../luci-app-ssr-plus/Makefile' has a dependency
+		#            on 'kcptun-client', which does not exist
+		#
+		# Measured on this tree: tmp/.config-package.in was written at 19:03 and
+		# still contained the pruned clause when the audit ran at 19:05, which
+		# made the audit fail on a dependency that had already been removed.
+		# Dropping the stale scan result is what makes the prune authoritative.
+		rm -f "${SRC}/tmp/info/.packageinfo-$(basename "$(dirname "$mk")")" \
+			"${SRC}/tmp/.config-package.in" 2>/dev/null || true
 		log "  pruned the dangling dependency on ${pkg} (no feed in this tree provides it)"
 		pruned=$((pruned + 1))
 	done
@@ -1657,7 +1695,10 @@ install_nftables_patches() {
 	local dir="${SRC}/package/network/utils/nftables/patches"
 	local f
 
-	[ -d "$dir" ] || { warn "No nftables patches directory; fullcone will not be available to nft"; return 0; }
+	[ -d "$dir" ] || {
+		warn "No nftables patches directory; fullcone will not be available to nft"
+		return 0
+	}
 
 	# firewall4 last: it is the layer that actually emits the rules.  Without it
 	# nft knows the `fullcone` keyword and nothing ever writes one.
@@ -1715,7 +1756,7 @@ install_proxy_repos() {
 	# No dedicated per-app switch exists here: these trees are pulled in by the
 	# two repository gates, so that is what the failure message names.
 	install_optional_external "ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES" \
-		openwrt-passwall  https://github.com/Openwrt-Passwall/openwrt-passwall.git main
+		openwrt-passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git main
 	install_optional_external "ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES" \
 		openwrt-passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git main
 
@@ -1726,7 +1767,7 @@ install_proxy_repos() {
 		xray-core sing-box microsocks
 
 	install_optional_external "ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES" \
-		OpenWrt-momo   https://github.com/nikkinikki-org/OpenWrt-momo.git main
+		OpenWrt-momo https://github.com/nikkinikki-org/OpenWrt-momo.git main
 	install_optional_external "ENABLE_PROXY_REPOS / ENABLE_REPO_PACKAGES" \
 		openwrt-fchomo https://github.com/fcshark-org/openwrt-fchomo.git master
 	# NeKoBox bundles its own sing-box and mihomo.  sing-box duplicates the
@@ -1816,23 +1857,23 @@ config_set_symbol() {
 	if grep -q "^${symbol}=" "$SRC/.config" 2>/dev/null; then
 		sed -i "s|^${symbol}=.*|${symbol}=${value}|" "$SRC/.config"
 	else
-		printf '%s=%s\n' "$symbol" "$value" >> "$SRC/.config"
+		printf '%s=%s\n' "$symbol" "$value" >>"$SRC/.config"
 	fi
 }
 
-config_enable()  { config_set_symbol "CONFIG_PACKAGE_$1" "y"; }
+config_enable() { config_set_symbol "CONFIG_PACKAGE_$1" "y"; }
 config_disable() { config_set_symbol "CONFIG_PACKAGE_$1" "n"; }
 
 append_board_stack_config() {
 	local out="$1"
 
-	cat >> "$out" <<'EOF'
+	cat >>"$out" <<'EOF'
 
 # --------------------------------------------------- H5000M board stack ------
 EOF
 
 	if is_true "$ENABLE_FANCONTROL"; then
-		cat >> "$out" <<'EOF'
+		cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_luci-app-h5000m-fancontrol=y
 CONFIG_PACKAGE_kmod-hwmon-pwmfan=y
 CONFIG_PACKAGE_luci-i18n-h5000m-fancontrol-zh-cn=y
@@ -1840,14 +1881,14 @@ EOF
 	fi
 
 	if is_true "$ENABLE_NETMODE"; then
-		cat >> "$out" <<'EOF'
+		cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_luci-app-h5000m-netmode=y
 CONFIG_PACKAGE_luci-i18n-h5000m-netmode-zh-cn=y
 EOF
 	fi
 
 	if is_true "$ENABLE_WWAND"; then
-		cat >> "$out" <<'EOF'
+		cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_wwand=y
 CONFIG_PACKAGE_wwand-qmi=y
 CONFIG_PACKAGE_wwand-ncm=y
@@ -1862,13 +1903,13 @@ EOF
 	fi
 
 	if is_true "$ENABLE_MT5700M"; then
-		cat >> "$out" <<'EOF'
+		cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_luci-app-mt5700m=y
 CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
 EOF
 	fi
 
-	cat >> "$out" <<'EOF'
+	cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_h5000m-integration=y
 CONFIG_PACKAGE_luci-app-h5000m-accel=y
 CONFIG_PACKAGE_kmod-tcp-bbr=y
@@ -1934,7 +1975,7 @@ EOF
 	#
 	# This is a few tens of KB and it is what makes adblock-fast's recommended
 	# dnsmasq.ipset mode work instead of merely warning about it.
-	cat >> "$out" <<'EOF'
+	cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_dnsmasq-full=y
 CONFIG_PACKAGE_ipset=y
 CONFIG_PACKAGE_kmod-ipt-ipset=y
@@ -1961,7 +2002,7 @@ EOF
 	# same tree in the same run, which is the only way a kernel module may ever
 	# be paired with a kernel.
 	if is_true "$ENABLE_EBPF_PROXY_KERNEL"; then
-		cat >> "$out" <<'EOF'
+		cat >>"$out" <<'EOF'
 
 # eBPF proxy kernel support (Nikki-RS): cgroup BPF needs cgroups underneath it.
 # The TC half rides on kmod-sched-core + kmod-sched-bpf.
@@ -1990,13 +2031,13 @@ EOF
 append_optional_config() {
 	local out="$1"
 
-	cat >> "$out" <<'EOF'
+	cat >>"$out" <<'EOF'
 
 # ------------------------------------------------------ optional services ---
 EOF
 
 	if is_true "$ENABLE_UPNP"; then
-		cat >> "$out" <<'EOF'
+		cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_luci-app-upnp=y
 CONFIG_PACKAGE_luci-i18n-upnp-zh-cn=y
 CONFIG_PACKAGE_miniupnpd-nftables=y
@@ -2008,7 +2049,7 @@ EOF
 	# root/etc/uci-defaults/30_luci-theme-argon, which points
 	# luci.main.mediaurlbase at /luci-static/argon on first boot.
 	if is_true "$ENABLE_THEME_ARGON"; then
-		cat >> "$out" <<'EOF'
+		cat >>"$out" <<'EOF'
 CONFIG_PACKAGE_luci-theme-argon=y
 CONFIG_PACKAGE_luci-app-argon-config=y
 EOF
@@ -2040,12 +2081,13 @@ EOF
 
 	# emit_service <switch-value> <package>...
 	emit_service() {
-		local on="$1"; shift
+		local on="$1"
+		shift
 		local mode="$service_pkg_mode"
 		local pkg
 		is_true "$on" && mode="y"
 		for pkg in "$@"; do
-			printf 'CONFIG_PACKAGE_%s=%s\n' "$pkg" "$mode" >> "$out"
+			printf 'CONFIG_PACKAGE_%s=%s\n' "$pkg" "$mode" >>"$out"
 			EMITTED_PACKAGES+=("$pkg")
 		done
 	}
@@ -2055,9 +2097,9 @@ EOF
 		luci-app-dockerman luci-i18n-dockerman-zh-cn \
 		kmod-fs-cifs kmod-nf-nathelper-extra
 
-	emit_service "$ENABLE_NIKKI"     nikki-rs clash-rs luci-app-nikki-rs
+	emit_service "$ENABLE_NIKKI" nikki-rs clash-rs luci-app-nikki-rs
 	emit_service "$ENABLE_OPENCLASH" luci-app-openclash
-	emit_service "$ENABLE_MOSDNS"    mosdns luci-app-mosdns
+	emit_service "$ENABLE_MOSDNS" mosdns luci-app-mosdns
 	# ucode-mod-math is a HARD requirement that upstream does not declare.
 	# luci-app-homeproxy's LUCI_DEPENDS lists ucode-mod-digest but not math, even
 	# though root/etc/homeproxy/scripts/generate_client.uc line 11 does
@@ -2074,7 +2116,7 @@ EOF
 	# replaces ip-tiny, which the base image selects; ip-tiny is turned off below
 	# so the two do not collide.
 	# ip-full conflicts with the ip-tiny the base image pulls in.
-	printf 'CONFIG_PACKAGE_ip-tiny=n\n' >> "$out"
+	printf 'CONFIG_PACKAGE_ip-tiny=n\n' >>"$out"
 
 	# Mesh: the front-end plus the DAWN / batman-adv stack it drives.  DAWN is a
 	# decentralised WiFi controller and batman-adv carries the mesh links; both
@@ -2128,12 +2170,12 @@ EOF
 		shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir
 
 	# The INCLUDE_* switches themselves.  Off, so the selects above cannot fire.
-	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Http_Proxy=n\n' >> "$out"
-	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ChinaDNS_NG=n\n' >> "$out"
-	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=n\n' >> "$out"
-	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=n\n' >> "$out"
-	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Kcptun=n\n' >> "$out"
-	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=n\n' >> "$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Http_Proxy=n\n' >>"$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ChinaDNS_NG=n\n' >>"$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=n\n' >>"$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=n\n' >>"$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Kcptun=n\n' >>"$out"
+	printf 'CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=n\n' >>"$out"
 
 	emit_service "$ENABLE_ADBLOCK" \
 		adblock luci-app-adblock luci-i18n-adblock-zh-cn
@@ -2338,9 +2380,9 @@ build_required_packages() {
 		luci-i18n-base-zh-cn
 	)
 	is_true "$ENABLE_FANCONTROL" && REQUIRED_PACKAGES+=(luci-app-h5000m-fancontrol kmod-hwmon-pwmfan)
-	is_true "$ENABLE_NETMODE"    && REQUIRED_PACKAGES+=(luci-app-h5000m-netmode)
-	is_true "$ENABLE_WWAND"      && REQUIRED_PACKAGES+=(wwand wwand-qmi wwand-ncm wwand-mbim luci-app-wwand luci-proto-wwand)
-	is_true "$ENABLE_MT5700M"    && REQUIRED_PACKAGES+=(luci-app-mt5700m ubus-at-daemon sms-tool_q)
+	is_true "$ENABLE_NETMODE" && REQUIRED_PACKAGES+=(luci-app-h5000m-netmode)
+	is_true "$ENABLE_WWAND" && REQUIRED_PACKAGES+=(wwand wwand-qmi wwand-ncm wwand-mbim luci-app-wwand luci-proto-wwand)
+	is_true "$ENABLE_MT5700M" && REQUIRED_PACKAGES+=(luci-app-mt5700m ubus-at-daemon sms-tool_q)
 	is_true "$ENABLE_THEME_ARGON" && REQUIRED_PACKAGES+=(luci-theme-argon luci-app-argon-config)
 	REQUIRED_PACKAGES+=(h5000m-integration luci-app-h5000m-accel kmod-tcp-bbr
 		kmod-nft-socket kmod-nft-tproxy
@@ -2374,20 +2416,20 @@ build_required_packages() {
 	# produced no diagnostic naming any of them.  Without these entries a typo
 	# in a package name, or an upstream package being removed, would ship a
 	# firmware that quietly lacks the feature the switch promised.
-	is_true "$ENABLE_DOCKERMAN"   && REQUIRED_PACKAGES+=(docker dockerd containerd runc luci-app-dockerman)
-	is_true "$ENABLE_NIKKI"       && REQUIRED_PACKAGES+=(nikki-rs clash-rs luci-app-nikki-rs)
-	is_true "$ENABLE_OPENCLASH"   && REQUIRED_PACKAGES+=(luci-app-openclash)
-	is_true "$ENABLE_MOSDNS"      && REQUIRED_PACKAGES+=(mosdns luci-app-mosdns)
+	is_true "$ENABLE_DOCKERMAN" && REQUIRED_PACKAGES+=(docker dockerd containerd runc luci-app-dockerman)
+	is_true "$ENABLE_NIKKI" && REQUIRED_PACKAGES+=(nikki-rs clash-rs luci-app-nikki-rs)
+	is_true "$ENABLE_OPENCLASH" && REQUIRED_PACKAGES+=(luci-app-openclash)
+	is_true "$ENABLE_MOSDNS" && REQUIRED_PACKAGES+=(mosdns luci-app-mosdns)
 	# The ucode module and the two TUN packages are listed here too: a
 	# configuration that drops them builds a HomeProxy that cannot start, and
 	# `make defconfig` drops requests silently rather than failing.
-	is_true "$ENABLE_HOMEPROXY"   && REQUIRED_PACKAGES+=(luci-app-homeproxy ucode-mod-math ip-full kmod-tun)
+	is_true "$ENABLE_HOMEPROXY" && REQUIRED_PACKAGES+=(luci-app-homeproxy ucode-mod-math ip-full kmod-tun)
 	# Mesh and SSR-Plus.  Both are Lua-era LuCI apps, so luci-compat is not
 	# optional: without it the pages do not render under mainline's JS LuCI.
-	is_true "$ENABLE_EASYMESH"    && REQUIRED_PACKAGES+=(luci-app-easymesh dawn batctl-default kmod-batman-adv luci-compat)
+	is_true "$ENABLE_EASYMESH" && REQUIRED_PACKAGES+=(luci-app-easymesh dawn batctl-default kmod-batman-adv luci-compat)
 	is_true "$ENABLE_ADGUARDHOME" && REQUIRED_PACKAGES+=(adguardhome luci-app-adguardhome)
-	is_true "$ENABLE_UPNP"        && REQUIRED_PACKAGES+=(luci-app-upnp miniupnpd-nftables)
-	is_true "$ENABLE_ADBLOCK"     && REQUIRED_PACKAGES+=(adblock luci-app-adblock)
+	is_true "$ENABLE_UPNP" && REQUIRED_PACKAGES+=(luci-app-upnp miniupnpd-nftables)
+	is_true "$ENABLE_ADBLOCK" && REQUIRED_PACKAGES+=(adblock luci-app-adblock)
 
 	# Required, not cosmetic.  Every line above is `is_true X && ...`, so when
 	# the LAST switch is off the final statement returns 1 and — because this
@@ -2406,9 +2448,9 @@ build_required_packages() {
 build_expected_packages() {
 	EXPECTED_PACKAGES=()
 	is_true "$ENABLE_FANCONTROL" && EXPECTED_PACKAGES+=(luci-i18n-h5000m-fancontrol-zh-cn)
-	is_true "$ENABLE_NETMODE"    && EXPECTED_PACKAGES+=(luci-i18n-h5000m-netmode-zh-cn)
-	is_true "$ENABLE_UPNP"       && EXPECTED_PACKAGES+=(luci-i18n-upnp-zh-cn)
-	is_true "$ENABLE_ADBLOCK"    && EXPECTED_PACKAGES+=(luci-i18n-adblock-zh-cn)
+	is_true "$ENABLE_NETMODE" && EXPECTED_PACKAGES+=(luci-i18n-h5000m-netmode-zh-cn)
+	is_true "$ENABLE_UPNP" && EXPECTED_PACKAGES+=(luci-i18n-upnp-zh-cn)
+	is_true "$ENABLE_ADBLOCK" && EXPECTED_PACKAGES+=(luci-i18n-adblock-zh-cn)
 	return 0
 }
 
@@ -2419,7 +2461,7 @@ configure_build() {
 
 	log "Writing .config"
 	cp -f "${ROOT_DIR}/configs/h5000m.config" .config
-	printf '\n' >> .config
+	printf '\n' >>.config
 	append_board_stack_config .config
 	append_optional_config .config
 
@@ -2427,8 +2469,8 @@ configure_build() {
 	# Keep defconfig's stderr: this is where OpenWrt reports
 	# "WARNING: Makefile ... has a dependency on X, which does not exist" for
 	# every package in the tree, and the audit below needs to see them.
-	run_with_timeout "$CONFIG_TIMEOUT" make defconfig 2>&1 | tee -a "$LOG_FILE" \
-		|| die "make defconfig failed"
+	run_with_timeout "$CONFIG_TIMEOUT" make defconfig 2>&1 | tee -a "$LOG_FILE" ||
+		die "make defconfig failed"
 
 	# defconfig silently drops symbols whose dependencies were not satisfied.
 	# Re-assert the ones this image is defined by, then fold the result again.
@@ -2450,8 +2492,8 @@ configure_build() {
 	for pkg in "${REQUIRED_PACKAGES[@]}"; do
 		config_enable "$pkg"
 	done
-	run_with_timeout "$CONFIG_TIMEOUT" make defconfig 2>&1 | tee -a "$LOG_FILE" \
-		|| die "second make defconfig failed"
+	run_with_timeout "$CONFIG_TIMEOUT" make defconfig 2>&1 | tee -a "$LOG_FILE" ||
+		die "second make defconfig failed"
 
 	# Kernel symbols are read out of .config by the kernel build (see
 	# include/kernel-defaults.mk: an `awk` copies every CONFIG_KERNEL_* line
@@ -2532,8 +2574,8 @@ config_symbol_present() {
 # promotes symbols on its own when something selects them (it did exactly that
 # to luci-app-ssr-plus), so this is checked rather than assumed.
 assert_repo_only() {
-	grep -q "^CONFIG_PACKAGE_$1=y$" "$SRC/.config" \
-		&& die "$1 was promoted to =y by defconfig — the image must not carry repository-only packages. Find the new select that pulls it in and turn it off."
+	grep -q "^CONFIG_PACKAGE_$1=y$" "$SRC/.config" &&
+		die "$1 was promoted to =y by defconfig — the image must not carry repository-only packages. Find the new select that pulls it in and turn it off."
 	return 0
 }
 
@@ -2557,31 +2599,31 @@ verify_config() {
 	fi
 
 	# Board target must be the H5000M, not a generic filogic profile.
-	grep -q "^CONFIG_TARGET_${TARGET_BOARD}_${TARGET_SUBTARGET}_DEVICE_${TARGET_PROFILE}=y$" "$SRC/.config" \
-		|| die "target profile ${TARGET_PROFILE} is not selected in .config"
+	grep -q "^CONFIG_TARGET_${TARGET_BOARD}_${TARGET_SUBTARGET}_DEVICE_${TARGET_PROFILE}=y$" "$SRC/.config" ||
+		die "target profile ${TARGET_PROFILE} is not selected in .config"
 
 	# The eBPF proxy's kernel half.  Checked here rather than only written in
 	# append_board_stack_config because this is the one part of the eBPF
 	# datapath that mainline leaves off, and a silently dropped symbol would
 	# turn the Nikki-RS eBPF page into a switch that cannot work.
 	if is_true "$ENABLE_EBPF_PROXY_KERNEL"; then
-		grep -q '^CONFIG_KERNEL_CGROUPS=y$' "$SRC/.config" \
-			|| die "CONFIG_KERNEL_CGROUPS was dropped — the eBPF proxy's cgroup half cannot work"
-		grep -q '^CONFIG_KERNEL_CGROUP_BPF=y$' "$SRC/.config" \
-			|| die "CONFIG_KERNEL_CGROUP_BPF was dropped — the eBPF proxy's cgroup half cannot work"
+		grep -q '^CONFIG_KERNEL_CGROUPS=y$' "$SRC/.config" ||
+			die "CONFIG_KERNEL_CGROUPS was dropped — the eBPF proxy's cgroup half cannot work"
+		grep -q '^CONFIG_KERNEL_CGROUP_BPF=y$' "$SRC/.config" ||
+			die "CONFIG_KERNEL_CGROUP_BPF was dropped — the eBPF proxy's cgroup half cannot work"
 		# BTF rides on these two: KERNEL_DEBUG_INFO_BTF is
 		# `depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED`, and
 		# DEBUG_INFO_REDUCED defaults to y — a defconfig that re-enabled it
 		# would drop BTF without any other symptom, so all three are asserted.
-		grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' "$SRC/.config" \
-			|| die "CONFIG_KERNEL_DEBUG_INFO was dropped — CONFIG_DEBUG_INFO_BTF cannot be generated without full debug info"
-		grep -q '^CONFIG_KERNEL_DEBUG_INFO_REDUCED=n$' "$SRC/.config" \
-			|| die "CONFIG_KERNEL_DEBUG_INFO_REDUCED is not explicitly off — it defaults to y and silently disables CONFIG_DEBUG_INFO_BTF"
-		grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' "$SRC/.config" \
-			|| die "CONFIG_KERNEL_DEBUG_INFO_BTF was dropped — the kernel would ship no BTF type information"
+		grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' "$SRC/.config" ||
+			die "CONFIG_KERNEL_DEBUG_INFO was dropped — CONFIG_DEBUG_INFO_BTF cannot be generated without full debug info"
+		grep -q '^CONFIG_KERNEL_DEBUG_INFO_REDUCED=n$' "$SRC/.config" ||
+			die "CONFIG_KERNEL_DEBUG_INFO_REDUCED is not explicitly off — it defaults to y and silently disables CONFIG_DEBUG_INFO_BTF"
+		grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' "$SRC/.config" ||
+			die "CONFIG_KERNEL_DEBUG_INFO_BTF was dropped — the kernel would ship no BTF type information"
 		for pkg in kmod-sched-core kmod-sched-bpf; do
-			config_symbol_is_set "$pkg" \
-				|| die "${pkg} is not in the image — the eBPF proxy's TC half cannot work"
+			config_symbol_is_set "$pkg" ||
+				die "${pkg} is not in the image — the eBPF proxy's TC half cannot work"
 		done
 	fi
 
@@ -2593,12 +2635,24 @@ verify_config() {
 		luci-app-hijpass luci-app-v2raya luci-app-adblock-fast; do
 		assert_repo_only "$fe"
 	done
-	is_true "$ENABLE_HOMEPROXY"   || assert_repo_only luci-app-homeproxy
-	is_true "$ENABLE_ADBLOCK"     || { assert_repo_only adblock; assert_repo_only luci-app-adblock; }
-	is_true "$ENABLE_OPENCLASH"   || assert_repo_only luci-app-openclash
-	is_true "$ENABLE_ADGUARDHOME" || { assert_repo_only adguardhome; assert_repo_only luci-app-adguardhome; }
-	is_true "$ENABLE_DOCKERMAN"   || { assert_repo_only docker; assert_repo_only luci-app-dockerman; }
-	is_true "$ENABLE_NIKKI"       || { assert_repo_only nikki-rs; assert_repo_only clash-rs; }
+	is_true "$ENABLE_HOMEPROXY" || assert_repo_only luci-app-homeproxy
+	is_true "$ENABLE_ADBLOCK" || {
+		assert_repo_only adblock
+		assert_repo_only luci-app-adblock
+	}
+	is_true "$ENABLE_OPENCLASH" || assert_repo_only luci-app-openclash
+	is_true "$ENABLE_ADGUARDHOME" || {
+		assert_repo_only adguardhome
+		assert_repo_only luci-app-adguardhome
+	}
+	is_true "$ENABLE_DOCKERMAN" || {
+		assert_repo_only docker
+		assert_repo_only luci-app-dockerman
+	}
+	is_true "$ENABLE_NIKKI" || {
+		assert_repo_only nikki-rs
+		assert_repo_only clash-rs
+	}
 
 	# Every name emit_service wrote has to be a real package.  defconfig drops
 	# an unknown CONFIG_PACKAGE_x line with exit 0 and no diagnostic, so an
@@ -2607,8 +2661,8 @@ verify_config() {
 	# list — the same source the emit lists were taken from.
 	if [ -s "${SRC}/tmp/.packageinfo" ]; then
 		for pkg in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
-			grep -qFx "Package: ${pkg}" "${SRC}/tmp/.packageinfo" \
-				|| die "emit_service wrote CONFIG_PACKAGE_${pkg}, but no package by that name exists — upstream renamed or removed it; update the emit lists in scripts/local-build.sh"
+			grep -qFx "Package: ${pkg}" "${SRC}/tmp/.packageinfo" ||
+				die "emit_service wrote CONFIG_PACKAGE_${pkg}, but no package by that name exists — upstream renamed or removed it; update the emit lists in scripts/local-build.sh"
 		done
 		log "Verified ${#EMITTED_PACKAGES[@]} emitted package names exist upstream"
 	else
@@ -2652,15 +2706,15 @@ audit_own_warnings() {
 		[ -n "$mk" ] || continue
 		case "$mk" in
 			package/feeds/*) upstream=$((upstream + 1)) ;;
-			package/luci-app-ssr-plus/*|package/openwrt-passwall*/*|package/luci-app-h5000m-*/*|package/h5000m-*/*|package/nft-fullcone/*|package/luci-theme-argon/*|package/luci-app-argon-config/*|package/openwrt-nekobox/*|package/OpenWrt-*/*|package/OpenClash/*|package/homeproxy/*|package/openwrt-fchomo/*|package/luci-app-mosdns/*|package/luci-ssr-plus-3proxy/*|package/luci-easymesh/*)
+			package/luci-app-ssr-plus/* | package/openwrt-passwall*/* | package/luci-app-h5000m-*/* | package/h5000m-*/* | package/nft-fullcone/* | package/luci-theme-argon/* | package/luci-app-argon-config/* | package/openwrt-nekobox/* | package/OpenWrt-*/* | package/OpenClash/* | package/homeproxy/* | package/openwrt-fchomo/* | package/luci-app-mosdns/* | package/luci-ssr-plus-3proxy/* | package/luci-easymesh/*)
 				ours=$((ours + 1))
 				warn "our Makefile has an unsatisfiable dependency: ${mk}"
 				;;
 			*) baseline=$((baseline + 1)) ;;
 		esac
-	done < <(sed 's/\x1b\[[0-9;]*m//g' "$LOG_FILE" 2>/dev/null \
-		| grep -aoE "WARNING: Makefile '[^']+'" \
-		| sed "s|^.*WARNING: Makefile '||; s|'$||" | sort -u)
+	done < <(sed 's/\x1b\[[0-9;]*m//g' "$LOG_FILE" 2>/dev/null |
+		grep -aoE "WARNING: Makefile '[^']+'" |
+		sed "s|^.*WARNING: Makefile '||; s|'$||" | sort -u)
 
 	if [ "$ours" -ne 0 ]; then
 		die "${ours} Makefile(s) of ours declare dependencies this tree cannot satisfy — see prune_dangling_depends() and the emit lists in this script"
@@ -2693,9 +2747,9 @@ dump_enabled_packages() {
 		printf '# symbol alias here (libubox, libgcc1 -> libgcc) and some entries are\n'
 		printf '# build-time knobs rather than packages (MAC80211_DEBUGFS, TAR_GZIP,\n'
 		printf '# trusted-firmware-a-*).  For the installed set see the .manifest.\n'
-		grep '^CONFIG_PACKAGE_.*=y$' "$SRC/.config" \
-			| sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
-	} > "$out"
+		grep '^CONFIG_PACKAGE_.*=y$' "$SRC/.config" |
+			sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
+	} >"$out"
 
 	n="$(grep -vc '^#' "$out")"
 	log "Wrote ${out} (${n} enabled .config symbols)"
@@ -2710,8 +2764,8 @@ prefetch_and_toolchain() {
 	else
 		log "Prefetching sources (make download)"
 		run_with_timeout "$DOWNLOAD_TIMEOUT" make download -j"${THREADS}" \
-			BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" \
-			|| warn "make download reported failures; the compile step will retry them"
+			BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" ||
+			warn "make download reported failures; the compile step will retry them"
 	fi
 
 	if is_true "$SKIP_TOOLCHAIN"; then
@@ -2721,8 +2775,11 @@ prefetch_and_toolchain() {
 
 	log "Building toolchain (this is the long part)"
 	run_with_timeout "$TOOLCHAIN_TIMEOUT" make toolchain/install -j"${THREADS}" \
-		BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" \
-		|| { report_build_failure; die "Toolchain build failed"; }
+		BUILD_LOG=1 BUILD_LOG_DIR="$BUILD_LOG_DIR" ||
+		{
+			report_build_failure
+			die "Toolchain build failed"
+		}
 }
 
 compile_firmware() {
@@ -2802,7 +2859,7 @@ compile_firmware() {
 		while kill -0 "$make_pid" 2>/dev/null; do
 			sleep "$HEARTBEAT_INTERVAL"
 			kill -0 "$make_pid" 2>/dev/null || break
-			log "still compiling... $(( ($(date +%s) - start) / 60 )) min elapsed"
+			log "still compiling... $((($(date +%s) - start) / 60)) min elapsed"
 		done
 	) &
 	heartbeat_pid=$!
@@ -2816,7 +2873,7 @@ compile_firmware() {
 	kill "$heartbeat_pid" 2>/dev/null || true
 	wait "$heartbeat_pid" 2>/dev/null || true
 
-	log "Compilation finished in $(( ($(date +%s) - start) / 60 )) min"
+	log "Compilation finished in $((($(date +%s) - start) / 60)) min"
 }
 
 # Say which package failed and why, from the logs make just wrote.
@@ -2838,7 +2895,7 @@ report_build_failure() {
 	# kept by nullglob (nullglob drops unmatched *patterns*, not missing names),
 	# and the loop below would then try to read a file that is not there.
 	shopt -s nullglob
-	local errors=("$BUILD_LOG_DIR"/*/error.txt "$BUILD_LOG_DIR"/*/*/error.txt \
+	local errors=("$BUILD_LOG_DIR"/*/error.txt "$BUILD_LOG_DIR"/*/*/error.txt
 		"$BUILD_LOG_DIR"/*/*/*/error.txt "$BUILD_LOG_DIR"/*/*/*/*/error.txt)
 	shopt -u nullglob
 
@@ -2856,8 +2913,8 @@ report_build_failure() {
 		# of whichever subdir make was building, so several failures share one
 		# file.  The target therefore has to be read out of the contents.
 		while IFS= read -r line; do
-			target="$(printf '%s' "$line" \
-				| sed 's/^[[:space:]]*ERROR:[[:space:]]*//; s/[[:space:]]*failed to build\.\{0,1\}$//')"
+			target="$(printf '%s' "$line" |
+				sed 's/^[[:space:]]*ERROR:[[:space:]]*//; s/[[:space:]]*failed to build\.\{0,1\}$//')"
 			[ -n "$target" ] || continue
 			found=1
 			printf '  %s\n' "$target" >&2
@@ -2882,7 +2939,7 @@ report_build_failure() {
 			else
 				printf '  (no per-package log found for this target)\n' >&2
 			fi
-		done < "$err"
+		done <"$err"
 	done
 
 	if [ "$found" = 0 ]; then
@@ -2962,8 +3019,8 @@ build_apk_repository() {
 	fi
 
 	# shellcheck disable=SC2046
-	"$apk_tool" mkndx --allow-untrusted "${sign_args[@]}" -o "${repo}/packages.adb" $(find "$repo" -maxdepth 1 -name '*.apk') \
-		|| die "apk mkndx failed — the repository would be unreadable"
+	"$apk_tool" mkndx --allow-untrusted "${sign_args[@]}" -o "${repo}/packages.adb" $(find "$repo" -maxdepth 1 -name '*.apk') ||
+		die "apk mkndx failed — the repository would be unreadable"
 
 	if [ "${#sign_args[@]}" -gt 0 ]; then
 		log "Signed ${repo}/packages.adb with the build key"
@@ -3005,8 +3062,8 @@ collect_artifacts() {
 	# container/chroot or a manual sysupgrade.
 	find "$bin_dir" -maxdepth 1 -type f \
 		\( -name '*.bin' -o -name '*.itb' -o -name '*.tar.gz' -o -name '*.img.gz' \
-		   -o -name '*.manifest' -o -name 'profiles.json' -o -name 'sha256sums' \
-		   -o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \) \
+		-o -name '*.manifest' -o -name 'profiles.json' -o -name 'sha256sums' \
+		-o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \) \
 		-exec cp -f {} "$dest/" \;
 
 	if [ -d "${bin_dir}/packages" ]; then
@@ -3038,7 +3095,8 @@ write_build_info() {
 	# linux_kernel.vermagic is the kernel ABI hash: it is what a separately built
 	# plugin .apk must match to be installable on this image.
 	if [ -f "$profiles" ] && command -v python3 >/dev/null 2>&1; then
-		eval "$(python3 - "$profiles" <<'PY'
+		eval "$(
+			python3 - "$profiles" <<'PY'
 import json, shlex, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -3054,7 +3112,7 @@ for name, val in (
     if val:
         print(f"{name}={shlex.quote(str(val))}")
 PY
-)"
+		)"
 	fi
 
 	# A shallow clone carries no tags, so scripts/getver.sh can only produce
@@ -3063,12 +3121,12 @@ PY
 	# revision this project pins, record the published snapshot id instead of a
 	# misleading r0.  Any other revision keeps the tree-derived value, because
 	# inventing a snapshot number we did not verify would be worse.
-	if [ -n "${OPENWRT_PINNED_SNAPSHOT:-}" ] && [ -n "${OPENWRT_PINNED_REVISION:-}" ] \
-		&& [ "$rev" = "$OPENWRT_PINNED_REVISION" ]; then
+	if [ -n "${OPENWRT_PINNED_SNAPSHOT:-}" ] && [ -n "${OPENWRT_PINNED_REVISION:-}" ] &&
+		[ "$rev" = "$OPENWRT_PINNED_REVISION" ]; then
 		code="$OPENWRT_PINNED_SNAPSHOT"
 	fi
 
-	cat > "${dest}/BUILD-INFO.txt" <<EOF
+	cat >"${dest}/BUILD-INFO.txt" <<EOF
 project=AutoBuild-H5000M-Openwrt
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
@@ -3098,7 +3156,7 @@ EOF
 # ----------------------------------------------------------------- main ------
 main() {
 	cd "$ROOT_DIR"
-	: > "$LOG_FILE"
+	: >"$LOG_FILE"
 
 	if is_true "$INSTALL_DEPS"; then
 		install_deps
