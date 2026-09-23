@@ -2158,11 +2158,19 @@ EOF
 	#
 	# They are therefore turned off and the cores are emitted here as =m
 	# alongside every other proxy core, so `apk add` finds them all.
+	# `gn` is deliberately NOT emitted.  It is a HOST-ONLY build tool
+	# (PKG_HOST_ONLY:=1, BUILDONLY:=1 in the helloworld tree): OpenWrt builds it
+	# automatically when a package declares `PKG_BUILD_DEPENDS:=gn/host`, and
+	# BUILDONLY means kconfig never offers a target symbol for it at all.  Asking
+	# for CONFIG_PACKAGE_gn could therefore never take effect — it was silently
+	# dropped on every build, which the emitted-package survival check in
+	# verify_config now reports by name instead of leaving to a repository that
+	# is quietly one package short.
 	emit_service "" \
 		luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn \
 		chinadns-ng dns2socks dns2tcp ipt2socks redsocks2 \
 		tcping shadow-tls tuic-client v2ray-plugin xray-plugin \
-		gn lua-neturl naiveproxy \
+		lua-neturl naiveproxy \
 		shadowsocks-libev-config shadowsocks-libev-ss-local \
 		shadowsocks-libev-ss-redir shadowsocks-libev-ss-server \
 		shadowsocks-libev-ss-tunnel shadowsocks-libev-ss-rules \
@@ -2348,6 +2356,36 @@ EOF
 		luci-app-xray luci-app-xray-geodata luci-app-xray-status \
 		luci-app-hijpass luci-i18n-hijpass-zh-cn \
 		v2raya luci-app-v2raya
+
+	# php8 must be requested EXPLICITLY, or luci-app-nekobox silently disappears.
+	#
+	# This is a Kconfig recursive-dependency trap, and it fails in the worst way:
+	# no error, no warning naming the package, just a missing symbol.
+	#
+	# nekobox's Makefile carries `+php8 +php8-cgi +php8-mod-curl
+	# +php8-mod-intl`.  The last one pulls the php8 feed's `PHP8_INTL` symbol,
+	# which is `depends on PACKAGE_php8` — while nekobox itself `select`s php8.
+	# Kconfig reports the loop,
+	#
+	#   symbol PACKAGE_php8 is selected by PACKAGE_luci-app-nekobox
+	#   symbol PACKAGE_luci-app-nekobox depends on PHP8_INTL
+	#   symbol PHP8_INTL depends on PACKAGE_php8
+	#
+	# and resolves it by dropping PACKAGE_php8.  That takes nekobox with it,
+	# because by then its own `depends on PACKAGE_php8` cannot be satisfied.
+	# Measured on this tree: with only the upstream DEPENDS, `make defconfig`
+	# leaves `# CONFIG_PACKAGE_php8 is not set` and NO luci-app-nekobox symbol
+	# at all, so the package is never built and the publish gate fails with
+	#
+	#   FAIL  luci-app-nekobox is not in the built repository
+	#
+	# The loop is only *reported* once php8 is on; nothing is dropped.  So the
+	# fix is to request php8 (and the modules nekobox loads at runtime) from
+	# here rather than relying on the package's own select.  Note this trap was
+	# latent for a long time: a stale tmp/.config-package.in masked it until
+	# prune_dangling_depends began invalidating that cache.
+	emit_service "" \
+		php8 php8-cgi php8-mod-curl php8-mod-intl
 
 	# Cores and helpers PassWall/PassWall2/HiJpass need that the official feeds do
 	# not carry, from the pruned openwrt-passwall-packages checkout.
@@ -2668,6 +2706,25 @@ verify_config() {
 	else
 		warn "no ${SRC}/tmp/.packageinfo — skipping the emitted-package existence check"
 	fi
+
+	# …and every one of them has to SURVIVE defconfig.
+	#
+	# Existing in .packageinfo only proves the package is DEFINED; it does not
+	# prove kconfig kept the symbol.  This is a real and very expensive failure
+	# mode: a Kconfig recursive dependency dropped PACKAGE_php8, which made
+	# luci-app-nekobox's `depends on PACKAGE_php8` unsatisfiable, so nekobox was
+	# dropped as well — silently, with no message naming it.  The only symptom
+	# appeared three hours later in the publish gate:
+	#
+	#   FAIL  luci-app-nekobox is not in the built repository
+	#
+	# Checking here turns a three-hour discovery into a few-minute one, and
+	# names the package instead of leaving it to a downstream symptom.
+	for pkg in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
+		config_symbol_present "$pkg" ||
+			die "emitted package ${pkg} did not survive defconfig, so it would be missing from the published repository. Look for a Kconfig 'recursive dependency' involving it (kconfig resolves such a loop by dropping a symbol) or a dependency nothing satisfies."
+	done
+	log "Verified all emitted packages survived defconfig"
 
 	log "Verified ${#REQUIRED_PACKAGES[@]} required packages and target profile ${TARGET_PROFILE}"
 
