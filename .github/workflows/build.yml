@@ -1397,7 +1397,22 @@ jobs:
   script-test:
     name: 设备脚本测试（复用工作流）
     needs: build
+    # A called workflow's job can only use permissions the CALLER already has.
+    #
+    # This is not obvious and it fails in the worst possible way: the whole
+    # workflow refuses to start, with no jobs and no error text.  Measured by
+    # bisection — the callee asking for `actions: read` while this workflow only
+    # granted `contents: read` produced
+    #
+    #   构建 H5000M 主线 OpenWrt 固件  completed/startup_failure
+    #
+    # `actions: read` is what `actions/download-artifact` needs in order to read
+    # the artifact this job exists to test, so it has to be granted HERE.  It is
+    # read-only, and scoped to this one job.
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/reusable-script-test.yml
     with:
-      artifact-name: H5000M-mainline-openwrt
-      tarball-glob: '**/*-targz-rootfs.tar.gz'
+      artifact_name: H5000M-mainline-openwrt
+      tarball_glob: '**/*-targz-rootfs.tar.gz'
