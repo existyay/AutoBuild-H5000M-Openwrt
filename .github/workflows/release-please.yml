@@ -39,6 +39,13 @@ jobs:
           # tag it creates (`v*`) matches build.yml's trigger.
           release-type: simple
           include-component-in-tag: false
+          # Release Please defaults this pattern to `chore${scope}: release...`
+          # with ${scope} = the branch name, i.e. `chore(master): ...`.  That
+          # collides with commitlint's fixed scope enum and the scope would
+          # change if the default branch were ever renamed.  Pinning it to the
+          # literal `release` scope — which IS in that enum — makes the release
+          # commit valid by construction instead of by exception.
+          pull-request-title-pattern: 'chore(release): release ${version}'
           # The firmware itself is versioned by its upstream revision
           # (openwrt-<sha>), which Release Please cannot know.  So this manages
           # the PROJECT version and the changelog; build.yml keeps naming the

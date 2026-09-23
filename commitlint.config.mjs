@@ -7,6 +7,29 @@
 // Conventional Commits is the contract that makes that automation honest.
 export default {
 	extends: ['@commitlint/config-conventional'],
+
+	// Machine-generated commits are exempt from the human commit-message rules.
+	//
+	// This is not a loophole — it is the only way the gate can be strict about
+	// what PEOPLE write while still letting the automation work:
+	//
+	//   * `Merge branch ...` — GitHub's "Update branch" button (and the
+	//     update-branch API) creates a merge commit.  It has no type or scope
+	//     because it is not authored content, and it disappears the moment the
+	//     PR is squash-merged.  Measured: it failed this gate on the Release
+	//     Please PR.
+	//   * `chore(master): release X` — Release Please derives the scope from the
+	//     BRANCH NAME, so the scope changes with the default branch and cannot
+	//     be part of a fixed enum.  release-please.yml overrides the pattern to
+	//     use `chore(release):` instead; this pattern is kept as defence for a
+	//     repo whose Release Please config has not been updated yet.
+	ignores: [
+		(msg) => /^Merge (branch|remote-tracking|pull request)\b/.test(msg),
+		(msg) => /^chore\([^)]*\): release\b/.test(msg),
+		// GitHub's own web-flow commits when editing a file in the browser.
+		(msg) => /^(Update|Create|Delete|Rename) /.test(msg)
+	],
+
 	rules: {
 		// The project writes Chinese commit bodies; keep the type and scope
 		// machine-readable and in English, and do not police the subject's
