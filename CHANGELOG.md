@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.3](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.2...v1.1.3) (2026-09-23)
+
+
+### Bug Fixes
+
+* **ci:** 修复复用工作流里 find -name 用了路径模式，导致设备脚本测试永远失败 ([#16](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/16)) ([9bc97ff](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/9bc97ff20253bf91fad2685b8515ba06bc8b3812))
+
 ## [1.1.2](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.1...v1.1.2) (2026-09-23)
 
 
