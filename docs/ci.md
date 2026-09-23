@@ -140,3 +140,28 @@ pre-commit install --hook-type commit-msg
 ./actionlint .github/workflows/*.yml   # GitHub Actions schema 校验
 pre-commit run --all-files             # 全部钩子
 ```
+
+---
+
+## 八、签名提交状态
+
+本机已生成专用 SSH 签名密钥（`~/.ssh/id_ed25519_signing`），并配置：
+
+```
+gpg.format         = ssh
+user.signingkey    = ~/.ssh/id_ed25519_signing.pub
+commit.gpgsign     = true
+tag.gpgsign        = true
+```
+
+本地验证为 `G`（good signature）。**公钥尚未上传到 GitHub**，因此远端提交
+暂时不会显示 Verified 徽章；上传后 `required_signatures` 规则即可启用。
+
+上传（需要 `admin:ssh_signing_key` scope 的 token）：
+
+```sh
+gh auth refresh -h github.com -s admin:ssh_signing_key
+gh api --method POST user/ssh-signing-keys \
+  -f title="H5000M build machine (commit signing)" \
+  -f key="$(cat ~/.ssh/id_ed25519_signing.pub)"
+```

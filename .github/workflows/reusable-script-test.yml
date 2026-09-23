@@ -1,4 +1,4 @@
-name: Reusable — device script test
+name: 复用工作流 — 设备脚本测试
 
 # A Reusable Workflow exists for units that need their OWN JOB: a runner, a
 # matrix, its own permissions.  This one runs the firmware's own first-boot
@@ -40,7 +40,7 @@ permissions: {}
 
 jobs:
   script-test:
-    name: First-boot scripts under real uci
+    name: 首启脚本（真实 uci）
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 20
     permissions:

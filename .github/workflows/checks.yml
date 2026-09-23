@@ -32,7 +32,7 @@ jobs:
   # the repository internally consistent?
   # ---------------------------------------------------------------------------
   check:
-    name: Repository and host checks
+    name: 仓库与主机检查
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -92,8 +92,21 @@ jobs:
           # This is the tool that catches what a YAML parse cannot: the
           # `workflow_dispatch` 10-input ceiling (this repo had 13), `uses` and
           # `run` in one step, unknown expression contexts.
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
-          ./actionlint -shellcheck= .github/workflows/*.yml
+          # Download the pinned release and VERIFY its SHA256 before running it.
+          #
+          # `curl ... | bash` was what this did first, and Scorecard's
+          # Pinned-Dependencies check (a Medium alert) is right to flag it: a
+          # script fetched from a moving `main` branch executes arbitrary code
+          # in a job that holds a repository token, and nothing verifies it.
+          # A release tarball plus a checksum is the same convenience without
+          # the moving part.
+          version=1.7.7
+          sha256=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+          curl -fsSL --retry 3 -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          echo "${sha256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint -shellcheck= .github/workflows/*.yml
 
       - name: zizmor (workflow supply chain)
         run: |
@@ -101,7 +114,12 @@ jobs:
           # Same version and persona as the security.yml job and the pre-commit
           # hook.  Kept here too so the CHEAP gate on every PR catches a
           # supply-chain regression without waiting for the security workflow.
-          pip install --disable-pip-version-check "zizmor==1.5.2"
+          # Hash-pinned install.  A bare `zizmor==1.5.2` is version-pinned but
+          # not integrity-pinned: PyPI could serve a rebuilt artifact under the
+          # same version, and Scorecard's Pinned-Dependencies check flags exactly
+          # that gap.  `pip --require-hashes` closes it.
+          python3 -m pip install --disable-pip-version-check --require-hashes \
+            -r .github/requirements-zizmor.txt
           zizmor --persona=auditor .github/workflows/
 
       - name: Verify target support upstream
@@ -565,7 +583,7 @@ jobs:
   # Runs against the PR's commit range rather than HEAD: commitlint is about
   # every commit that will land, not just the tip.
   commitlint:
-    name: Conventional Commits
+    name: 提交信息规约
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -586,8 +604,15 @@ jobs:
       - name: Install commitlint
         run: |
           set -euo pipefail
-          npm install --no-save --no-audit --no-fund \
-            @commitlint/cli@19.6.1 @commitlint/config-conventional@19.6.0
+          # `npm ci` against a committed lockfile, not a floating `npm install`.
+          #
+          # Scorecard's Pinned-Dependencies check flags an install that is not
+          # integrity-pinned.  A package-lock.json carries an `integrity`
+          # (sha512) for every package in the tree, and `npm ci` refuses to
+          # install anything that does not match it — the same guarantee the
+          # pip --require-hashes file gives on the Python side.
+          npm ci --no-audit --no-fund --ignore-scripts
+          npx commitlint --version
 
       - name: Lint the commits
         env:

@@ -94,3 +94,30 @@ skills-lock.json
 private-key.pem
 public-key.pem
 .signing/
+
+# ---------------------------------------------------------------------------
+# Tool binaries that must never be committed.
+#
+# Scorecard's Binary-Artifacts check (a High-severity alert) caught a 5.1 MB
+# `actionlint` binary in this repository: it had been downloaded to the working
+# tree to run the workflow audit and was then swept in by `git add -A`.  A
+# committed binary is an unreviewable blob — no diff, no provenance, and it
+# bypasses the "this repo is pure source" property the project depends on.
+#
+# Tools are fetched by checks.yml / pre-commit from their pinned releases.
+# ---------------------------------------------------------------------------
+actionlint
+shfmt
+shellcheck
+zizmor
+/tool-*
+
+# ---------------------------------------------------------------------------
+# Node dependencies.
+#
+# `npm ci` in the commitlint CI gate materialises this tree from
+# package-lock.json; it is build output, never source.  Committing it once put
+# 2240 files (291k lines) into a single commit — the lockfile is the artefact
+# that belongs in the repository, and it is what pins integrity.
+# ---------------------------------------------------------------------------
+node_modules/

@@ -81,7 +81,7 @@ jobs:
   # The firmware build.
   # ---------------------------------------------------------------------------
   build:
-    name: Build firmware
+    name: 构建固件
     permissions:
       contents: write
       # Push the build cache to GitHub Packages (ghcr.io).  Public packages are
@@ -1284,7 +1284,7 @@ jobs:
   # settings.  A build that produced a perfectly good firmware must not be
   # marked failed because the optional hosting step was not configured yet.
   publish-apk-repo:
-    name: Publish the apk repository
+    name: 发布 apk 仓库
     needs: build
     # Always: the firmware's built-in source entry points here, so
     # publishing it is part of producing a usable firmware.
@@ -1395,7 +1395,7 @@ jobs:
   # `secrets: inherit` is deliberately NOT used: the callee declares no secrets
   # and needs none, so passing them would widen exposure for nothing.
   script-test:
-    name: Device scripts (reusable)
+    name: 设备脚本测试（复用工作流）
     needs: build
     uses: ./.github/workflows/reusable-script-test.yml
     with:

@@ -42,7 +42,7 @@ jobs:
   # Static analysis of the workflows themselves.
   # ---------------------------------------------------------------------------
   zizmor:
-    name: Workflow static analysis (zizmor)
+    name: 工作流静态审计（zizmor）
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -73,7 +73,9 @@ jobs:
         # keeps the signal at the level the config documents.
         run: |
           set -euo pipefail
-          pip install --disable-pip-version-check "zizmor==1.5.2"
+          # Hash-pinned, like the checks.yml job (see the note there).
+          python3 -m pip install --disable-pip-version-check --require-hashes \
+            -r .github/requirements-zizmor.txt
           zizmor --persona=auditor --format sarif .github/workflows/ > zizmor.sarif
           echo "--- human-readable summary ---"
           zizmor --persona=auditor --format plain .github/workflows/
@@ -89,7 +91,7 @@ jobs:
   # SAST over the shell/JS we actually ship.
   # ---------------------------------------------------------------------------
   codeql:
-    name: CodeQL (${{ matrix.language }})
+    name: CodeQL 静态分析
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -127,7 +129,7 @@ jobs:
   # Dependency Review — PR-only, because it compares the base against the head.
   # ---------------------------------------------------------------------------
   dependency-review:
-    name: Dependency review
+    name: 依赖审查
     # A pull_request event is required: the action diffs the dependency
     # manifests between base and head, which does not exist on a push.
     if: github.event_name == 'pull_request'
@@ -234,7 +236,7 @@ jobs:
   # SBOM + build provenance for the shipped repository index.
   # ---------------------------------------------------------------------------
   attest:
-    name: Attest the apk repository
+    name: 签发构建证明与 SBOM
     # Needs the build artifact, so it only makes sense after a build.  On a
     # schedule/push to master the build workflow runs separately; this job
     # attests whatever index is currently published, which is what devices
@@ -266,11 +268,16 @@ jobs:
       - name: Generate an SBOM for the repository index
         run: |
           set -euo pipefail
-          # SPDX is the format GitHub's attest-sbom expects.  syft is installed
-          # by pinned release rather than a marketplace action, for the same
-          # reason as zizmor.
-          curl -fsSL --retry 3 https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin
+          # SPDX is the format GitHub's attest-sbom expects.  Installed from a
+          # pinned release with a verified SHA256 rather than the upstream
+          # `install.sh` on `main` — that script was a Pinned-Dependencies
+          # finding for the same reason as actionlint's.
+          version=1.52.0
+          sha256=caeedb81fb0491615f1ebd1761e4145d41ee86dd2cc7bf80669f9f5ad9d6133d
+          curl -fsSL --retry 3 -o /tmp/syft.tar.gz \
+            "https://github.com/anchore/syft/releases/download/v${version}/syft_${version}_linux_amd64.tar.gz"
+          echo "${sha256}  /tmp/syft.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/syft.tar.gz -C /usr/local/bin syft
           syft scan dir:apk-repo -o spdx-json=sbom.spdx.json
           syft --version
 
