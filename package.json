@@ -1,0 +1,9 @@
+{
+  "name": "autobuild-h5000m-commitlint",
+  "private": true,
+  "description": "Lockfile holder for the commitlint CI gate. Nothing is published.",
+  "devDependencies": {
+    "@commitlint/cli": "19.6.1",
+    "@commitlint/config-conventional": "19.6.0"
+  }
+}

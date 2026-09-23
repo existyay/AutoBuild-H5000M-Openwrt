@@ -34,7 +34,7 @@ jobs:
   # stop a release.
   # ---------------------------------------------------------------------------
   coverage:
-    name: Configuration coverage
+    name: 配置覆盖测试
     # No `needs:` — this workflow is the coverage run, so there is nothing to
     # wait for and no switch to consult.
     runs-on: ubuntu-24.04

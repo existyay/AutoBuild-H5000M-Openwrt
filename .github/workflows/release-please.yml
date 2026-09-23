@@ -1,4 +1,4 @@
-name: Release Please
+name: 发布 PR 维护（Release Please）
 
 # Release Please turns Conventional Commits into a release PR: it maintains a
 # changelog and a version bump, and only when that PR is merged does it tag.
@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   release-please:
-    name: Maintain the release PR
+    name: 维护发布 PR
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

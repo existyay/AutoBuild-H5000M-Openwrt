@@ -1,0 +1,17 @@
+# Hash-pinned requirements for the workflow auditor.
+#
+# Why a lock file at all: Scorecard's Pinned-Dependencies check requires that
+# every dependency a workflow installs be integrity-pinned, not merely
+# version-pinned.  `zizmor==1.5.2` says which version; the hash below says
+# WHICH ARTIFACT, which is what closes the "PyPI serves a rebuilt wheel under
+# the same version" gap.  `pip --require-hashes` refuses to install anything
+# not listed here.
+#
+# zizmor ships as a self-contained manylinux wheel with no runtime
+# dependencies, so this file is intentionally a single entry.
+#
+# Regenerate when bumping the version:
+#   pip download --dest /tmp/z zizmor==<ver>
+#   sha256sum /tmp/z/*.whl
+zizmor==1.5.2 \
+    --hash=sha256:0c5f656106c430748858ae459c41c9eed09a1e01e5f42015d80c8fe34740d173
