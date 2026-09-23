@@ -69,3 +69,13 @@ jobs:
             artifacts-coverage/enabled-packages.txt
           if-no-files-found: warn
           retention-days: 14
+
+      # 失败时自动产出诊断报告（可复用的 Composite Action）
+      # —— 三个 workflow 此前没有任何失败诊断步骤，红了的 run 只显示
+      #    "exit code 1"，原因必须本地复现。
+      - name: 失败诊断
+        if: failure()
+        uses: ./.github/actions/diagnose
+        with:
+          title: 配置覆盖测试失败
+          log-files: coverage-*.log

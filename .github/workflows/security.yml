@@ -90,6 +90,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # SAST over the shell/JS we actually ship.
   # ---------------------------------------------------------------------------
+      # 失败时自动产出诊断报告（可复用的 Composite Action）
+      # —— 三个 workflow 此前没有任何失败诊断步骤，红了的 run 只显示
+      #    "exit code 1"，原因必须本地复现。
+      - name: 失败诊断
+        if: failure()
+        uses: ./.github/actions/diagnose
+        with:
+          title: zizmor 审计失败
   codeql:
     name: CodeQL 静态分析
     runs-on: ubuntu-24.04
@@ -128,6 +136,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # Dependency Review — PR-only, because it compares the base against the head.
   # ---------------------------------------------------------------------------
+      # 失败时自动产出诊断报告（可复用的 Composite Action）
+      # —— 三个 workflow 此前没有任何失败诊断步骤，红了的 run 只显示
+      #    "exit code 1"，原因必须本地复现。
+      - name: 失败诊断
+        if: failure()
+        uses: ./.github/actions/diagnose
+        with:
+          title: CodeQL 失败
   dependency-review:
     name: 依赖审查
     # A pull_request event is required: the action diffs the dependency
@@ -195,6 +211,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # OpenSSF Scorecard — the external, independent check on repo hygiene.
   # ---------------------------------------------------------------------------
+      # 失败时自动产出诊断报告（可复用的 Composite Action）
+      # —— 三个 workflow 此前没有任何失败诊断步骤，红了的 run 只显示
+      #    "exit code 1"，原因必须本地复现。
+      - name: 失败诊断
+        if: failure()
+        uses: ./.github/actions/diagnose
+        with:
+          title: 依赖审查失败
   scorecard:
     name: OpenSSF Scorecard
     # Only on the default branch: Scorecard publishes results to the public

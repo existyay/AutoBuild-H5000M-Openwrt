@@ -1,0 +1,124 @@
+name: Diagnose a failed job
+description: >-
+  Write a compact, self-contained failure report to the run summary and the raw
+  log, so a red CI run explains itself without downloading logs or re-running.
+
+# Why a Composite Action rather than the same `if: failure()` step pasted into
+# every workflow: three of the four workflows had no failure step at all, so a
+# red run showed only "Process completed with exit code 1" and the cause had to
+# be reproduced locally.  One shared action means every job gets the same
+# report, and the report is improved once instead of in four places.
+
+inputs:
+  title:
+    description: Human-readable name of what failed.
+    required: false
+    default: 'CI failure'
+  log-files:
+    description: Space-separated log files to tail when present.
+    required: false
+    default: 'build.log'
+  tail-lines:
+    description: How many lines of each log to include.
+    required: false
+    default: '60'
+
+runs:
+  using: composite
+  steps:
+    - name: Collect the failure report
+      shell: bash
+      env:
+        DIAG_TITLE: ${{ inputs.title }}
+        DIAG_LOGS: ${{ inputs.log-files }}
+        DIAG_TAIL: ${{ inputs.tail-lines }}
+      run: |
+        set -uo pipefail
+
+        report="$(mktemp)"
+        {
+          echo "## ❌ ${DIAG_TITLE}"
+          echo
+          echo "| 项 | 值 |"
+          echo "| --- | --- |"
+          echo "| 工作流 | \`${GITHUB_WORKFLOW}\` |"
+          echo "| 作业 | \`${GITHUB_JOB}\` |"
+          echo "| 触发 | \`${GITHUB_EVENT_NAME}\` |"
+          echo "| 引用 | \`${GITHUB_REF_NAME}\` @ \`${GITHUB_SHA:0:7}\` |"
+          echo "| 运行 | [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |"
+          echo
+          echo "复现：\`gh run view ${GITHUB_RUN_ID} --log-failed\`"
+          echo
+        } > "$report"
+
+        # A git snapshot: a surprising share of CI failures here are "the tree is
+        # not what you think it is" — a stale feed checkout, or a patch that
+        # silently did not apply.
+        {
+          echo "### 仓库状态"
+          echo '```'
+          if git rev-parse --git-dir >/dev/null 2>&1; then
+            git status --short | head -20
+            echo "--- HEAD: $(git log --oneline -1 2>/dev/null)"
+          else
+            echo '(not a git work tree here)'
+          fi
+          echo '```'
+          echo
+        } >> "$report"
+
+        # Tail each requested log when it exists at this point in the job.
+        for log in $DIAG_LOGS; do
+          [ -f "$log" ] || continue
+          {
+            echo "### \`${log}\`（末 ${DIAG_TAIL} 行）"
+            echo '```'
+            tail -n "${DIAG_TAIL}" "$log" 2>/dev/null || true
+            echo '```'
+            echo
+          } >> "$report"
+        done
+
+        # OpenWrt per-package logs, when a firmware build wrote any:
+        # include/subdir.mk records the failing target in error.txt and that
+        # target's full output in <target>/compile.txt.
+        if [ -d logs ]; then
+          {
+            echo "### OpenWrt 每包日志"
+            echo
+          } >> "$report"
+          mapfile -t errs < <(find logs -name error.txt 2>/dev/null)
+          if [ "${#errs[@]}" -eq 0 ]; then
+            {
+              echo "未找到 error.txt；列出最大的日志文件："
+              echo '```'
+              find logs -type f -name '*.txt' -size +1k -printf '%s %p\n' 2>/dev/null \
+                | sort -rn | head -10 || true
+              echo '```'
+            } >> "$report"
+          else
+            for f in "${errs[@]}"; do
+              {
+                echo "\`${f}\`:"
+                echo '```'
+                cat "$f" 2>/dev/null || true
+                echo '```'
+              } >> "$report"
+            done
+          fi
+          echo >> "$report"
+        fi
+
+        # What was produced, so it is obvious how far the job got.
+        {
+          echo "### 已产出的构建产物"
+          echo '```'
+          ls -la artifacts/ 2>/dev/null | head -20 || echo '(none)'
+          echo '```'
+        } >> "$report"
+
+        cat "$report"
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        rm -f "$report"
