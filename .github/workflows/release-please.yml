@@ -34,6 +34,27 @@ jobs:
       - name: Run Release Please
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          # A PAT, not the default GITHUB_TOKEN.  This is not a preference —
+          # events created BY `GITHUB_TOKEN` do not trigger further workflows,
+          # which broke two things at once, both measured on this repository:
+          #
+          #   1. The release PR's checks never ran.  They sat at
+          #      `completed/action_required` and needed a human to click
+          #      "Approve and run", so the release PR could never auto-merge.
+          #   2. The tag Release Please created did NOT trigger build.yml, so
+          #      releasing a version produced a tag and a Release **with no
+          #      firmware attached** — `v1.1.0` shipped exactly like that.
+          #
+          # With a PAT the actor is a real user, so both events behave normally:
+          # the checks run on their own and the tag starts the firmware build.
+          #
+          # Falls back to GITHUB_TOKEN when the secret is absent (a fork, or a
+          # clone that has not set it up), which restores the old — degraded but
+          # working — behaviour rather than failing outright.
+          #
+          # The token is a fine-grained PAT scoped to this repository with only
+          # `contents: write` and `pull-requests: write`.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           # `simple` for a repository whose artefact is not an npm/pypi package:
           # it bumps a VERSION-bearing release and writes CHANGELOG.md, and the
           # tag it creates (`v*`) matches build.yml's trigger.
