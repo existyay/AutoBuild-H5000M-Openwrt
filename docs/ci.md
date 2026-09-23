@@ -34,7 +34,7 @@ Ruleset `master-protection`，**id `23816928`**，`current_user_can_bypass: neve
 | **Required Linear History** | 启用 | 固件按 commit 溯源，线性历史让 `git bisect` 与发布对应关系成立。 |
 | **Pull Request** | 必需、必须解决全部 review thread、仅允许 squash/rebase | 保证每个进入 master 的提交都过了门禁。 |
 | **Deletion / Non-fast-forward** | 禁止 | 防止误删 master 或强推覆盖历史。 |
-| **Required Signatures** | ⚠️ **临时移除** | 本机与 GitHub 均无签名密钥，开启后**你将无法推送任何提交**。配置方法见文末。 |
+| **Required Signatures** | ✅ 已启用 | 本机已生成专用 SSH 签名密钥并注册到 GitHub（实测提交 `verified=true, reason=valid`）。**合并方式收窄为 squash-only**——见下方说明。 |
 
 五个 Required Status Checks 及其归属：
 
@@ -100,35 +100,37 @@ commitlint.config.mjs                # Conventional Commits 规则与 scope 枚�
 docs/ci.md                            # 本文
 ```
 
-## 六、待你决断：Signed Commits
+## 六、Signed Commits（已启用）
 
-`required_signatures` 已从 Ruleset **临时移除**，原因：本机 `commit.gpgsign`
-未设置、GitHub 上无 GPG/SSH 签名密钥，提交实测全为 `N`（未签名）。若直接开启，
-**你将无法推送任何提交**。
+本机已生成专用 SSH 签名密钥并注册到 GitHub，`required_signatures` 已生效。
 
-配置好密钥后启用（任选其一）：
-
-```sh
-# 方案 A：SSH 签名（最简单，复用已有 SSH key）
-git config --global gpg.format ssh
-git config --global user.signingkey ~/.ssh/id_ed25519.pub
-git config --global commit.gpgsign true
-gh api user/ssh-signing-keys -f title="$(hostname)" -f key="$(cat ~/.ssh/id_ed25519.pub)"
-
-# 方案 B：GPG
-gpg --full-generate-key            # 选 ed25519
-git config --global user.signingkey <KEY_ID>
-git config --global commit.gpgsign true
-gpg --armor --export <KEY_ID> | gh gpg-key add -
-
-# 启用该规则
-gh api --method PUT repos/existyay/AutoBuild-H5000M-Openwrt/rulesets/23816928 \
-  --input <(gh api repos/existyay/AutoBuild-H5000M-Openwrt/rulesets/23816928 \
-    --jq '.rules + [{"type":"required_signatures"}] | {rules:.}')
+```
+密钥      ~/.ssh/id_ed25519_signing（无口令，供自动化使用）
+GitHub id 1194013
+配置      gpg.format=ssh  user.signingkey=<pub>  commit.gpgsign=true
+实测      verified=true, reason=valid
 ```
 
-同时建议在 GitHub UI 开启 **Dependency Graph**（Settings → Security →
-Dependency graph）——虽然本机探测显示其 SBOM 端点已返回 200，UI 开关是权威来源。
+### 为什么合并方式必须是 squash-only
+
+squash 合并时 GitHub 用 **web-flow 密钥重新签名**合并结果，所以 master 上的
+提交天然是 verified 的；而 **rebase 会把 PR 内的提交原样落到 master**——若其中
+有未验证的提交（例如别人在网页上编辑产生的），master 就会混入未签名历史。
+因此 Ruleset 的 `allowed_merge_methods` 限定为 `["squash"]`。
+
+### 换机器或密钥失效时
+
+```sh
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/id_ed25519_signing.pub
+git config commit.gpgsign true
+git config tag.gpgsign true
+gh auth refresh -h github.com -s admin:ssh_signing_key
+gh ssh-key add ~/.ssh/id_ed25519_signing.pub --type signing --title "H5000M build machine"
+```
+
+验证：`git log --format='%h %G?' -1` 应为 `G`；推送到 GitHub 后
+`verified` 应为 `true`。
 
 ## 七、本地开发
 
