@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.1...v1.1.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **packages:** 修复 luci-app-nekobox 因 Kconfig 循环依赖被静默丢弃 ([#13](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/13)) ([06a7563](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/06a7563ed512a5530da98a90e8f6f884f14672eb))
+
 ## [1.1.1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.0...v1.1.1) (2026-09-23)
 
 
