@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.0...v1.1.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **ci:** 修复让固件构建自 PR [#1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/1) 起完全无法启动的缺陷，并加门禁防止复发 ([#10](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/10)) ([fcd640b](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/fcd640b7fd3d7e09051460af6d68c3b3eb515558))
+
 ## [1.1.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.0.0...v1.1.0) (2026-09-23)
 
 
