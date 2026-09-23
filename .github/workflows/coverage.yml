@@ -78,4 +78,4 @@ jobs:
         uses: ./.github/actions/diagnose
         with:
           title: 配置覆盖测试失败
-          log-files: coverage-*.log
+          log_files: coverage-*.log

@@ -14,11 +14,14 @@ inputs:
     description: Human-readable name of what failed.
     required: false
     default: 'CI failure'
-  log-files:
+  # snake_case: a hyphen cannot be used with dot access in an expression
+  # (`inputs.log-files` parses as `inputs.log - files`), and that failure mode
+  # is a whole-workflow startup error rather than a message.
+  log_files:
     description: Space-separated log files to tail when present.
     required: false
     default: 'build.log'
-  tail-lines:
+  tail_lines:
     description: How many lines of each log to include.
     required: false
     default: '60'
@@ -30,8 +33,8 @@ runs:
       shell: bash
       env:
         DIAG_TITLE: ${{ inputs.title }}
-        DIAG_LOGS: ${{ inputs.log-files }}
-        DIAG_TAIL: ${{ inputs.tail-lines }}
+        DIAG_LOGS: ${{ inputs.log_files }}
+        DIAG_TAIL: ${{ inputs.tail_lines }}
       run: |
         set -uo pipefail
 

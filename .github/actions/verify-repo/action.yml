@@ -19,11 +19,13 @@ inputs:
     description: Repository index (path or URL) to verify. Empty = auto-detect.
     required: false
     default: ''
-  with-official-feeds:
+  # snake_case for the same reason as in diagnose/action.yml: these are read
+  # from expressions, where a hyphen would be parsed as subtraction.
+  with_official_feeds:
     description: Also configure the snapshot sources the firmware ships with.
     required: false
     default: 'false'
-  working-directory:
+  working_directory:
     description: Directory the paths are relative to.
     required: false
     default: /o
@@ -39,11 +41,11 @@ runs:
     - name: Verify the repository
       id: run
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ inputs.working_directory }}
       env:
         APK_BIN: ${{ inputs.apk }}
         APK_TARGET: ${{ inputs.target }}
-        WITH_FEEDS: ${{ inputs.with-official-feeds }}
+        WITH_FEEDS: ${{ inputs.with_official_feeds }}
       run: |
         set -uo pipefail
         args=()

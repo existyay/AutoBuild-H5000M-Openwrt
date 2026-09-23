@@ -51,6 +51,23 @@ jobs:
       - name: Check build host
         run: ./scripts/check-deps.sh
 
+      - name: Workflow contracts (reusable workflows)
+        run: |
+          # A silent failure mode, made loud.  When build.yml calls a reusable
+          # workflow whose job asks for permissions the caller does not grant,
+          # GitHub refuses to start the ENTIRE workflow:
+          #
+          #   构建 H5000M 主线 OpenWrt 固件  completed/startup_failure
+          #
+          # with no jobs and no error text.  build.yml only runs on
+          # schedule/tag/dispatch, so no PR gate ever sees it — this repository
+          # shipped that bug and it took eight manual dispatches to bisect.
+          # This step asserts the whole calling contract up front: the callee
+          # exists, declares workflow_call, the caller passes only declared
+          # inputs, the callee's permissions are a subset of the caller's, and
+          # no expression uses dot access on a hyphenated identifier.
+          ./scripts/check-workflow-contracts.sh
+
       - name: Shell syntax check
         run: |
           for f in scripts/*.sh; do
