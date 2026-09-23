@@ -25,10 +25,20 @@ on:
         type: string
         required: true
       tarball_glob:
-        description: Glob (within the artifact) matching the rootfs tarball.
+        # A BASENAME pattern, not a path pattern: it is handed to `find -name`,
+        # which matches the final path component only.  The original default was
+        # `**/*-targz-rootfs.tar.gz`, and `-name` never matches a pattern
+        # containing `/` — so the rootfs was sitting in the artifact while this
+        # job reported
+        #
+        #   no rootfs tarball in the artifact (looked for '**/*-targz-rootfs.tar.gz')
+        #
+        # Measured on the v1.1.2 release run, where the artifact did contain
+        # openwrt-mediatek-filogic-hiveton_h5000m-targz-rootfs.tar.gz.
+        description: Basename glob matching the rootfs tarball (used with find -name).
         type: string
         required: false
-        default: '**/*-targz-rootfs.tar.gz'
+        default: '*-targz-rootfs.tar.gz'
       runner:
         description: Runner label.
         type: string
@@ -84,7 +94,7 @@ jobs:
           set -uo pipefail
           # The glob comes from the caller, so this workflow works for any
           # artifact layout instead of silently ignoring the input.
-          tarball="$(find artifacts -name "${TARBALL_GLOB}" | head -1)"
+          tarball="$(find artifacts -type f -name "${TARBALL_GLOB}" | head -1)"
           if [ -z "$tarball" ]; then
             echo "::error::no rootfs tarball in the artifact (looked for '${TARBALL_GLOB}')"
             echo "status=fail" >> "$GITHUB_OUTPUT"
