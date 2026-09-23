@@ -582,6 +582,14 @@ jobs:
   #
   # Runs against the PR's commit range rather than HEAD: commitlint is about
   # every commit that will land, not just the tip.
+      # 失败时自动产出诊断报告（可复用的 Composite Action）
+      # —— 三个 workflow 此前没有任何失败诊断步骤，红了的 run 只显示
+      #    "exit code 1"，原因必须本地复现。
+      - name: 失败诊断
+        if: failure()
+        uses: ./.github/actions/diagnose
+        with:
+          title: 仓库与主机检查失败
   commitlint:
     name: 提交信息规约
     runs-on: ubuntu-24.04
@@ -633,3 +641,12 @@ jobs:
             echo "linting ${BASE_SHA}..${HEAD_SHA}"
             npx commitlint --config commitlint.config.mjs --from "${BASE_SHA}" --to "${HEAD_SHA}" --verbose
           fi
+
+      # 失败时自动产出诊断报告（可复用的 Composite Action）
+      # —— 三个 workflow 此前没有任何失败诊断步骤，红了的 run 只显示
+      #    "exit code 1"，原因必须本地复现。
+      - name: 失败诊断
+        if: failure()
+        uses: ./.github/actions/diagnose
+        with:
+          title: 提交信息规约失败
