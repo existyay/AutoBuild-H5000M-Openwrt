@@ -24,37 +24,44 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      # The minimum this automation needs: read the repo, write the release PR
-      # and the tag.  No `packages`, no `actions`, no `id-token`.
+      # `contents: write` + `pull-requests: write` are what Release Please needs
+      # to maintain the release PR and create the tag.  `actions: write` is for
+      # the explicit build dispatch at the bottom of this job — nothing else here
+      # uses it.
       contents: write
       pull-requests: write
+      actions: write
     steps:
       # A Reusable-Workflow-style call is not used here because Release Please
       # publishes its own action; it is pinned by SHA like everything else.
       - name: Run Release Please
+        id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          # A PAT, not the default GITHUB_TOKEN.  This is not a preference —
-          # events created BY `GITHUB_TOKEN` do not trigger further workflows,
-          # which broke two things at once, both measured on this repository:
+          # `GITHUB_TOKEN`, deliberately — and the reason is signatures.
           #
-          #   1. The release PR's checks never ran.  They sat at
-          #      `completed/action_required` and needed a human to click
-          #      "Approve and run", so the release PR could never auto-merge.
-          #   2. The tag Release Please created did NOT trigger build.yml, so
-          #      releasing a version produced a tag and a Release **with no
-          #      firmware attached** — `v1.1.0` shipped exactly like that.
+          # A PAT was tried and had to be reverted.  With a PAT the commit is
+          # authored AND committed by the token's owner, and GitHub does not
+          # apply its web-flow signature to it:
           #
-          # With a PAT the actor is a real user, so both events behave normally:
-          # the checks run on their own and the tag starts the firmware build.
+          #   GITHUB_TOKEN : committer "GitHub <noreply@github.com>" -> verified=true
+          #   PAT          : committer <the user>                    -> verified=false, reason=unsigned
           #
-          # Falls back to GITHUB_TOKEN when the secret is absent (a fork, or a
-          # clone that has not set it up), which restores the old — degraded but
-          # working — behaviour rather than failing outright.
+          # An unsigned release commit is then rejected by this repository's
+          # `required_signatures` ruleset rule, so the release PR can never
+          # merge.  release-please-action cannot sign commits itself (its only
+          # signing-related input is `token`), so there is no way to have both a
+          # PAT and a signed release commit.  `GITHUB_TOKEN` wins because it
+          # produces a signed commit, which is what the ruleset requires.
           #
-          # The token is a fine-grained PAT scoped to this repository with only
-          # `contents: write` and `pull-requests: write`.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          # The two things the PAT was meant to fix are handled as follows:
+          #   * the tag-triggered build — by the explicit dispatch step below,
+          #     since `workflow_dispatch` is the documented exception to the
+          #     "GITHUB_TOKEN events do not start workflows" rule;
+          #   * the release PR's checks needing approval — accepted.  One click
+          #     on "Approve and run" per release is a reasonable human gate on
+          #     shipping firmware, and it is the price of signed release commits.
+          token: ${{ secrets.GITHUB_TOKEN }}
           # `simple` for a repository whose artefact is not an npm/pypi package:
           # it bumps a VERSION-bearing release and writes CHANGELOG.md, and the
           # tag it creates (`v*`) matches build.yml's trigger.
@@ -71,3 +78,38 @@ jobs:
           # (openwrt-<sha>), which Release Please cannot know.  So this manages
           # the PROJECT version and the changelog; build.yml keeps naming the
           # firmware after the upstream commit it was built from.
+
+      # Start the firmware build for the tag Release Please just created.
+      #
+      # A tag pushed with `GITHUB_TOKEN` does NOT trigger other workflows — that
+      # is why `v1.1.0` shipped as a Release with no assets at all.  A tag pushed
+      # with a real user's token DOES (measured on `v1.1.2`, which built itself),
+      # but that route costs the signed commit.  `workflow_dispatch` is the
+      # documented exception to the GITHUB_TOKEN rule, so the build is started
+      # explicitly instead of relying on the tag event.
+      - name: 为新 tag 触发固件构建
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          # Passed through the environment rather than interpolated into the
+          # shell — the tag name is action output, and `${{ }}` inside `run:` is
+          # text substitution before bash parses the line.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          echo "dispatching build.yml on ${TAG_NAME}"
+          gh workflow run build.yml --ref "${TAG_NAME}"
+          # `gh workflow run` only queues the dispatch; confirm it exists so a
+          # silent failure here cannot leave a tag with no firmware, which is
+          # exactly the state v1.1.0/v1.1.1 were left in.
+          for _ in $(seq 1 10); do
+            sleep 6
+            if gh run list --workflow=build.yml --branch "${TAG_NAME}" \
+                 --json databaseId --jq 'length' | grep -qv '^0$'; then
+              echo "build queued for ${TAG_NAME}"
+              exit 0
+            fi
+          done
+          echo "::error::no build.yml run appeared for ${TAG_NAME} after dispatch — release it by hand"
+          exit 1
+
