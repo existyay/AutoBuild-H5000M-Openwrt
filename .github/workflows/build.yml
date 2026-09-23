@@ -1415,4 +1415,6 @@ jobs:
     uses: ./.github/workflows/reusable-script-test.yml
     with:
       artifact_name: H5000M-mainline-openwrt
-      tarball_glob: '**/*-targz-rootfs.tar.gz'
+      # Basename pattern: the callee passes it to `find -name`, which matches
+      # the final path component only (a pattern with `/` never matches).
+      tarball_glob: '*-targz-rootfs.tar.gz'
