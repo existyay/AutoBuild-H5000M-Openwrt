@@ -67,13 +67,34 @@ jobs:
           # tag it creates (`v*`) matches build.yml's trigger.
           release-type: simple
           include-component-in-tag: false
-          # Release Please defaults this pattern to `chore${scope}: release...`
-          # with ${scope} = the branch name, i.e. `chore(master): ...`.  That
-          # collides with commitlint's fixed scope enum and the scope would
-          # change if the default branch were ever renamed.  Pinning it to the
-          # literal `release` scope — which IS in that enum — makes the release
-          # commit valid by construction instead of by exception.
-          pull-request-title-pattern: 'chore(release): release ${version}'
+          # NOTE: `pull-request-title-pattern` was set here and did nothing, so it
+          # was removed.  Recorded because the obvious fix does not work and the
+          # next person will reach for the same input.
+          #
+          # Release Please titles a release PR `chore${scope}: release X` with
+          # ${scope} = the branch name, i.e. `chore(master): ...` — not in
+          # commitlint's fixed scope enum.  Setting
+          # `pull-request-title-pattern: 'chore(release): ...'` looks like the
+          # fix.  This action never reads it:
+          #
+          #   * `parseInputs()` in release-please-action v5.0.0 accepts a FIXED
+          #     input list (token, release-type, path, target-branch,
+          #     config-file, manifest-file, include-component-in-tag, …) and that
+          #     key is not in it;
+          #   * and when `release-type` IS given, the action builds its config
+          #     from just five keys — releaseType, includeComponentInTag,
+          #     changelogHost, versioning, releaseAs — so the key would be dropped
+          #     even if it had been read.
+          #
+          # Measured, not inferred: the setting was present and PR #19 still came
+          # out titled `chore(master): release 1.1.4`.
+          #
+          # Making it real means moving this job to config-file mode
+          # (`release-please-config.json`), which is a larger change than the
+          # problem deserves.  The generated title is therefore accepted as-is,
+          # and commitlint exempts exactly that shape (`chore(<anything>): release`)
+          # — see the `ignores` list in commitlint.config.mjs.  That rule, not
+          # this file, is what keeps the gate green.
           # The firmware itself is versioned by its upstream revision
           # (openwrt-<sha>), which Release Please cannot know.  So this manages
           # the PROJECT version and the changelog; build.yml keeps naming the

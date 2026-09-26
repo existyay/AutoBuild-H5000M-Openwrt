@@ -68,6 +68,28 @@ jobs:
           # no expression uses dot access on a hyphenated identifier.
           ./scripts/check-workflow-contracts.sh
 
+      - name: Action inputs are declared
+        run: |
+          # The other silent failure mode, made loud.  Passing a `with:` key an
+          # action does not declare does NOT fail the job — GitHub only leaves a
+          # warning annotation:
+          #
+          #   Unexpected input(s) 'pull-request-title-pattern', valid inputs are [...]
+          #
+          # The workflow still runs and the check still goes green, so the setting
+          # is dead while looking effective.  This repository shipped exactly
+          # that: release-please.yml set `pull-request-title-pattern` and explained
+          # in a comment that it made the release commit valid "by construction",
+          # but the action never reads it (its `parseInputs()` takes a fixed list)
+          # and the release PR was still titled `chore(master): release 1.1.4`.
+          # What actually kept commitlint green was the `ignores` exception.
+          #
+          # Remote actions are verified at their pinned SHA, which is immutable,
+          # so the answer is stable.  An unresolvable action fails this step
+          # rather than being skipped — a "pass" it could not verify is the exact
+          # illusion the step exists to remove.
+          ./scripts/check-action-inputs.sh
+
       - name: Shell syntax check
         run: |
           for f in scripts/*.sh; do
