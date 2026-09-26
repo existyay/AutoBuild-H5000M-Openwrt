@@ -144,6 +144,97 @@ for path in sorted(wf_dir.glob("*.yml")):
                 )
 
 # ---------------------------------------------------------------------------
+# 3) `gh` 调用必须能在没有 checkout 的 job 里定位仓库
+# ---------------------------------------------------------------------------
+# `gh` 从**当前目录的 git remote** 推断仓库。一个没有 `actions/checkout` 的
+# job（典型：release-please 这种纯 API 的容器 action）里，工作区之上根本不存在
+# `.git`，于是每个 `gh` 调用都死于：
+#
+#     failed to run git: fatal: not a git repository ...
+#
+# 这个故障在 v1.1.3 上真实发生：`gh workflow run` 已经派发成功（派发不需要本地
+# 仓库），紧接着用于**确认**派发的 `gh run list` 挂掉，整个 job 失败，tag 因此
+# 一个固件产物都没有。派发成功 + 校验崩溃 = 最坏的组合，因为它看起来像失败，
+# 而队列里其实躺着一个没人确认的构建。
+#
+# 检查规则：任何执行 `gh <子命令>` 的步骤，若同一 job 中此前没有 checkout，
+# 就必须通过 `GH_REPO` 显式给出仓库（步骤 / job / 工作流级 env 均可）。
+GH_SUBCMD = re.compile(
+    r"(?:^|[^\w-])gh\s+(?:api|run|release|workflow|pr|repo|auth|issue|label|"
+    r"secret|variable|cache|gist|attestation|ruleset|search|status)\b"
+)
+
+
+def gh_invocations(run: str):
+    """返回真正**执行** gh 的行。
+
+    纯文本匹配会把诊断用的人话也算进来：diagnose action 里对用户打印的
+    ``echo "复现：\\`gh run view ...\\`"`` 并不执行 gh。因此对 echo/printf/cat
+    这类纯打印语句，只有在 gh 位于**命令替换**（未转义的 ``$(`` 或反引号）之后时
+    才算调用——这样 `echo "$(gh run list)"` 仍会被抓到，而转义反引号里的示例文本
+    不会。`gh` 出现在 `if gh ...`、`files=$(gh ...)` 等真实命令位置时照常匹配。
+    """
+    out = []
+    for raw in run.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        candidate = line
+        if line.split(None, 1)[0] in ("echo", "printf", "cat"):
+            m = re.search(r"\$\(|(?<!\\)`", line)
+            if m is None:
+                continue
+            candidate = line[m.start():]
+        if GH_SUBCMD.search(candidate):
+            out.append(line)
+    return out
+
+
+for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml"))):
+    data = load(path)
+    wf_env = as_set(data.get("env"))
+    # 复合 action 没有 job 概念，视为单个 job
+    if "runs" in data:
+        jobs_iter = [(None, data.get("runs") or {})]
+    else:
+        jobs_iter = [
+            (jid, j) for jid, j in (data.get("jobs") or {}).items() if isinstance(j, dict)
+        ]
+
+    for job_id, job in jobs_iter:
+        job_env = as_set(job.get("env"))
+        has_checkout = False
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            # checkout（含本地 path 形式）会让 `.git` 出现在工作区
+            uses = step.get("uses")
+            if isinstance(uses, str) and uses.startswith("actions/checkout@"):
+                has_checkout = True
+                continue
+
+            run = step.get("run")
+            if not isinstance(run, str):
+                continue
+            hits = gh_invocations(run)
+            if not hits:
+                continue
+            if has_checkout:
+                continue
+            step_env = as_set(step.get("env"))
+            if "GH_REPO" in (step_env | job_env | wf_env):
+                continue
+            where = f"job {job_id} " if job_id else ""
+            problems.append(
+                f"{path.relative_to(root)}: {where}步骤 `{step.get('name', '<未命名>')}` "
+                f"调用了 gh（{hits[0].strip()[:60]}…），但该 job 中没有 actions/checkout，"
+                f"也未设置 GH_REPO。gh 依赖当前目录的 git remote 推断仓库，"
+                f"会直接失败（v1.1.3 因此没有产出固件）。"
+                f"请加 `GH_REPO: ${{{{ github.repository }}}}`。"
+            )
+
+
+# ---------------------------------------------------------------------------
 if problems:
     print(f"\033[31m✗ 发现 {len(problems)} 处复用工作流契约问题：\033[0m\n")
     for p in problems:

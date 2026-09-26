@@ -94,6 +94,25 @@ jobs:
           # shell — the tag name is action output, and `${{ }}` inside `run:` is
           # text substitution before bash parses the line.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Required, and the reason v1.1.3 shipped with no firmware.
+          #
+          # `gh` resolves the repository from the git remote of the **current
+          # directory**.  This job never runs actions/checkout — release-please
+          # is a container action that only talks to the API — so there is no
+          # `.git` anywhere above the workspace and every `gh` call here died
+          # with:
+          #
+          #     failed to run git: fatal: not a git repository ...
+          #     ##[error]Process completed with exit code 1.
+          #
+          # The `gh workflow run` on the next line had already succeeded (a
+          # dispatch needs no local repo), so the tag was created, the build was
+          # queued, and then this verification loop killed the job.  The build it
+          # had queued went unconfirmed and the release kept zero assets.
+          #
+          # `GH_REPO` makes repo resolution independent of the working tree, so
+          # this step no longer depends on a checkout it was never given.
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ steps.release.outputs.tag_name }}
         run: |
           set -euo pipefail
