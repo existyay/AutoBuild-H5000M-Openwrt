@@ -131,13 +131,13 @@ KMODS=(
 # Package -> the core it must resolve.  The whole point: the core has to be part
 # of the dependency resolution, not merely present in the repository.
 declare -A REQUIRED_CORES=(
-	[luci - app - ssr - plus]="xray-core mihomo"
-	[luci - app - passwall]="xray-core sing-box"
-	[luci - app - passwall2]="xray-core sing-box"
-	[luci - app - homeproxy]="sing-box"
-	[luci - app - nikki - rs]="nikki-rs clash-rs"
-	[luci - app - momo]="momo"
-	[luci - app - adblock - fast]="adblock-fast"
+	[luci-app-ssr-plus]="xray-core mihomo"
+	[luci-app-passwall]="xray-core sing-box"
+	[luci-app-passwall2]="xray-core sing-box"
+	[luci-app-homeproxy]="sing-box"
+	[luci-app-nikki-rs]="nikki-rs clash-rs"
+	[luci-app-momo]="momo"
+	[luci-app-adblock-fast]="adblock-fast"
 )
 
 # This project's only version pin, and the reason it has to be in the image.
@@ -209,7 +209,12 @@ if [ "$WITH_FEEDS" = true ]; then
 	apk_ policy "$PINNED_PACKAGE" 2>/dev/null | sed 's/^/  /'
 	if apk_ add --simulate "${PINNED_PACKAGE}=${PINNED_VERSION}" >/dev/null 2>&1; then
 		apk_ add "${PINNED_PACKAGE}=${PINNED_VERSION}" >/dev/null 2>&1
-		if apk_ add --simulate luci-app-homeproxy 2>&1 | grep -q "Installing ${PINNED_PACKAGE} "; then
+		# Capture first, then match — same `pipefail` + `grep -q` hazard as the
+		# resolve loop below.  Here the false result would be an inverted one:
+		# SIGPIPE would look like "sing-box was not reinstalled" and turn a real
+		# replacement into a green OK.
+		sim="$(apk_ add --simulate luci-app-homeproxy 2>&1)"
+		if grep -q "Installing ${PINNED_PACKAGE} " <<<"$sim"; then
 			bad "apk add luci-app-homeproxy would replace the installed ${PINNED_PACKAGE} ${PINNED_VERSION}"
 		else
 			ok "installed ${PINNED_PACKAGE} ${PINNED_VERSION} survives apk add (as on a flashed device)"
@@ -267,9 +272,20 @@ resolve() {
 }
 for p in "${!REQUIRED_CORES[@]}"; do
 	resolve "$p" || continue
+	# Resolve once, then match against the captured text.
+	#
+	# Do NOT write this as `printf ... | grep -q`: the script runs under
+	# `set -o pipefail`, and `grep -q` exits at the FIRST match.  That closes the
+	# pipe while printf is still writing, printf dies of SIGPIPE (141), and
+	# pipefail makes the *pipeline* report failure — so a dependency that WAS
+	# found is reported as missing.  It only bites on a large dependency set,
+	# which is why `luci-app-nikki-rs` (58 dependencies, the biggest here)
+	# reported `does not pull: clash-rs` while the package was in fact resolved.
+	# A here-string is a temp file, so no writer can receive SIGPIPE.
+	rec="$(apk_ query --recursive "$p" 2>/dev/null)"
 	missing=""
 	for core in ${REQUIRED_CORES[$p]}; do
-		printf '%s\n' "$(apk_ query --recursive "$p" 2>/dev/null)" | grep -q "^Name: ${core}$" || missing="${missing} ${core}"
+		grep -qx "Name: ${core}" <<<"$rec" || missing="${missing} ${core}"
 	done
 	if [ -z "$missing" ]; then
 		ok "$p pulls ${REQUIRED_CORES[$p]}"
