@@ -1217,6 +1217,11 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
         env:
           GH_TOKEN: ${{ github.token }}
+          # Explicit repository rather than git-remote discovery: this step runs
+          # from `artifacts/`, and `gh` would otherwise have to walk up to find
+          # `.git`.  Naming the repository removes that dependency — the same
+          # latent failure that broke release-please.yml's dispatch step.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           cd artifacts
