@@ -861,6 +861,60 @@ V2EX 的说明）是：劫持 DNS → 对域名预选路 → 直连的域名解�
 `ebpf` feature（release workflow 的 `features: minimal,jemallocator,ebpf`），
 所以本工程不需要在固件构建里引入 Rust / LLVM / bpf-linker 工具链，只是下载并打包。
 
+#### eBPF 配置的 schema 由两个独立版本的项目共同决定（已修：`pin_clash_rs`）
+
+eBPF 的 YAML 字段表有两端，而它们**各自独立发版**：
+
+| | 谁生成 | 谁消费 |
+| --- | --- | --- |
+| `/etc/nikki-rs/run/config.yaml` 的 `ebpf:` 段 | feed 的 `nikki-rs/files/ucode/mixin.uc`（UCI → YAML） | 预编译的 `clash-rs` 二进制 |
+
+本工程从 `OpenWrt-nikki-rs` 的 **`main` 分支**克隆前端，但它的
+`clash-rs/Makefile` 把核心钉在 `v0.20.0-alpha` —— 上游加字段时并不会同步升这个
+pin。实测到的一次真实错配：
+
+* feed `main` 的 commit `424abb38`（2026-09-26）开始输出 `ebpf.lan.proxy-src-macs`；
+* 核心直到 `v0.20.10-alpha` 才认识这个字段（`0.20.1`～`0.20.9` 都不认，已逐个
+  下载二进制核对）。
+
+用 `--strict-config` 可以直接看见它：
+
+```
+$ clash-rs -t -f config.yaml --strict-config
+configuration file ... test failed: invalid config: unknown field(s) in config:
+    ebpf.?.lan.proxy-src-macs; omit --strict-config to suppress this error
+```
+
+**但它不会崩，这才是真正的问题。** feed 的 `nikki-rs.init` 启动核心时**没有**
+`--strict-config`（实测 procd 命令就是 `exec $PROG -d $RUN_DIR`），而 clash-rs
+的默认行为是静默忽略未知字段。于是链路变成：用户在 eBPF 页勾选「Proxy Client
+MACs」→ UCI 存下来 → 生成的配置里带着这个键 → 核心把它丢掉 → **所有局域网设备
+都被代理**，而不是只有列出的那些。一个上报成功、实际什么都没做的安全控制。
+
+修法是 `pin_clash_rs()`：把核心钉到认识该字段的版本，而不是去补丁 feed 的
+`mixin.uc`。理由是字段表会持续增长，本地补丁每来一次上游提交就得重新同步；钉住
+核心则让两端**由构造保持同步**。
+
+实现上有三个坑，都已在脚本里断言：
+
+1. 上游把哈希写成 `$(CLASH_HASH)` 间接层，且是**每架构一行**的
+   `  CLASH_HASH:=`。对 `PKG_HASH:=` 直接 `sed` 只会改到间接层，等于什么都没钉；
+   必须按相邻的 `CLASH_TARGET` 逐块替换（`i686` 在上游出现两次，两个块都要覆盖）。
+2. 源码包名 `clash-rs-minimal-<target>.tar.gz` **不含版本号**，所以旧的
+   v0.20.0-alpha 会以**同一个文件名**留在 `dl/` 里。OpenWrt 的
+   `check_download_integrity` 会在 `HASH` 与缓存不符时加 FORCE 规则重新下载 ——
+   但这正是「哈希必须写对」的原因：一个错误但稳定的哈希会让旧二进制一直留下来，
+   而每一步检查都是绿的。
+3. 校验只要求「文件里出现的已知架构都拿到了新哈希」，不要求五个架构都在。
+   上游增删架构不应让本次构建失败；真正不能放过的是**已知架构仍留着旧哈希**，
+   那意味着发出去的是旧核心。另外若一个块都没匹配上（Makefile 布局变了），也
+   直接报错，而不是静默地什么都没钉。
+
+`checks.yml` 里的「Verify the clash-rs pin covers the eBPF fields the feed emits」
+把这些约束变成门禁：pin 函数存在、版本号与 release URL 指向
+`0.20.10-alpha`、`main` 里真的调用了它、feed 仍从移动分支克隆、五个架构哈希都是
+完整 sha256。这是文本级断言 —— 能在 PR 阶段抓住「pin 被回退」，而不需要下载二进制。
+
 #### adblock-fast 的两类提示：一类是缺包，一类是缺 DNS 后端
 
 实机上安装 `adblock-fast` 后会出现两种看起来相似、成因完全不同的提示。

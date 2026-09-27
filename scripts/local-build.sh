@@ -1012,6 +1012,154 @@ pin_sing_box() {
 	return 0
 }
 
+# Pin the clash-rs core to a version that actually understands the config the
+# front-end generates.
+#
+# Why this is needed: OpenWrt-nikki-rs is cloned from `main`, but its
+# `clash-rs/Makefile` pins the prebuilt core to `v0.20.0-alpha` — upstream does
+# not bump that pin when it adds a config field.  Measured: the feed's
+# `mixin.uc` started emitting `ebpf.lan.proxy-src-macs` in commit 424abb38
+# (2026-09-26), while the pinned core only learned that field in
+# `v0.20.10-alpha`.  The two are version-independent, so a fresh clone of the
+# feed generates a key the pinned binary has never heard of.
+#
+#     $ clash-rs -t -f config.yaml --strict-config
+#     test failed: invalid config: unknown field(s) in config:
+#         ebpf.?.lan.proxy-src-macs
+#
+# Note what does NOT happen: `nikki-rs.init` starts the core WITHOUT
+# `--strict-config` (measured on the feed's main branch — the procd command is
+# `exec $PROG -d $RUN_DIR`), and clash-rs silently ignores unknown fields by
+# default.  So this does not crash.  It is worse in a quieter way: the user
+# ticks "Proxy Client MACs" on the eBPF page, UCI stores it, a config with the
+# key is generated, the core drops the key on the floor, and the MAC whitelist
+# silently proxies every client instead of only the listed ones.  A security
+# control that reports success while doing nothing is the failure mode this
+# whole project treats as its worst.
+#
+# Fixing it by pinning the core rather than by patching the feed's `mixin.uc`
+# is deliberate: the field list grows upstream, and a local patch would have to
+# be re-synced on every such commit.  Pinning the core keeps the two halves in
+# step by construction.
+#
+# The rewrite is a plain text substitution with a post-check, following
+# pin_sing_box.  It dies loudly rather than silently pinning nothing if upstream
+# restructures the Makefile.
+pin_clash_rs() {
+	local mk="${SRC}/package/OpenWrt-nikki-rs/clash-rs/Makefile"
+	local want_v="0.20.10_alpha"
+	local want_url="https://github.com/CHKayanami/clash-rs/releases/download/v0.20.10-alpha/"
+
+	# Only when the package is actually part of this build.  Every ENABLE_NIKKI
+	# path that pulls the front-end also pulls the core, and
+	# ENABLE_REPO_PACKAGES builds it into the repository, so those are exactly
+	# the two conditions under which the Makefile exists.
+	if ! is_true "$ENABLE_NIKKI" && ! is_true "$ENABLE_REPO_PACKAGES"; then
+		return 0
+	fi
+
+	if [ ! -f "$mk" ]; then
+		# Not fatal on its own: the clone is gated on ENABLE_NIKKI_REPO /
+		# ENABLE_NIKKI above, and a `warn` from clone_external already explains
+		# a failed clone.  But if the core is required for the image, a missing
+		# Makefile is a hard error.
+		if is_true "$ENABLE_NIKKI"; then
+			die "cannot pin clash-rs: ${mk} does not exist — Nikki-RS was enabled but the core did not clone; see the clone warnings above"
+		fi
+		warn "clash-rs Makefile not present; skipping the core pin"
+		return 0
+	fi
+
+	# The upstream Makefile writes the hash as $(CLASH_HASH) and sets
+	# PKG_HASH:=$(CLASH_HASH), with one `CLASH_HASH:=` line per architecture
+	# inside ifneq blocks.  A blind `sed` on PKG_HASH would rewrite the
+	# indirection and pin nothing, so the per-arch lines are what get replaced.
+	if ! grep -q '^  CLASH_HASH:=' "$mk"; then
+		die "cannot pin clash-rs: ${mk} no longer has per-arch CLASH_HASH lines; re-check how upstream downloads the core and update pin_clash_rs"
+	fi
+
+	# The tarball name carries no version (`clash-rs-minimal-<target>.tar.gz`),
+	# so a stale copy of the OLD release sits in dl/ under the SAME filename.
+	# OpenWrt's check_download_integrity adds a FORCE rule when the cached hash
+	# differs from HASH, so the download stage replaces it — but only because
+	# PKG_HASH changes here.  That is also why the hash has to be right: a
+	# wrong-but-stable hash would keep the old binary and every check would pass.
+	local aarch64_h="b6ad0f7014d6fc03a9ab56cd1a61ea61574db9e3e483a637cc04bf022bf6c065"
+	local x86_64_h="1ac876892965b3249659931c0c6f7e3dc87673daeab90f4a9744ff2caf5fb139"
+	local armv7_h="33321d4b6311714a91992fe0a5f5f78de1e169653e9603d9556deb01813400c9"
+	local riscv64_h="bc9d29081f7a665e82135045c30eedb6d37b642013cd20ef056c109f588b35ad"
+	local i686_h="834cc83b4d34f0c06126f51d4de0584ce74540c0bcf3e1edc67b342e2fbf4136"
+
+	# Replace the version, the release URL and every architecture hash.  Done
+	# with awk rather than sed because the hash lines are indented and identical
+	# in form, so a line-oriented rewrite keyed on the neighbouring CLASH_TARGET
+	# is the only way to tell them apart.
+	awk -v v="$want_v" -v url="$want_url" \
+		-v ha="$aarch64_h" -v hx="$x86_64_h" -v hv="$armv7_h" \
+		-v hr="$riscv64_h" -v hi="$i686_h" '
+		/^PKG_VERSION:=/ { print "PKG_VERSION:=" v; next }
+		/^PKG_SOURCE_URL:=/ { print "PKG_SOURCE_URL:=" url; next }
+		/^  CLASH_TARGET:=/ { target=$0; sub(/^  CLASH_TARGET:=/, "", target); print; next }
+		/^  CLASH_HASH:=/ {
+			h = ""
+			if (target == "aarch64-unknown-linux-musl") h = ha
+			else if (target == "x86_64-unknown-linux-musl") h = hx
+			else if (target == "armv7-unknown-linux-musleabihf") h = hv
+			else if (target == "riscv64gc-unknown-linux-musl") h = hr
+			else if (target == "i686-unknown-linux-musl") h = hi
+			if (h == "") {
+				print "  CLASH_HASH:=" substr($0, index($0, ":=") + 2)
+			} else {
+				print "  CLASH_HASH:=" h
+			}
+			next
+		}
+		{ print }
+	' "$mk" >"${mk}.pinned" && mv "${mk}.pinned" "$mk"
+
+	if ! grep -q "^PKG_VERSION:=${want_v}$" "$mk" ||
+		! grep -q "^PKG_SOURCE_URL:=${want_url}$" "$mk"; then
+		die "pinning clash-rs in ${mk} did not take; refusing to build an unpinned core"
+	fi
+
+	# Verify what was actually rewritten.  The check is deliberately "every
+	# known arch that appears in the file now carries the new hash", NOT "all
+	# five arches must appear": upstream may drop or add an architecture at any
+	# time, and failing the build over an arch this target does not use would
+	# be a false alarm.  What must never pass silently is a known arch left
+	# holding the OLD hash, because that is a stale core with a green build.
+	local arch got want pinned=0 unpinned=""
+	for arch in \
+		"aarch64-unknown-linux-musl:${aarch64_h}" \
+		"x86_64-unknown-linux-musl:${x86_64_h}" \
+		"armv7-unknown-linux-musleabihf:${armv7_h}" \
+		"riscv64gc-unknown-linux-musl:${riscv64_h}" \
+		"i686-unknown-linux-musl:${i686_h}"; do
+		want="${arch##*:}"
+		got="$(awk -v t="${arch%%:*}" '
+			/^  CLASH_TARGET:=/ { cur = $0; sub(/^  CLASH_TARGET:=/, "", cur) }
+			/^  CLASH_HASH:=/ && cur == t { sub(/^  CLASH_HASH:=/, ""); print; exit }
+		' "$mk")"
+		# Absent from the file: upstream does not build it, nothing to check.
+		[ -n "$got" ] || continue
+		if [ "$got" = "$want" ]; then
+			pinned=$((pinned + 1))
+		else
+			unpinned="${unpinned} ${arch%%:*}"
+		fi
+	done
+
+	[ -z "$unpinned" ] ||
+		die "clash-rs hash was not pinned for:${unpinned} — those blocks kept the old hash, which would silently ship the old core"
+	# At least one has to have matched, or the awk rewrite was a no-op and the
+	# version/URL assertions above passed for some other reason.
+	[ "$pinned" -gt 0 ] ||
+		die "clash-rs pin matched no architecture block in ${mk}; the Makefile layout changed and pin_clash_rs needs updating"
+
+	log "clash-rs pinned to ${want_v} (the feed's eBPF page emits proxy-src-macs and quic, which v0.20.0-alpha lacks)"
+	return 0
+}
+
 # --------------------------------------------------------------- staging -----
 stage_directory() {
 	local from="$1" to="$2"
@@ -3244,6 +3392,13 @@ main() {
 	install_board_plugins
 	install_theme
 	install_external_packages
+	# After install_external_packages, which is what clones OpenWrt-nikki-rs —
+	# the clash-rs/Makefile this pins lives inside that clone.  It has to be
+	# done before the download stage, which is where the pinned core is fetched.
+	# (pin_sing_box above rewrites a feeds/ tree, which `feeds update` restores,
+	# so that one is re-run every build; this one edits a package/ tree, which
+	# no feed command touches.)
+	pin_clash_rs
 	install_nftables_patches
 	install_proxy_repos
 
