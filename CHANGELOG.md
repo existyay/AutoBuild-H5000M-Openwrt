@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.5](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.4...v1.1.5) (2026-09-27)
+
+
+### Bug Fixes
+
+* **ci:** 清除构建日志里 3 条仓库自身产生的 warning，并加门禁防复发 ([#23](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/23)) ([4aad0d0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/4aad0d0c737aab0bd2eaeb3e4b59c25f11f0c868))
+* **ebpf:** 钉住 clash-rs 核心版本，修复 eBPF MAC 白名单被静默丢弃 ([#21](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/21)) ([50cdb3f](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/50cdb3f60c05f6326c8f65fc1124da37dfc41368))
+
 ## [1.1.4](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.3...v1.1.4) (2026-09-26)
 
 
