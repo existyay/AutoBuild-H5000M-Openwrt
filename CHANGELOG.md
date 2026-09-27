@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.4](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.3...v1.1.4) (2026-09-26)
+
+
+### Bug Fixes
+
+* **ci:** release-please 派发构建缺 GH_REPO 导致 v1.1.3 无固件产物，并修正 apk 仓库校验的误报 ([#18](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/18)) ([909ef02](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/909ef02ea09f14c87e2b0a145bddb8b73bd06e2f))
+* **ci:** 移除 release-please 里被静默忽略的输入，并新增 action 输入门禁 ([#20](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/20)) ([3f2a184](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/3f2a184db80e8a710005110ce1a600027ba91e1c))
+
 ## [1.1.3](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.2...v1.1.3) (2026-09-23)
 
 
