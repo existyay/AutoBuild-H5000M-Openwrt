@@ -64,11 +64,14 @@ jobs:
           # shipped that bug and it took eight manual dispatches to bisect.
           # This step asserts the whole calling contract up front: the callee
           # exists, declares workflow_call, the caller passes only declared
-          # inputs, the callee's permissions are a subset of the caller's, and
-          # no expression uses dot access on a hyphenated identifier.
+          # inputs, the callee's permissions are a subset of the caller's,
+          # no expression uses dot access on a hyphenated identifier, and no
+          # `runs-on` uses a floating `*-latest` label (publish-apk-repo was the
+          # repository's last one, and GitHub annotated it with the Ubuntu 26
+          # migration notice on run 36282274537).
           ./scripts/check-workflow-contracts.sh
 
-      - name: Action inputs are declared
+      - name: Action inputs are declared and nothing is deprecated
         run: |
           # The other silent failure mode, made loud.  Passing a `with:` key an
           # action does not declare does NOT fail the job — GitHub only leaves a
@@ -84,11 +87,83 @@ jobs:
           # and the release PR was still titled `chore(master): release 1.1.4`.
           # What actually kept commitlint green was the `ignores` exception.
           #
+          # Same shape, second class: an action (or one of its inputs) that has
+          # been deprecated also only leaves a warning annotation.  Run
+          # 36282274537 had two at once — `tool-cache` (renamed by
+          # free-disk-space) and `actions/attest-sbom` (deprecated as a whole).
+          # Both announcements live in the action's own metadata, so this step
+          # checks them on the manifest it already downloaded, with no extra
+          # network round trip.
+          #
           # Remote actions are verified at their pinned SHA, which is immutable,
           # so the answer is stable.  An unresolvable action fails this step
           # rather than being skipped — a "pass" it could not verify is the exact
           # illusion the step exists to remove.
           ./scripts/check-action-inputs.sh
+
+      # A gate that can no longer fail is worse than no gate: it reports success
+      # while checking nothing, which is the same illusion the two steps above
+      # exist to remove.  This is not hypothetical for check-action-inputs.sh —
+      # its collection loop used to `continue` on any step without a `with:`
+      # block, so a whole-action deprecation (the actions/attest-sbom shape)
+      # would have been skipped entirely.
+      #
+      # Both scripts take a repo root, so each is pointed at a throwaway tree
+      # that contains exactly the two defects they detect (a deprecated input on
+      # a local action, and a floating `runs-on`).  Failing to fail is the bug.
+      - name: The workflow gates themselves still detect their defects
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture"' EXIT
+
+          mkdir -p "$fixture/.github/workflows" "$fixture/.github/actions/fixture"
+
+          # Local action with one deprecated input.  Kept local on purpose: the
+          # self-test must not need the network, or it would be skipped exactly
+          # when a fetch-based gate is most likely to be broken.
+          cat > "$fixture/.github/actions/fixture/action.yml" <<'YAML'
+          name: fixture
+          description: Fixture for the gate self-test; declares a deprecated input.
+          inputs:
+            old-name:
+              description: Renamed input.
+              deprecationMessage: use new-name instead
+          runs:
+            using: composite
+            steps:
+              - run: echo fixture
+                shell: bash
+          YAML
+
+          # One job with the deprecated input, one with a floating runner label.
+          cat > "$fixture/.github/workflows/x.yml" <<'YAML'
+          name: fixture
+          on: [push]
+          jobs:
+            fixture:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: ./.github/actions/fixture
+                  with:
+                    old-name: 'true'
+          YAML
+
+          fail=0
+          expect_detect() {
+            local name="$1" script="$2"
+            if "$script" "$fixture" >/dev/null 2>&1; then
+              echo "::error::${name} did NOT fail on the fixture — it has gone deaf"
+              fail=1
+            else
+              echo "  OK    ${name} still detects its defect"
+            fi
+          }
+          expect_detect check-action-inputs.sh ./scripts/check-action-inputs.sh
+          expect_detect check-workflow-contracts.sh ./scripts/check-workflow-contracts.sh
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "both gates still detect the defects they exist to catch"
 
       - name: Shell syntax check
         run: |

@@ -235,6 +235,47 @@ for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml")
 
 
 # ---------------------------------------------------------------------------
+# 4) `runs-on` 不得使用浮动的 `*-latest` 标签
+# ---------------------------------------------------------------------------
+# `ubuntu-latest` 不是版本，而是一个**会移动**的指针：GitHub 用它来回切换
+# 默认镜像。于是同一个 commit 在不同日子会跑在不同的发行版上——对一个发布
+# 固件 / 写 apk 仓库的 job 来说，这是没有 commit 可审的运行环境变更。
+#
+# 这个仓库因此真实吃到过告警：`publish-apk-repo` 是全仓唯一用 `ubuntu-latest`
+# 的 job，run 36282274537 上 GitHub 给它挂了一条注释
+#
+#     The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19,
+#     2026.
+#
+# 其余 9 个 job 早已钉住 `ubuntu-24.04`，只有这一个漏了。检查规则：`runs-on`
+# 里的每个标签都不得以 `-latest` 结尾。矩阵 / 表达式的值不在此处判断（它们
+# 由输入决定），只查字面量与列表字面量。
+def runner_labels(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for v in value:
+            if isinstance(v, str):
+                yield v
+
+
+for path in sorted(wf_dir.glob("*.yml")):
+    data = load(path)
+    for job_id, job in (data.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for label in runner_labels(job.get("runs-on")):
+            if label.endswith("-latest"):
+                problems.append(
+                    f"{path.relative_to(root)}: job {job_id} 的 runs-on 用了浮动标签 "
+                    f"`{label}`。它指向的镜像会随时移动，同一个 commit 会在不同日子"
+                    f"跑在不同发行版上（run 36282274537 实测：GitHub 对 "
+                    f"ubuntu-latest 挂了 Ubuntu 26 迁移告警）。请钉住具体版本，"
+                    f"例如 `ubuntu-24.04`。"
+                )
+
+
+# ---------------------------------------------------------------------------
 if problems:
     print(f"\033[31m✗ 发现 {len(problems)} 处复用工作流契约问题：\033[0m\n")
     for p in problems:
@@ -244,6 +285,7 @@ if problems:
 
 print(
     f"\033[32m✓ 复用工作流契约正常\033[0m"
-    f"（检查了 {checked_calls} 处 uses: ./ 调用，以及表达式中的连字符点号访问）"
+    f"（检查了 {checked_calls} 处 uses: ./ 调用、表达式中的连字符点号访问，"
+    f"以及 runs-on 的浮动标签）"
 )
 PY

@@ -112,7 +112,14 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
-          tool-cache: true
+          # `tool-cache` was renamed `preinstalled-runtimes` in v2.0.0.  The old
+          # name still works, but the action prints
+          #   "The 'tool-cache' input is deprecated; it was renamed to
+          #    'preinstalled-runtimes'."
+          # as a run-level warning annotation on EVERY build (observed on run
+          # 36282274537), which buries the signals the warning audit exists to
+          # surface.  Renamed here; the behaviour is identical.
+          preinstalled-runtimes: true
           android: true
           dotnet: true
           haskell: true
@@ -1293,7 +1300,13 @@ jobs:
     needs: build
     # Always: the firmware's built-in source entry points here, so
     # publishing it is part of producing a usable firmware.
-    runs-on: ubuntu-latest
+    #
+    # Pinned, not `ubuntu-latest`: a floating label is a moving build
+    # environment that can change under a release job with no commit to review,
+    # and GitHub now annotates `ubuntu-latest` with the Ubuntu 26 migration
+    # notice on every run.  Every other job in this repository already pins
+    # `ubuntu-24.04`; this one was the only exception.
+    runs-on: ubuntu-24.04
     continue-on-error: true
     permissions:
       pages: write

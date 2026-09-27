@@ -292,7 +292,8 @@ jobs:
       - name: Generate an SBOM for the repository index
         run: |
           set -euo pipefail
-          # SPDX is the format GitHub's attest-sbom expects.  Installed from a
+          # SPDX is the format `actions/attest` expects for `sbom-path`.
+          # Installed from a
           # pinned release with a verified SHA256 rather than the upstream
           # `install.sh` on `main` — that script was a Pinned-Dependencies
           # finding for the same reason as actionlint's.
@@ -311,7 +312,25 @@ jobs:
           subject-path: apk-repo/packages.adb
 
       - name: Attest the SBOM
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        # `actions/attest-sbom` is deprecated: it is now a thin wrapper whose
+        # only remaining job is to print
+        #   "actions/attest-sbom has been deprecated, please use actions/attest
+        #    instead"
+        # as a warning annotation before forwarding to `actions/attest`.
+        # Verified against the pinned v4.1.0 manifest, so that echo fires on
+        # every run.  Calling `actions/attest` directly removes the wrapper and
+        # the warning while keeping the `sbom-path` input, which it declares
+        # itself (its description confirms it creates an SBOM attestation).
+        #
+        # Pinned at v4.2.2, the newest patch (only dependency bumps over
+        # v4.2.1).  The neighbouring attest-build-provenance step is itself a
+        # wrapper around the SAME action — v4.2.2 wraps attest v4.2.1 — so the
+        # two steps now attest through one implementation instead of two.
+        #
+        # This job is gated on `github.event_name != 'pull_request'`, so PR CI
+        # cannot exercise it; the push-to-master run after merge is what
+        # actually verifies the swap.
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: apk-repo/packages.adb
           sbom-path: sbom.spdx.json
