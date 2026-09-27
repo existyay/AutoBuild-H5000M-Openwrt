@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.6](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.5...v1.1.6) (2026-09-27)
+
+
+### Bug Fixes
+
+* **ci:** 弃用门禁改为按值判断，避免报出不成立的结论 ([#24](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/24)) ([398d952](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/398d952fb4fbaa0f6f71235c00cd10b7ce392d85))
+
 ## [1.1.5](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.4...v1.1.5) (2026-09-27)
 
 
