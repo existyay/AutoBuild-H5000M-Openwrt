@@ -91,14 +91,21 @@ def steps_of(path: pathlib.Path):
 # 收集**全部** action 调用，不因为"没写 with:"就跳过：整体弃用与有没有传输入
 # 无关，`actions/foo@...` 不带 with: 也照样会打印它的弃用公告。输入检查另在
 # 报告阶段按 entry["keys"] 是否为空来收窄。
+#
+# 值也一起记下来（entry["values"]）：改名类公告的 `echo` 通常写在
+# `if [[ "$X" == 'true' ]]` 里，所以「传了该输入」不等于「一定会打印」——
+# 传 `'false'` 就什么都不会发生。只按"传没传"报会给出一个不成立的结论，
+# 门禁的第一条纪律是它说的话必须为真。
 calls: dict[str, dict] = {}
 for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml"))):
     for step in steps_of(path):
         uses = step.get("uses")
         if not isinstance(uses, str) or uses.startswith("docker://"):
             continue
-        entry = calls.setdefault(uses, {"keys": set(), "where": set()})
-        entry["keys"] |= set(step.get("with") or {})
+        entry = calls.setdefault(uses, {"keys": set(), "values": {}, "where": set()})
+        for k, v in (step.get("with") or {}).items():
+            entry["keys"].add(k)
+            entry["values"].setdefault(k, set()).add(str(v))
         entry["where"].add(f"{path.relative_to(root)}: {step.get('name', '<未命名>')}")
 
 
@@ -253,16 +260,20 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 f"所以请改为直接调用公告里指定的替代 action。"
             )
         for msg, names in deprecated["conditional"]:
-            # 有条件打印：只有传了公告点名的那个输入才会真的告警。
-            hit = sorted(entry["keys"] & names)
-            if not hit:
-                continue
-            problems.append(
-                f"{uses} 的输入 {hit} 已被弃用，传了它就会打印：{msg}"
-                f"出现在 {where}。"
-                f"这只会留一条 warning 注释、工作流照常变绿，"
-                f"所以请改用公告里指定的替代输入。"
-            )
+            # 有条件打印：只有传了公告点名的那个输入**且值为真**才会告警。
+            # 传 'false' 时该 action 什么都不会打印，报它就是一个不成立的结论。
+            for name in sorted(entry["keys"] & names):
+                vals = entry["values"].get(name) or set()
+                truthy = [v for v in vals if v.strip().strip('\'"').lower() in ("true", "1", "yes", "on")]
+                if not truthy:
+                    continue
+                problems.append(
+                    f"{uses} 的输入 `{name}`（值为 {sorted(truthy)}）已被弃用，"
+                    f"它会打印：{msg}"
+                    f"出现在 {where}。"
+                    f"这只会留一条 warning 注释、工作流照常变绿，"
+                    f"所以请改用公告里指定的替代输入。"
+                )
 
 if could_not_verify:
     print(f"\033[31m✗ 有 {len(could_not_verify)} 个 action 无法核对输入：\033[0m\n")
