@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.8](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.7...v1.1.8) (2026-09-28)
+
+
+### Bug Fixes
+
+* **accel:** eBPF 模式下补齐路由器自身 IPv6 的绕过，并修掉清单重复追加 ([#29](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/29)) ([4921683](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/49216839ca78be44543c8eddc4f6a752a110a59b))
+
 ## [1.1.7](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.6...v1.1.7) (2026-09-28)
 
 
