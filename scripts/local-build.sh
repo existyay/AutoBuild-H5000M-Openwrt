@@ -1160,6 +1160,131 @@ pin_clash_rs() {
 	return 0
 }
 
+# Insert `new` after the first line containing `anchor`, exactly once.  A file
+# that already carries `new` is left alone, so a re-run over an already-patched
+# tree is not an error.  Dies if the anchor is gone: a rewrite that quietly
+# stops matching is the failure this project treats as its worst, because the
+# build stays green and ships a default that no longer protects anything.
+insert_after_anchor() {
+	local file="$1" anchor="$2" new="$3"
+
+	if grep -qF -- "$new" "$file"; then
+		return 0
+	fi
+	grep -qF -- "$anchor" "$file" ||
+		die "cannot patch $(basename "$file"): anchor not found: ${anchor}"
+
+	awk -v a="$anchor" -v n="$new" '
+		{ print }
+		!done && index($0, a) > 0 { print n; done = 1 }
+	' "$file" >"${file}.ebpf-patched" ||
+		die "cannot patch $(basename "$file"): awk failed"
+
+	mv -f "${file}.ebpf-patched" "$file"
+
+	grep -qF -- "$new" "$file" ||
+		die "patching $(basename "$file") did not take effect (wanted: ${new})"
+	return 0
+}
+
+# The same for the `o.default = [ ... ];` array in the LuCI view, inserting
+# BEFORE the anchor.  That file has four `o.default =` assignments and the
+# single-line ones close on their own line, so the text has to be scoped to the
+# multi-line array: a file-wide insert on `'224.0.0.0/4',` would also hit the
+# section-creation list, which already has the entry this is meant to add.
+insert_in_default_block() {
+	local file="$1" anchor="$2" new="$3" block
+
+	block="$(awk '/o\.default = \[/,/\];/' "$file")"
+	printf '%s\n' "$block" | grep -qF -- "$new" && return 0
+	printf '%s\n' "$block" | grep -qF -- "$anchor" ||
+		die "cannot patch $(basename "$file"): the bypass_dst_ips default block no longer contains ${anchor}"
+
+	awk -v a="$anchor" -v n="$new" '
+		/o\.default = \[/,/\];/ {
+			if (!done && index($0, a) > 0) { print n; done = 1 }
+		}
+		{ print }
+	' "$file" >"${file}.ebpf-patched" ||
+		die "cannot patch $(basename "$file"): awk failed"
+
+	mv -f "${file}.ebpf-patched" "$file"
+
+	block="$(awk '/o\.default = \[/,/\];/' "$file")"
+	printf '%s\n' "$block" | grep -qF -- "$new" ||
+		die "patching $(basename "$file") did not take effect (wanted: ${new})"
+	return 0
+}
+
+# The eBPF bypass list has to name the router's own networks, and on the IPv6
+# side upstream's default does not.
+#
+# The list decides one thing: which destinations the kernel hook must NOT take
+# over, because they belong to the router itself.  Traffic addressed to the
+# router has to be delivered locally — that is the difference between a LAN
+# client's DNS query being answered by dnsmasq and being swallowed by the
+# datapath.  Upstream ships 192.168.0.0/16 for IPv4 and, for IPv6, only
+# ::1/128 (loopback), fe80::/10 (link-local) and ff00::/8 (multicast).
+#
+# This firmware always has an IPv6 LAN — base-files' config_generate sets
+# `ula_prefix 'auto'` and 12_network-generate-ula derives fdXX:XXXX:XXXX::/48
+# from it, so odhcpd advertises a ULA as the resolver address — and `fc00::/7`
+# is the whole ULA range, which is never a public destination.  With no entry
+# covering it, eBPF mode captures every IPv6 packet addressed to the router
+# while the IPv4 equivalent is bypassed: IPv6 name resolution fails, IPv4 does
+# not.  Reported on a real device as "开启 eBPF 后 IPv6 解析不对".
+#
+# Three copies of that default exist and all three are patched, so a fresh
+# install, a migrated section and the LuCI page agree:
+#   nikki-rs/files/nikki-rs.conf             the config a fresh install gets
+#   nikki-rs/files/uci-defaults/migrate.sh   the eBPF section created on upgrade
+#   luci-app-nikki-rs/.../ebpf.js            the page's own default for the field
+#
+# The page's copy had also drifted on IPv4: it was missing 192.168.0.0/16, which
+# the other two carry.  A user who clears the field and saves would get a list
+# without the IPv4 LAN in it, and docs/engineering.md's "连管理页面都进不去" is
+# then one save away.
+#
+# What this does NOT do is pin the LAN's real prefix: that differs per device and
+# is derived at boot by local-packages/luci-app-h5000m-accel (see its
+# apply_ebpf_bypass_ips).  These are the static defaults that hold before the
+# applier has ever run.
+patch_nikki_ebpf_bypass_defaults() {
+	local dir="${SRC}/package/OpenWrt-nikki-rs"
+	local conf="${dir}/nikki-rs/files/nikki-rs.conf"
+	local mig="${dir}/nikki-rs/files/uci-defaults/migrate.sh"
+	local js="${dir}/luci-app-nikki-rs/htdocs/luci-static/resources/view/nikki-rs/ebpf.js"
+	local f
+
+	# Same condition as clone_for_repo_or_image: the tree only exists when the
+	# package is cloned into the image or into the repository.
+	if ! is_true "$ENABLE_REPO_PACKAGES" && ! is_true "$ENABLE_NIKKI"; then
+		return 0
+	fi
+
+	for f in "$conf" "$mig" "$js"; do
+		[ -f "$f" ] && continue
+		if is_true "$ENABLE_NIKKI"; then
+			die "cannot patch the eBPF IPv6 bypass defaults: ${f} does not exist — Nikki-RS was enabled but the package did not clone; see the clone warnings above"
+		fi
+		warn "Nikki-RS file ${f} is missing; skipping the eBPF bypass default patch"
+		return 0
+	done
+
+	insert_after_anchor "$conf" \
+		"list bypass_dst_ips 'fe80::/10'" \
+		"	list bypass_dst_ips 'fc00::/7'"
+	insert_after_anchor "$mig" \
+		"uci add_list nikki-rs.ebpf.bypass_dst_ips='fe80::/10'" \
+		"	uci add_list nikki-rs.ebpf.bypass_dst_ips='fc00::/7'"
+
+	insert_in_default_block "$js" "'224.0.0.0/4'," "            '192.168.0.0/16',"
+	insert_in_default_block "$js" "'ff00::/8'" "            'fc00::/7',"
+
+	log "eBPF bypass defaults: fc00::/7 added to the shipped config and the migration, 192.168.0.0/16 restored to the page default"
+	return 0
+}
+
 # --------------------------------------------------------------- staging -----
 stage_directory() {
 	local from="$1" to="$2"
@@ -3399,6 +3524,10 @@ main() {
 	# so that one is re-run every build; this one edits a package/ tree, which
 	# no feed command touches.)
 	pin_clash_rs
+	# Same tree and the same "after the clone, before the build" window: this
+	# rewrites the defaults that decide which destinations the datapath leaves
+	# alone (see patch_nikki_ebpf_bypass_defaults).
+	patch_nikki_ebpf_bypass_defaults
 	install_nftables_patches
 	install_proxy_repos
 

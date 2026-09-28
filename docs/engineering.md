@@ -856,10 +856,47 @@ V2EX 的说明）是：劫持 DNS → 对域名预选路 → 直连的域名解�
 * **安全边界**：`bypass-dst-ips` 必须含路由器自己的内网网段（默认含 `192.168.0.0/16`），
   否则连管理页面都进不去；第一次调试**不要打开开机自启**（`boot_start`），确认策略无误后
   再开。eBPF 是内核钩子，错误策略不像 nftables reload 那样会随防火墙重启自动回滚。
+  **IPv6 侧属于同一条边界，而上游默认没有覆盖它** —— 见下面「eBPF 模式下的 IPv6」。
 
 预编译的 `clash-rs` 二进制自 v0.20.0-alpha 起，aarch64-musl 的 minimal 包就带
 `ebpf` feature（release workflow 的 `features: minimal,jemallocator,ebpf`），
 所以本工程不需要在固件构建里引入 Rust / LLVM / bpf-linker 工具链，只是下载并打包。
+
+#### eBPF 模式下的 IPv6（已修：默认值 + 设备侧补齐）
+
+eBPF 打开后 IPv6 会坏，而这个失败很难从页面看出来，因为**看起来管 IPv6 的开关全部失效了**：
+
+* `ebpf_enabled=1` 时 `nikki-rs.init` 直接 `return`（见上），所以 TCP/UDP 页的
+  `ipv4/ipv6_dns_hijack`、`ipv4/ipv6_proxy` 属于 nftables 路径，**此时一个都不生效**。
+* 真正决定 IPv6 的是核心自己的 `mixin.ipv6` 与 `mixin.dns_ipv6`。出厂 `nikki-rs.conf`
+  两者都是 `1`，但 `mixin.uc` 经 `uci_bool()` 读它们：键不存在时返回 `null`，该键
+  **整个不出现在生成的 `config.yaml` 里**，于是由 clash-rs 自己的默认值决定 —— `ipv6`
+  默认关闭。`migrate.sh` 从不补这两个键，所以**从旧配置升上来的设备**会静默落到
+  「核心不处理 IPv6、内核钩子却把 IPv6 全抓走」这个组合上，表现为 **AAAA 解析返回空**。
+  现场核对：`uci -q get nikki-rs.mixin.ipv6`（空 = 会踩这条）。
+* 另一半是绕过清单。eBPF 只放行 `bypass-dst-ips` 里的目的地，而「目的地是路由器自己」的流量
+  必须本地投递。上游默认 IPv4 给了 `192.168.0.0/16`，IPv6 只给了 `::1/128`（回环）、
+  `fe80::/10`（链路本地）、`ff00::/8`（组播）——**本固件必然生成的 ULA 不在其中**
+  （`base-files/files/bin/config_generate` 设 `ula_prefix 'auto'`，
+  `etc/uci-defaults/12_network-generate-ula` 由此生成 `fdXX:XXXX:XXXX::/48`，
+  odhcpd 以 ULA 宣告 DNS）。结果：局域网客户端到路由器 IPv6 地址的 DNS 查询被内核钩子抓走，
+  同一查询走 IPv4 却被 `192.168.0.0/16` 放行 —— **IPv6 解析失败、IPv4 正常**。
+  真实设备上报告为「开启 eBPF 后 IPv6 地址相关的解析出问题」。
+
+修法分两半，都要求幂等、只增不删：
+
+| 位置 | 做什么 | 谁做 |
+| --- | --- | --- |
+| `nikki-rs.conf` / `migrate.sh` / `ebpf.js` 里的默认值 | 补 `fc00::/7`（整个 ULA 段，永远不是公网目的地）；`ebpf.js` 还补回它丢失的 `192.168.0.0/16` | 构建期 `patch_nikki_ebpf_bypass_defaults`，锚点找不到就 `die`，编辑器不生效也 `die` |
+| 设备上实际生效的那份清单 | 按 `/proc/net/if_inet6` 取 `lan_interface` 上的全局地址（ULA 与委派来的前缀都算），掩码成 on-link 前缀后追加 | 运行期 `luci-app-h5000m-accel` 的 `apply_ebpf_bypass_ips`（开机、以及「保存并应用」时；改动了才重启 Nikki-RS） |
+
+构建期那半**只写静态默认值**：每台设备真实的 LAN 前缀不同，由设备侧算。设备侧用
+`/proc/net/if_inet6` 而不是 `ip -6 addr`，是为了不依赖镜像里装的是哪个 `ip`；掩码按"四位一个
+十六进制数字"直接取前 `prefixlen/4` 位，非 4 倍数时**向下取整**（更宽的前缀只会多放行自己的
+内网，而更窄会把路由器的流量继续留在钩子里，正是要修的那个失败）。`h5000m-accel-status`
+把两件事分开报出来（`ebpf_core_ipv6`/`ebpf_core_dns_ipv6` 与 `ebpf_bypass_ipv6` +
+`ebpf_bypass_ipv6_missing`），显示在「加速」页；命令行等价的读取是
+`/usr/sbin/h5000m-accel check-bypass`（无输出=没有缺失项）。
 
 #### eBPF 配置的 schema 由两个独立版本的项目共同决定（已修：`pin_clash_rs`）
 
@@ -1437,6 +1474,29 @@ htmode，以及两个 flow offload 开关（**硬件卸载根本没打开**）�
 >
 > 注意：该脚本验证的是 `artifacts/` 里的 rootfs 打包，所以**在重新构建固件之前，
 > 它会对已出货的镜像持续报这个 bug** —— 这正是它应有的行为。
+
+**同一个路径又抓到第二个同类 bug（eBPF 绕过清单的去重）：**
+
+```sh
+uci -q get nikki-rs.ebpf.bypass_dst_ips | grep -qxF "$cidr"   # 永远不匹配
+```
+
+这个固件的 uci 把**列表打印成单行、空格分隔**（`cli.c` 的 `uci_show_value()`，
+`UCI_TYPE_LIST` 分支把所有值连在一行、末尾一个换行，分隔符由 `-d` 决定、默认是空格），
+**不是一行一个**。于是"这条已经在清单里吗"用整行比较**永远为假**，每次 apply 都会再追加
+一份：7 条上游默认值，两次 apply 之后变成 17 条，**每次开机涨 5 条**。
+
+我此前用 shell 桩验证过这段逻辑并通过 —— 桩按"一行一条"打印，所以它说没问题。
+**桩不只是漏掉引号问题：任何依赖 uci 输出格式的判断它都测不出来。**
+
+> 修法是不依赖分隔符：把取值里的空白统一成空格、两端补空格，再用 `case` 做 token 匹配。
+>
+> `scripts/rootfs-script-test.sh` 现在除了首启脚本，还跑一遍加速器的 apply 路径
+> （`/etc/config/`、`/proc/net/if_inet6` 和两个 init 路径重定向到临时目录，
+> `sysctl`/`modprobe`/`logger` 三处对外副作用桩住 —— `apply_settings` 真的会写
+> `net.ipv4.tcp_congestion_control`），断言：第一次 apply 后清单为 7 + 3 条、
+> **第二次 apply 不再增加**、`check-bypass` 不再报缺、`enabled=0` 时一条都不写。
+> 反向验证过：把去重改回整行比较，这个场景立刻在"第二次 apply 不再增加"上失败。
 
 ### 四层 fullcone 链路：静态审查全部通过，运行时验证抓出 5 个缺陷
 

@@ -546,6 +546,56 @@ jobs:
           want "$accel/Makefile" 'kmod-veth' \
             "the accel package depends on kmod-veth"
 
+          # The eBPF bypass list has to name the router's own IPv6, in two places
+          # that fail independently: the static defaults this project patches at
+          # build time, and the device-side applier that derives the real LAN
+          # prefixes.  This is the failure reported as "开启 eBPF 后 IPv6 地址相关
+          # 的解析出问题": upstream ships only ::1/128, fe80::/10 and ff00::/8 on
+          # the IPv6 side, so traffic addressed to the router itself is captured
+          # while its IPv4 twin is bypassed by 192.168.0.0/16.
+          want scripts/local-build.sh 'patch_nikki_ebpf_bypass_defaults' \
+            "local-build.sh patches upstream's eBPF bypass defaults"
+          # A default that is never applied is the same as no default.
+          want scripts/local-build.sh '^	patch_nikki_ebpf_bypass_defaults$' \
+            "the eBPF bypass default patch is called from main"
+          want scripts/local-build.sh "bypass_dst_ips 'fc00::/7'" \
+            "the shipped default carries the ULA range"
+          # Scoped, or the file-wide insert would also hit the section-creation
+          # list, which already has the entry this is meant to add.
+          want scripts/local-build.sh 'insert_in_default_block' \
+            "the LuCI default edit is scoped to the field's own array"
+          # The page's default had also lost 192.168.0.0/16 — the IPv4 safety net
+          # docs/engineering.md calls mandatory.
+          want scripts/local-build.sh "'192.168.0.0/16'," \
+            "the page default gets the IPv4 LAN back"
+          want "$accel/root/usr/sbin/h5000m-accel" 'EBPF_BYPASS_ALWAYS' \
+            "the accel applier knows the ULA safety net"
+          want "$accel/root/usr/sbin/h5000m-accel" 'apply_ebpf_bypass_ips' \
+            "the accel applier repairs the bypass list"
+          want "$accel/root/usr/sbin/h5000m-accel" '/proc/net/if_inet6' \
+            "the accel applier derives LAN prefixes without depending on ip"
+          # A call on a line of its own, which the definition (name + `() {`)
+          # cannot match.  It is in the apply branch rather than inside
+          # apply_settings on purpose: that function returns early when
+          # firewall.@defaults[0] is missing, and this repair must not.
+          want "$accel/root/usr/sbin/h5000m-accel" '^[[:space:]]*apply_ebpf_bypass_ips$' \
+            "the repair runs from the accel apply path"
+          want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_core_ipv6' \
+            "the accel status reports the core's own IPv6 switches"
+          want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_bypass_ipv6' \
+            "the accel status reports IPv6 bypass coverage"
+          want "$accel/htdocs/luci-static/resources/view/h5000m/accel.js" 'ebpf_bypass_ipv6' \
+            "the accel page shows the IPv6 bypass coverage"
+          # uci prints a list on ONE line (cli.c: uci_show_value), so a whole-line
+          # comparison never matched and every apply appended a second copy of
+          # every entry.  The applier matches tokens instead, and the harness
+          # scenario is what would catch a regression — it only works against the
+          # firmware's own uci, not a mock.
+          want "$accel/root/usr/sbin/h5000m-accel" 'case "$cur" in' \
+            "the applier compares bypass entries as tokens, not whole lines"
+          want scripts/rootfs-script-test.sh 'a second apply adds nothing' \
+            "the harness still exercises the bypass dedupe against the real uci"
+
           echo
           if [ "$fail" -ne 0 ]; then
             echo "::error::Nikki-RS / eBPF wiring is inconsistent"
