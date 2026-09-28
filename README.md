@@ -84,7 +84,8 @@ v2rayA、OpenClash、SSR-Plus** 以及各自的中文语言包。内核模块与
 | **5G 拨号** `ddimension/wwand` | 5G 模组拨号，带 LuCI 面板 |
 | **MosDNS** | 域名分流，开箱已装 |
 | HomeProxy / Adblock | 已在软件源中，`apk add luci-app-homeproxy` / `luci-app-adblock` 安装；**默认不装进固件** |
-| **Adblock-Fast** | 软件源里也提供 `adblock-fast` + `luci-app-adblock-fast` + 中文包；它推荐但非必需的 `gawk` / `grep` / `sed` / `coreutils-sort` 同样在源里，面板不会再提示缺包 |
+| **Adblock-Fast** | 软件源里也提供 `adblock-fast` + `luci-app-adblock-fast` + 中文包。它推荐但非必需的 `gawk` / `grep` / `sed` / `coreutils-sort` 同样在源里，但**面板仍然会提示缺这几个包**：它探测的是 GNU 的固定路径（`/usr/libexec/grep-gnu` 等），busybox 的 `grep`/`sed`/`sort` 不算数。按提示装完才消失：`apk add gawk grep sed coreutils-sort` |
+| **AdGuardHome** | 软件源提供 `adguardhome` + `luci-app-adguardhome` + 中文包，`apk add luci-app-adguardhome` 安装，**默认不装进固件**；LuCI 页面（服务 → AdGuard Home）只管理服务状态与配置文件 / 工作目录 / 运行用户 / 挂载 / Go 参数 —— 网页管理端口、DNS 重定向、执行文件路径在它**自己的 Web UI**（默认 `http://<路由器IP>:3000`）里设 |
 | Argon 主题 | LuCI 主题 |
 | UPnP IGD / ttyd | 端口映射 / 网页终端 |
 
@@ -201,6 +202,14 @@ H5000M_APK_REPO_URL=http://<你的地址>:8099 ./scripts/local-build.sh
   （该源的公钥不在固件里），且可能装上与本固件 ABI/版本不一致的 `clash-rs`。
   已经加过的，删掉 `/etc/apk/repositories.d/` 里指向 `nikki-rs.pages.dev` 的那一行，
   再 `apk update` 即可。
+- **`unexpected end of file` + `wget: exited with error 4` 是下载被截断，不是包缺失，也不是软件源坏了**：
+  本固件的 apk 用 busybox `wget` 取包（`apk-tools` 以 `-Durl_backend=wget` 编译，默认
+  `wget -q -T 60 <url> -O -`），并把 wget 的退出码 4 解释成"网络不可达"。链路抖动、丢包或
+  5G 侧的 MTU/PMTU 异常都会让一个稍大的文件传不完，于是同一个 URL 先报 `unexpected end of file`、
+  再报 `wget: exited with error 4`。判断依据：若出错的几条分别来自**不同主机**（官方快照、
+  第三方 feed、本固件的源），那就与某个源无关，是这条链路。
+  先重试 `apk update && apk add <包名>`；反复失败再查传输层 —— `ip link show` 看拨号口 MTU，
+  `wget -O /dev/null '<出错的 URL>'` 复现一次即可确认。
 - **不要盲目 `apk upgrade`**：镜像里保留了官方 snapshot 源，而那些版本比本工程的构建新
   —— `apk` 取最高版本，升级会把钉住的 `sing-box` 换成 1.13+（HomeProxy / PassWall2 会
   因此起不来），也可能换上与内核不匹配的 kmod。装包用 `apk add <包名>` 就好。

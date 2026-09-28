@@ -13,6 +13,14 @@
 # one.  Neither is visible in a `.config`, a package count, or an exit code — both
 # need a real apk solver asking a real index.
 #
+# A third gap turned up on a real device: a package can be in the repository, can
+# install cleanly, and still not satisfy whatever asked for it.  adblock-fast
+# clears its "gawk, grep, sed, coreutils-sort are missing" warning by probing four
+# FIXED GNU paths, so "the four are in the source" only helps if they install to
+# exactly those paths — busybox's own grep/sed/sort sit elsewhere and never count.
+# A presence check cannot see that difference, so the install check below does the
+# install and looks at the paths.
+#
 # This script builds a throw-away apk database, points it at one repository, and
 # asks the same questions the device's apk asks.  With --with-official-feeds it
 # also configures the snapshot sources a firmware ships with, which is how the
@@ -116,6 +124,18 @@ DAEMONS=(
 DNS_BACKENDS=(dnsmasq-full ipset)
 ADBLOCK_TOOLS=(gawk grep sed coreutils-sort)
 
+# Package -> the paths adblock-fast probes for it, copied from
+# `_check_recommended_packages()` in feeds/packages/net/adblock-fast/files/lib/
+# adblock-fast/adblock-fast.uc.  It looks gawk up by name (either bin directory
+# counts) but asks for absolute paths for the other three, and those paths exist
+# only in the GNU packages.  That is why the four are in the repository at all.
+declare -A ADBLOCK_TOOL_PATHS=(
+	[gawk]="usr/bin/gawk usr/sbin/gawk"
+	[grep]="usr/libexec/grep-gnu"
+	[sed]="usr/libexec/sed-gnu"
+	[coreutils-sort]="usr/libexec/sort-coreutils"
+)
+
 # Kernel modules the proxy stack redirects traffic through.  They can only come
 # from a repository built against this exact kernel: the official snapshot's
 # modules carry a different vermagic, and their files disappear as the snapshot
@@ -157,7 +177,11 @@ OFFICIAL_FEEDS=(
 # --------------------------------------------------------------- apk harness ---
 
 SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SCRATCH"' EXIT
+# A second, separate database for the install-and-look-at-the-paths check below.
+# It installs packages, and doing that in $SCRATCH would change the installed set
+# that the version-pin check above reasons about.
+TOOLS_SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH" "$TOOLS_SCRATCH"' EXIT
 mkdir -p "$SCRATCH/cache"
 
 # --usermode: this runs as an ordinary user, not root.
@@ -251,6 +275,41 @@ echo
 echo "=== adblock DNS backends and recommended tools ==="
 for p in "${DNS_BACKENDS[@]}"; do present "$p"; done
 for p in "${ADBLOCK_TOOLS[@]}"; do present "$p"; done
+echo
+
+# Being in the repository is not the claim that clears the warning — the paths
+# are.  Install the four into their own database and look at what landed.
+#
+# `--scripts=no` because the post-install scripts are aarch64 binaries and this
+# host is not: apk reports every one of them as "exited with error 127", which is
+# a property of the verifying host, not of the repository.  The question here is
+# which files the packages install, and that is answered without running them.
+echo "=== adblock-fast's recommended tools land where it probes ==="
+mkdir -p "$TOOLS_SCRATCH/cache"
+if ! "$APK" --root "$TOOLS_SCRATCH" --arch "$ARCH" --allow-untrusted --initdb --usermode add >/dev/null 2>&1; then
+	bad "could not create a scratch apk database for the install check"
+else
+	printf '%s\n' "$TARGET" >"$TOOLS_SCRATCH/etc/apk/repositories"
+	if ! "$APK" --root "$TOOLS_SCRATCH" --arch "$ARCH" --allow-untrusted \
+		--cache-dir "$TOOLS_SCRATCH/cache" --scripts=no add "${ADBLOCK_TOOLS[@]}" >/dev/null 2>&1; then
+		bad "apk add ${ADBLOCK_TOOLS[*]} failed against this repository"
+	else
+		for pkg in "${ADBLOCK_TOOLS[@]}"; do
+			hit=""
+			for path in ${ADBLOCK_TOOL_PATHS[$pkg]}; do
+				if [ -e "${TOOLS_SCRATCH}/${path}" ]; then
+					hit="$path"
+					break
+				fi
+			done
+			if [ -n "$hit" ]; then
+				ok "$pkg installs ${hit}, which is where adblock-fast looks"
+			else
+				bad "$pkg installs nothing at ${ADBLOCK_TOOL_PATHS[$pkg]} — the panel would keep warning after following its own advice"
+			fi
+		done
+	fi
+fi
 echo
 
 # `apk list <missing>` exits 0 with no output, and `apk query --recursive` exits 0

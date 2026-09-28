@@ -646,6 +646,11 @@ jobs:
             "verify-apk-repo.sh checks the DNS backends"
           want scripts/verify-apk-repo.sh 'ADBLOCK_TOOLS=(gawk grep sed coreutils-sort)' \
             "verify-apk-repo.sh checks the recommended tools"
+          # The paths, not the presence, are what clears adblock-fast's warning: a
+          # presence check stays green even if upstream moves grep-gnu somewhere
+          # the probe never looks, which is the silent failure this asserts against.
+          want scripts/verify-apk-repo.sh 'ADBLOCK_TOOL_PATHS' \
+            "verify-apk-repo.sh checks the paths adblock-fast probes"
 
           want .github/workflows/build.yml 'luci-app-adblock-fast' \
             "build.yml checks the adblock-fast front-end"
