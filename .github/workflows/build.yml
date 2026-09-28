@@ -1008,14 +1008,58 @@ jobs:
           done
           echo
           echo "=== adblock-fast's recommended tools ==="
-          # adblock-fast probes the GNU paths (/usr/sbin/gawk,
-          # /usr/libexec/{grep-gnu,sed-gnu,sort-coreutils}) and warns, with an
-          # `apk add` line, when they are absent — even though busybox provides
+          # adblock-fast probes `gawk` by name and the absolute paths
+          # /usr/libexec/{grep-gnu,sed-gnu,sort-coreutils}, and warns — with an
+          # `apk add` line — when they are absent, even though busybox provides
           # awk/grep/sed/sort.  The warning is only actionable if this repository
           # actually carries the four packages.
           for p in gawk grep sed coreutils-sort; do
             if [ -n "$(apk_ list "$p" 2>/dev/null)" ]; then ok "$p"; else bad "$p is not in the built repository"; fi
           done
+          echo
+
+          # Carrying the four is not the claim that clears the warning — the PATHS
+          # are, and only an install can show them.  A repository that carries the
+          # packages but installs them anywhere else leaves the warning up on the
+          # device that followed the advice, which is invisible to a presence
+          # check.  Mirrors scripts/verify-apk-repo.sh; keep the two in step.
+          #
+          # A separate database, because $ROOT above is what the version-pin
+          # reasoning depends on.  --scripts=no because the post-install scripts
+          # are aarch64 binaries and this runner is x86_64: apk would report each
+          # one as "exited with error 127", which says nothing about the repository
+          # under test.
+          echo "=== and they install where adblock-fast looks ==="
+          TOOLS_ROOT="$(mktemp -d)"
+          mkdir -p "$TOOLS_ROOT/cache"
+          if ! "$APK" --root "$TOOLS_ROOT" --arch "$ARCH" --allow-untrusted --initdb --usermode add >/dev/null 2>&1; then
+            bad "could not create a scratch apk database for the install check"
+          else
+            printf '%s\n' "${BUILD_DIR}/${INDEX}" >"$TOOLS_ROOT/etc/apk/repositories"
+            if ! "$APK" --root "$TOOLS_ROOT" --arch "$ARCH" --allow-untrusted \
+                 --cache-dir "$TOOLS_ROOT/cache" --scripts=no \
+                 add gawk grep sed coreutils-sort >/dev/null 2>&1; then
+              bad "apk add gawk grep sed coreutils-sort failed against the built repository"
+            else
+              for spec in "gawk:usr/bin/gawk usr/sbin/gawk" \
+                          "grep:usr/libexec/grep-gnu" \
+                          "sed:usr/libexec/sed-gnu" \
+                          "coreutils-sort:usr/libexec/sort-coreutils"; do
+                pkg="${spec%%:*}"
+                paths="${spec#*:}"
+                hit=""
+                for path in $paths; do
+                  if [ -e "${TOOLS_ROOT}/${path}" ]; then hit="$path"; break; fi
+                done
+                if [ -n "$hit" ]; then
+                  ok "$pkg installs ${hit}, which is where adblock-fast looks"
+                else
+                  bad "$pkg installs nothing at ${paths} — the panel would keep warning after following its own advice"
+                fi
+              done
+            fi
+          fi
+          rm -rf "$TOOLS_ROOT"
           echo
           echo "=== kernel modules (they must carry this kernel's vermagic) ==="
           for p in kmod-tun kmod-inet-diag kmod-dummy kmod-nft-queue kmod-nfnetlink-queue \
