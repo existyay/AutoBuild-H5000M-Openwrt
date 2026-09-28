@@ -68,6 +68,143 @@ apply_ebpf_proxy() {
 	return 0
 }
 
+# --- the router's own IPv6 addresses and the eBPF bypass list ----------------
+#
+# The eBPF hook is what decides "proxy or deliver locally": everything not in
+# Nikki-RS's `bypass-dst-ips` is a candidate for the datapath.  The upstream
+# default list covers the router's own IPv4 (192.168.0.0/16) and, on the IPv6
+# side, only loopback (::1/128), link-local (fe80::/10) and multicast
+# (ff00::/8) — so the ULA this firmware always generates and any delegated
+# global address fall through to the proxy.
+#
+# The consequence is asymmetric and hard to read from the pages: a LAN client's
+# DNS query to the router's IPv4 address is bypassed and answered by dnsmasq,
+# while the same query to the router's IPv6 address is captured — IPv6 name
+# resolution breaks while IPv4 keeps working, and nothing on the eBPF page
+# mentions IPv6.  Reported on a real device as "开启 eBPF 后 IPv6 解析不对".
+#
+# fc00::/7 is the whole ULA range: it is never a public destination, so bypassing
+# it cannot swallow anything that should be proxied — the same argument that puts
+# 192.168.0.0/16 in the list upstream.  The router's own addresses are added as
+# the on-link prefix they sit in rather than as a hard-coded range, because the
+# delegated prefix changes with the ISP session and differs per device.
+EBPF_BYPASS_ALWAYS='fc00::/7'
+
+# The interfaces the hook filters: exactly the ones Nikki-RS attaches to, so an
+# address that is not on one of them cannot arrive through this datapath.
+ebpf_lan_devices() {
+	uci -q get nikki-rs.ebpf.lan_interface 2>/dev/null | grep -v '^$' || echo br-lan
+}
+
+# Drop the leading zeros inside each group, so an address read from the kernel is
+# spelled the way a user would write it — which is also what makes "this entry is
+# already in the list" compare equal.  Two POSIX BRE substitutions, not one with
+# `\|`: that alternation is a GNU extension and the device's sed is busybox's.
+strip_v6_zeros() {
+	printf '%s' "$1" | sed 's/^0*\([0-9a-f]\)/\1/; s/:0*\([0-9a-f]\)/:\1/g'
+}
+
+# 32 hex digits -> xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx
+hex_ipv6() {
+	local groups
+	groups="$(printf '%s' "$1" | sed 's/\(....\)/\1:/g; s/:$//')"
+	strip_v6_zeros "$groups"
+}
+
+# The on-link prefix an address belongs to, as `prefix/length`.  Four bits per
+# hex digit, so keeping the first length/4 digits and zeroing the rest IS the
+# mask.  Lengths that are not a multiple of 4 are rounded DOWN, i.e. the emitted
+# prefix is wider than the interface's — a wider bypass can only let more of our
+# own LAN through, while a narrower one would leave part of the router's traffic
+# captured, which is the failure this fixes.
+mask_ipv6() {
+	local addr="$1" prefix="$2" keep masked
+	keep=$((prefix / 4))
+	masked="$(awk -v a="$addr" -v k="$keep" 'BEGIN {
+		s = substr(a, 1, k);
+		while (length(s) < 32) s = s "0";
+		print s;
+	}')"
+	printf '%s/%s\n' "$(hex_ipv6 "$masked")" "$((keep * 4))"
+}
+
+# Everything that has to be in `bypass-dst-ips` once eBPF is on, one per line.
+ebpf_bypass_want() {
+	local devs addr prefix
+
+	printf '%s\n' "$EBPF_BYPASS_ALWAYS"
+
+	devs=" $(ebpf_lan_devices | tr '\n' ' ') "
+
+	# /proc/net/if_inet6 instead of `ip -6 addr`: no dependency on which `ip`
+	# implementation is installed, and no output format to parse.  Field order is
+	# address, ifindex, prefixlen, scope, flags, devname.
+	[ -r /proc/net/if_inet6 ] || return 0
+	awk -v devs="$devs" '
+		# 0x00 is global scope — a ULA counts.  Link-local (0x20) is already
+		# covered by the upstream fe80::/10 entry, and host scope (0x10) is ::1.
+		$4 == "00" && index(devs, " " $6 " ") > 0 { print $1, $3 }
+	' /proc/net/if_inet6 |
+		while read -r addr prefix; do
+			# `0x$prefix`, not bash's `16#$prefix`: this runs under the image's
+			# ash, where the 16# form is not an arithmetic constant at all (the
+			# same trap that made normalize_source_mtimes print 1722 arithmetic
+			# errors before it was fixed).
+			mask_ipv6 "$addr" "$((0x$prefix))"
+		done
+	return 0
+}
+
+# The subset of ebpf_bypass_want() that the config does not have yet.
+ebpf_bypass_missing() {
+	local cur cidr
+	[ -f /etc/config/nikki-rs ] || return 0
+	# Only when the datapath is actually on: with eBPF disabled the list decides
+	# nothing, and writing to another package's config for no active reason is
+	# the kind of surprise this page exists to avoid.
+	[ "$(uci -q get nikki-rs.ebpf.enabled 2>/dev/null || echo 0)" = '1' ] || return 0
+
+	# uci prints a list on ONE line with the values separated by a space — cli.c's
+	# uci_show_value(), UCI_TYPE_LIST — not one value per line.  Comparing whole
+	# lines therefore never matched, and each run appended a second copy of every
+	# entry.  That was found by running this against the target's own uci under
+	# qemu; a mock that printed one value per line had said it was fine.
+	# Normalising to a space-padded string and matching the token does not depend
+	# on which separator the installed uci uses.
+	cur=" $(uci -q get nikki-rs.ebpf.bypass_dst_ips 2>/dev/null | tr '\n' ' ') "
+	for cidr in $(ebpf_bypass_want); do
+		case "$cur" in
+			*" $cidr "*) ;;
+			*) printf '%s\n' "$cidr" ;;
+		esac
+	done
+	return 0
+}
+
+# Append-only repair.  Existing entries are never removed or rewritten: the user
+# may have added ranges deliberately, and this page does not own that list.
+apply_ebpf_bypass_ips() {
+	local cidr added=0
+
+	for cidr in $(ebpf_bypass_missing); do
+		uci -q add_list "nikki-rs.ebpf.bypass_dst_ips=${cidr}" || continue
+		log "ebpf bypass: +${cidr}"
+		added=$((added + 1))
+	done
+
+	[ "$added" -gt 0 ] || return 0
+	uci -q commit nikki-rs
+
+	# Restart only if the core is already up.  During boot this runs from
+	# /etc/uci-defaults (via /etc/init.d/boot) before Nikki-RS starts, so the
+	# corrected list is read on the way up and a restart would be a second start.
+	if [ -x /etc/init.d/nikki-rs ] && /etc/init.d/nikki-rs running 2>/dev/null; then
+		/etc/init.d/nikki-rs restart >/dev/null 2>&1
+	fi
+	log "ebpf bypass: added ${added} entry/entries"
+	return 0
+}
+
 apply_settings() {
 	local offload hw bbr
 
@@ -152,10 +289,21 @@ reload_firewall() {
 
 case "${1:-apply}" in
 	apply)
+		# Before apply_settings, and not inside it: that function returns 1 as
+		# soon as `firewall.@defaults[0]` is absent, so a repair living after
+		# that point would silently not happen on a system whose firewall config
+		# is not there yet.  This repair touches Nikki-RS's config only, and is a
+		# no-op unless eBPF is actually enabled there.
+		apply_ebpf_bypass_ips
 		apply_settings && reload_firewall
 		;;
+	check-bypass)
+		# Read-only, for the status panel: the entries the datapath needs and
+		# does not have.  Empty output means nothing is missing.
+		ebpf_bypass_missing
+		;;
 	*)
-		echo "usage: $0 apply" >&2
+		echo "usage: $0 [apply|check-bypass]" >&2
 		exit 1
 		;;
 esac

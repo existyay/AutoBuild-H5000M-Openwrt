@@ -191,4 +191,49 @@ else
 	echo "ebpf_attached=0"
 fi
 
+# --- eBPF and IPv6 -----------------------------------------------------------
+#
+# Two independent facts, because each breaks IPv6 name resolution on its own and
+# neither is visible on the page that looks like it owns it.
+#
+#   mixin.ipv6 / mixin.dns_ipv6  are the clash-rs core's own IPv6 switches.  The
+#     "IPv6 DNS Hijack" and "IPv6 Proxy" switches on the TCP/UDP page belong to
+#     the nftables path — nikki-rs.init returns before it reads them once eBPF is
+#     enabled — so with eBPF on the core's flag is the only thing that decides
+#     whether IPv6 is handled at all.  Unset is reported as `unset`, not as 0:
+#     the shipped default sets both to 1, but migrate.sh never backfills them, so
+#     a config that predates those keys leaves them out of the generated
+#     config.yaml entirely and the core falls back to its own default (IPv6 off).
+#
+#   the bypass list  has to contain the router's own IPv6, for exactly the reason
+#     it contains 192.168.0.0/16.  Traffic addressed TO the router must be
+#     delivered locally, not captured by the hook.  Upstream ships only ::1/128,
+#     fe80::/10 and ff00::/8 on the IPv6 side, so the ULA this firmware always
+#     generates (config_generate sets ula_prefix 'auto') is not covered: a LAN
+#     client's DNS query to the router's IPv6 address is captured while the same
+#     query over IPv4 is bypassed.
+mixin_ipv6="$(uci -q get nikki-rs.mixin.ipv6 2>/dev/null || echo '')"
+echo "ebpf_core_ipv6=${mixin_ipv6:-unset}"
+mixin_dns_ipv6="$(uci -q get nikki-rs.mixin.dns_ipv6 2>/dev/null || echo '')"
+echo "ebpf_core_dns_ipv6=${mixin_dns_ipv6:-unset}"
+
+# `na` when there is nothing to check — no Nikki-RS, or eBPF off.  The list
+# decides nothing then, and naming a missing entry would be noise on a page the
+# user opened for another reason.  The list itself comes from the applier, so
+# there is one definition of "what has to be bypassed" and not two.
+if [ -x /usr/sbin/h5000m-accel ] && [ -f /etc/config/nikki-rs ] &&
+	[ "$(uci -q get nikki-rs.ebpf.enabled 2>/dev/null || echo 0)" = '1' ]; then
+	bypass_missing="$(/usr/sbin/h5000m-accel check-bypass 2>/dev/null | tr '\n' ' ')"
+	bypass_missing="${bypass_missing% }"
+	if [ -z "$bypass_missing" ]; then
+		echo "ebpf_bypass_ipv6=1"
+	else
+		echo "ebpf_bypass_ipv6=0"
+	fi
+	echo "ebpf_bypass_ipv6_missing=${bypass_missing}"
+else
+	echo "ebpf_bypass_ipv6=na"
+	echo "ebpf_bypass_ipv6_missing="
+fi
+
 exit 0

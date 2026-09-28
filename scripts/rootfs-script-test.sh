@@ -203,6 +203,109 @@ sh "$WORK/firstboot"
 check "radio0.disabled kept" "1" "$(uci -q get wireless.radio0.disabled)"
 check "offload not applied" "" "$(uci -q get firewall.@defaults[0].flow_offloading)"
 
+echo
+echo "== the acceleration applier against the real uci (the eBPF IPv6 bypass repair)"
+# Why this is here, and why a mock cannot do it: the applier answers "is this
+# entry already in the bypass list?" while adding the router's own IPv6 to
+# Nikki-RS's eBPF bypass list.  Written against a mock that printed a list one
+# value per line, it looked right — but THIS uci prints a list on a SINGLE line
+# with the values separated by a space (cli.c: uci_show_value, UCI_TYPE_LIST), so
+# the whole-line comparison never matched and every run appended a second copy of
+# every entry.  Measured: 7 entries became 17 after two applies, and the list
+# would grow by five on every boot.  Only the real parser shows that.
+ACCEL_SRC="$WORK/root/usr/sbin/h5000m-accel"
+[ -f "$ACCEL_SRC" ] || {
+	echo "h5000m-accel missing from the rootfs" >&2
+	exit 2
+}
+# Only the absolute runtime paths change; the uci invocations are what ships.
+sed -e "s|/etc/config/|$WORK/config/|g" \
+	-e "s|/proc/net/if_inet6|$WORK/if_inet6|g" \
+	-e "s|/etc/init.d/nikki-rs|$WORK/no-such-initd|g" \
+	-e "s|/etc/init.d/firewall|$WORK/no-such-initd|g" \
+	"$ACCEL_SRC" >"$WORK/accel"
+
+# apply_settings really does write net.ipv4.tcp_congestion_control through
+# sysctl, and the eBPF path loads modules: none of that belongs on the machine
+# running the test, so the three commands that reach outside the scratch config
+# are stubbed (the harness already has $WORK/bin first on PATH for uci).
+for t in sysctl modprobe logger; do
+	printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/$t"
+	chmod +x "$WORK/bin/$t"
+done
+
+# Two prefixes on the filtered interface, plus the three shapes that have to be
+# ignored: link-local (scope 0x20), host scope (0x10), and a global address on an
+# interface the hook does not filter.  Field order is address, ifindex,
+# prefixlen, scope, flags, devname.
+cat >"$WORK/if_inet6" <<'IFINET6'
+fd12000000000000000000000000002a 02 40 00 00 br-lan
+20010db800000000000000000000002a 02 40 00 00 br-lan
+fe80000000000000000000000000002a 02 40 20 80 br-lan
+00000000000000000000000000000001 01 80 10 80 lo
+20010db800000001000000000000002a 03 40 00 00 wan0
+IFINET6
+
+seed_ebpf() { # seed_ebpf <enabled>
+	cat >"$WORK/config/nikki-rs" <<EOF
+config ebpf 'ebpf'
+	option enabled '${1:-1}'
+	list lan_interface 'br-lan'
+	list bypass_dst_ips '127.0.0.0/8'
+	list bypass_dst_ips '169.254.0.0/16'
+	list bypass_dst_ips '192.168.0.0/16'
+	list bypass_dst_ips '224.0.0.0/4'
+	list bypass_dst_ips '::1/128'
+	list bypass_dst_ips 'fe80::/10'
+	list bypass_dst_ips 'ff00::/8'
+EOF
+	# The applier refuses to touch the firewall before this section exists, and
+	# the eBPF path is left to Nikki-RS by the 'keep' default.
+	printf "config defaults\n\toption input 'REJECT'\n" >"$WORK/config/firewall"
+	printf "config settings 'settings'\n\toption profile 'compat'\n\toption fullcone '0'\n\toption ebpf_proxy 'keep'\n" >"$WORK/config/h5000m_accel"
+}
+
+# Count tokens, not lines: counting lines would itself encode the bug this test
+# exists for.
+bypass_count() { uci -q get nikki-rs.ebpf.bypass_dst_ips | tr ' ' '\n' | grep -c .; }
+bypass_has() {
+	case " $(uci -q get nikki-rs.ebpf.bypass_dst_ips) " in
+		*" $1 "*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+seed_ebpf 1
+sh "$WORK/accel" apply
+check "bypass entries after the first apply" "10" "$(bypass_count)"
+for entry in 'fc00::/7' 'fd12:0:0:0:0:0:0:0/64' '2001:db8:0:0:0:0:0:0/64'; do
+	if bypass_has "$entry"; then
+		ok "the router's own IPv6 is in the bypass list: $entry"
+	else
+		bad "the router's own IPv6 is missing from the bypass list: $entry"
+	fi
+done
+for entry in 'fe80:0:0:0:0:0:0:0/64' '2001:db8:0:1:0:0:0:0/64'; do
+	if bypass_has "$entry"; then
+		bad "added an address the hook does not filter: $entry"
+	else
+		ok "not added (not a global address on the filtered interface): $entry"
+	fi
+done
+
+sh "$WORK/accel" apply
+check "a second apply adds nothing (the whole-line bug appended copies)" "10" "$(bypass_count)"
+if grep -q "''" "$WORK/config/nikki-rs"; then
+	bad "bypass config holds quote-wrapped values (uci set \"k='v'\" bug)"
+else
+	ok "the bypass list has no quote-wrapped values"
+fi
+check "check-bypass reports nothing missing once repaired" "" "$(sh "$WORK/accel" check-bypass)"
+
+seed_ebpf 0
+sh "$WORK/accel" apply
+check "with eBPF disabled the list is left exactly as it was" "7" "$(bypass_count)"
+
 printf '\n\033[1m== summary ==\033[0m\n  passed: %s\n  failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
-echo "  the first-boot scripts behave correctly under the real uci"
+echo "  the first-boot scripts and the acceleration applier behave correctly under the real uci"

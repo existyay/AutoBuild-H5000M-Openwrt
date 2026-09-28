@@ -122,10 +122,21 @@ nftables/iptables 转发规则；打开后 `Proxy Config` 里的 TCP/UDP 模式�
   它的 eBPF 字节码在上游发布流程里就已编译并嵌入二进制；BTF 是给内核侧与
   BTF/CO-RE 类工具（如 Daed）用的。`CONFIG_BPF_EVENTS` / `XDP_SOCKETS` 仍保持关闭。
 
-三点注意：
+四点注意：
 
 * eBPF 页的 `Bypass Destination IPs` **必须包含你的内网网段**（默认含 `192.168.0.0/16`），
   否则去往路由器本身的流量也会被拦，直接失去管理入口。
+* **IPv6 是同一条边界，而上游默认没有覆盖它**：本固件的局域网必然有 IPv6（`ula_prefix 'auto'`
+  自动生成 ULA，odhcpd 以它宣告 DNS），但默认清单在 IPv6 侧只有 `::1/128`、`fe80::/10`、
+  `ff00::/8` —— **ULA 不在其中**。于是「去往路由器自己」的 IPv6 包被内核钩子抓走，而同样的
+  IPv4 包被 `192.168.0.0/16` 放行，表现为 **IPv6（AAAA）解析失败、IPv4 正常**。
+  本固件已把 `fc00::/7` 补进默认值，并在开机与「保存并应用」时按设备实际 LAN 前缀自动补齐
+  清单（只增不删、幂等）；「加速」页的「eBPF 核心 IPv6」「eBPF 绕过清单（IPv6）」两行会分别
+  报告，命令行可用 `/usr/sbin/h5000m-accel check-bypass` 查看缺失项。
+  另外要留意：eBPF 打开后 Nikki-RS 的 TCP/UDP 页上「IPv6 DNS 劫持 / IPv6 代理」**不生效**
+  （`nikki-rs.init` 在 eBPF 模式下直接返回，那两个开关属于 nftables 路径），此时决定 IPv6 的
+  只有核心自己的 `mixin.ipv6` / `mixin.dns_ipv6`。用 `uci -q get nikki-rs.mixin.ipv6` 核对：
+  **空值**意味着 clash-rs 退回自己的默认值「IPv6 关闭」，AAAA 会返回空。
 * **第一次调试不要打开 Nikki-RS 的开机自启**（`boot_start`）；确认策略没问题之后再开。
 * `dnsmasq.ipset`（adblock）与 eBPF 无关；eBPF 的透明代理端口是它自己的 `tproxy-port`
   （默认 12345），不用去配 Proxy Config 的 tproxy 端口。

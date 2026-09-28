@@ -86,6 +86,38 @@ return view.extend({
 				} else
 					ebpfProxyText = '未启用';
 
+				// The core's IPv6 switches.  They are the only ones that decide
+				// anything once eBPF is on: the "IPv6 DNS Hijack" / "IPv6 Proxy"
+				// switches live on the TCP/UDP page and belong to the nftables
+				// path, which nikki-rs.init skips entirely in eBPF mode.
+				// Unset is not the same as off, and clash-rs treats it as its own
+				// default — IPv6 disabled — so the generated config.yaml has no
+				// `ipv6` key at all and AAAA answers come back empty.
+				var ebpfCoreIpv6Text;
+				if (d.ebpf_nikki_rs !== '1')
+					ebpfCoreIpv6Text = '未安装 Nikki-RS';
+				else if (d.ebpf_core_ipv6 === 'unset' || d.ebpf_core_dns_ipv6 === 'unset')
+					ebpfCoreIpv6Text = '未设置（mixin.ipv6/dns_ipv6 缺失）—— clash-rs 退回自己的默认值，' +
+						'IPv6 关闭，AAAA 解析会返回空。改用 eBPF 后 TCP/UDP 页的 IPv6 开关不再生效，管用的是这两个键';
+				else if (d.ebpf_core_ipv6 === '1' && d.ebpf_core_dns_ipv6 === '1')
+					ebpfCoreIpv6Text = '已启用（clash-rs 的 ipv6 与 dns_ipv6 均为 1）';
+				else
+					ebpfCoreIpv6Text = '已关闭（ipv6=' + (d.ebpf_core_ipv6 || '?') +
+						'，dns_ipv6=' + (d.ebpf_core_dns_ipv6 || '?') + '）—— IPv6 不会被代理解析';
+
+				// Whether traffic addressed to the router ITSELF over IPv6 is
+				// exempt from the datapath, the way 192.168.0.0/16 exempts it
+				// over IPv4.
+				var ebpfBypassIpv6Text;
+				if (d.ebpf_bypass_ipv6 === 'na')
+					ebpfBypassIpv6Text = '未启用 eBPF，无需检查';
+				else if (d.ebpf_bypass_ipv6 === '1')
+					ebpfBypassIpv6Text = '路由器自身的 IPv6 已在绕过清单里';
+				else
+					ebpfBypassIpv6Text = '缺少 ' + (d.ebpf_bypass_ipv6_missing || '（无法判定）') +
+						' —— 到路由器自身的 IPv6 流量会被内核钩子抓走，而同样的 IPv4 流量有 192.168.0.0/16 兜底；' +
+						'保存并应用本页会自动补上';
+
 				var rows = [
 					[ '软件流量卸载', onoff(d.fw_flow_offloading) ],
 					[ '硬件流量卸载', onoff(d.fw_flow_offloading_hw) ],
@@ -105,7 +137,9 @@ return view.extend({
 						: '模块未加载 —— 开关打开也不会生效' ],
 					[ 'eBPF 内核支持', ebpfKernelText ],
 					[ 'eBPF cgroup 支持', ebpfCgroupText ],
-					[ 'eBPF 代理（Nikki-RS）', ebpfProxyText ]
+					[ 'eBPF 代理（Nikki-RS）', ebpfProxyText ],
+					[ 'eBPF 核心 IPv6', ebpfCoreIpv6Text ],
+					[ 'eBPF 绕过清单（IPv6）', ebpfBypassIpv6Text ]
 				];
 
 				var notes = [
@@ -113,7 +147,12 @@ return view.extend({
 					'硬件卸载依赖 PPE，并且必须与软件卸载同时开启；两者缺一，硬件卸载不会生效。',
 					'eBPF 代理是 Nikki-RS（clash-rs）的透明代理快路径：TC 程序把转发决策放进内核。' +
 					'开启它之后，Nikki-RS 原来的 TProxy / Redirect 分流配置不再生效，这是上游的设计，' +
-					'不是本页的判断。'
+					'不是本页的判断。',
+					'IPv6 与 eBPF 的关系容易看错：Nikki-RS 的 TCP/UDP 页上有「IPv6 DNS 劫持」和「IPv6 代理」，' +
+					'但那两个开关属于 nftables 路径 —— eBPF 开启后 nikki-rs.init 在读它们之前就返回了。' +
+					'此时决定 IPv6 的只有核心自己的 mixin.ipv6 / dns_ipv6，以及绕过清单里有没有路由器自身的 IPv6 网段：' +
+					'IPv4 有 192.168.0.0/16 兜底，IPv6 上游默认只给了回环、链路本地和组播，' +
+					'本固件必然生成的 ULA 不在其中。'
 				];
 
 				if (d.fullcone === '1' && d.fw_fullcone === '1')
