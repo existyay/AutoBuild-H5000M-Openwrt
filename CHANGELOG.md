@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.7](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.6...v1.1.7) (2026-09-28)
+
+
+### Bug Fixes
+
+* **ci:** 断言四个 GNU 工具真的装在 adblock-fast 探测的路径上 ([#27](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/27)) ([4b6313a](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/4b6313a9408d05d8ee54a2ac3c95a0971e663f85))
+
 ## [1.1.6](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.5...v1.1.6) (2026-09-27)
 
 
