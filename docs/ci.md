@@ -174,6 +174,25 @@ PR #33 的分支提交 `13ed429` 未签名，5 项必需检查全绿后 squash �
 所以"这台机器缺私钥"只影响提交上的徽章，**不影响能否合并**。前提正是下面这条：
 合并方式必须是 squash。若放开 rebase，PR 里的未签名提交会被原样落到 master。
 
+### 但未签名的提交会让原生 auto-merge 永不触发（实测）
+
+这是同一个签名要求的另一面，而它决定了自动化该走哪条路。实测（2026-10-16）：
+
+| PR | head 提交 | 5/5 必需检查后的 `mergeable_state` | 原生 auto-merge |
+| --- | --- | --- | --- |
+| #35 Dependabot | `verified=true` | `clean` | **约 30 秒后自己合并** |
+| #34 Release Please | `verified=true` | `clean` | **约 30 秒后自己合并** |
+| #33 / #36 / #37 本机提交 | 未签名 | 一直 `blocked` | 返回 200 但**从不触发** |
+
+三个未签名的 PR 都是同一个形状：`enablePullRequestAutoMerge` 返回 HTTP 200（`enabledAt`
+有值），但必需检查全绿后至少 4 分钟仍不合并（#37 观察到 9 分钟），状态停在 `blocked`；改用
+显式 `PUT /repos/{owner}/{repo}/pulls/<n>/merge`（`merge_method=squash`）立刻返回 200 并合并。
+
+结论：**本机产生的未签名提交不要指望原生 auto-merge，要用"等必需检查全绿再调合并 API"。**
+反过来，只要 head 提交是 verified 的 —— Dependabot 的提交和 Release Please 用
+`GITHUB_TOKEN` 产生的发布提交都带 GitHub 的 web-flow 签名 —— auto-merge 会自己动手，
+不需要任何人或脚本去调合并接口。
+
 ### 为什么合并方式必须是 squash-only
 
 squash 合并时 GitHub 用 **web-flow 密钥重新签名**合并结果，所以 master 上的
@@ -240,8 +259,21 @@ Please 推完分支后轮询 `release-please--branches--<默认分支>` 上 `con
 执行的是 master 自己的工作流，没有被 PR 改动过。
 
 它刻意做成"尽力而为"（`continue-on-error` + `::warning::`）：人工在 Actions 页面点
-"Approve and run" 这条路必须保留——`GITHUB_TOKEN` 是否有权批准它自己触发出来的运行
-**尚未验证**，而这一步就是那次验证。
+"Approve and run" 这条路必须保留——写这一步时 `GITHUB_TOKEN` 是否有权批准它自己触发出来的
+运行还是未知的。
+
+**已经实测：有权。** 把它合入 master 后，`release-please.yml` 运行 `38973124773` 成功，
+其中步骤 3 `批准发布 PR 上待批准的检查运行` 的日志是：
+
+```
+22:01:08  ✔ Successfully updated reference release-please--branches--master to 9d2101cc…
+22:01:25  approved run 38973161395
+22:01:26  approved run 38973161342
+22:01:26  approved run 38973161402
+```
+
+Release Please 推完分支 17 秒后，三个等待批准的运行被自动批准，发布分支上的
+`action_required` 归零、新 head 上开始产出 check run。1.1.9 这一次发布从头到尾没有人工批准。
 
 ### PAT 那条路已经堵死（实测，不是推断）
 
