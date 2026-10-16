@@ -271,7 +271,7 @@ jobs:
       # source mtimes are normalised: OpenWrt keys its stamps on a hash of path
       # plus mtime, so without that every stamp would miss on a fresh clone.
       - name: Install oras
-        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2
 
       - name: Restore build cache from GitHub Packages
         id: buildcache
@@ -1218,7 +1218,7 @@ jobs:
       - name: Upload build logs on failure
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: build-logs
           path: |
@@ -1228,7 +1228,7 @@ jobs:
           retention-days: 7
 
       - name: Upload firmware
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: H5000M-mainline-openwrt
           path: |
@@ -1250,7 +1250,7 @@ jobs:
             artifacts/apk-repo/packages.adb
 
       - name: Upload apk repository
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: apk-repo
           path: artifacts/apk-repo/
@@ -1360,7 +1360,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Download the apk repository
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: apk-repo
           path: apk-repo
