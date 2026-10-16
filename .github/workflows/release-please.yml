@@ -32,6 +32,33 @@ jobs:
       pull-requests: write
       actions: write
     steps:
+      # Record the release branch's head before Release Please runs, so the
+      # approval step below can tell "this run pushed a new commit to the release
+      # branch" from "nothing changed".
+      #
+      # Measured cost of not knowing, on the 1.1.9 release (run 38973915382,
+      # 2026-10-16): the merge had already deleted the branch, so the approval
+      # step polled its full 200 s before concluding there was nothing to
+      # approve — and that delay sits directly in front of the step that
+      # dispatches the firmware build.  That run started at 22:08:24; the build
+      # run it eventually dispatched was not created until 22:12:20.  Roughly
+      # four minutes of release latency, for nothing.
+      - name: 记下发布分支当前的 head
+        id: release_branch_head
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_BRANCH: release-please--branches--${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          # Empty when the branch does not exist, which is the normal state right
+          # after a release PR has been merged.
+          sha="$(gh api "repos/${GH_REPO}/git/ref/heads/${RELEASE_BRANCH}" \
+                   --jq '.object.sha' 2>/dev/null || true)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "发布分支 ${RELEASE_BRANCH} 当前 head: ${sha:-（分支不存在）}"
+
       # A Reusable-Workflow-style call is not used here because Release Please
       # publishes its own action; it is pinned by SHA like everything else.
       - name: Run Release Please
@@ -137,8 +164,19 @@ jobs:
           # `release-please--branches--master`.  `--components--<name>` is only
           # appended in config-file mode, which this job does not use.
           RELEASE_BRANCH: release-please--branches--${{ github.event.repository.default_branch }}
+          # Recorded before Release Please ran, by the step above.
+          BEFORE_SHA: ${{ steps.release_branch_head.outputs.sha }}
         run: |
           set -uo pipefail
+          now="$(gh api "repos/${GH_REPO}/git/ref/heads/${RELEASE_BRANCH}" \
+                   --jq '.object.sha' 2>/dev/null || true)"
+          if [ -z "$now" ]; then
+            # The usual state on a release run: the merge deleted the branch, so
+            # there is nothing here to approve and no reason to poll for 200 s.
+            echo "发布分支 ${RELEASE_BRANCH} 不存在——没有要批准的东西"
+            exit 0
+          fi
+
           ids=""
           # The push happens inside the previous step, so the runs it creates do
           # not exist yet — the `pull_request` event lands a few seconds later.
@@ -150,6 +188,12 @@ jobs:
                                     or .status == "waiting")
                            | .id' 2>/dev/null || true)"
             if [ -n "$ids" ]; then break; fi
+            # If the branch head did not move, this run pushed nothing and cannot
+            # have produced a new run to approve.  One query has already been
+            # made above, which is what picks up a leftover that a previous run
+            # failed to approve; waiting longer would only delay the build
+            # dispatch below.
+            if [ "$now" = "${BEFORE_SHA}" ]; then break; fi
             sleep 10
           done
 
