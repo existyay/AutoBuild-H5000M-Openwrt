@@ -2003,43 +2003,58 @@ install_nftables_patches() {
 		fi
 	done
 
-	[ -d "$dir" ] || {
-		warn "No nftables patches directory; fullcone will not be available to nft"
-		return 0
-	}
+	# `mkdir -p`, NOT a guard on upstream's own patches/ directory.
+	#
+	# This was `[ -d "$dir" ] || { warn "No nftables patches directory"; return 0; }`,
+	# and that guard silently disabled all three userspace layers the moment
+	# upstream deleted the directory.  Upstream did exactly that, between the two
+	# revisions the 1.1.8 and 1.1.9 builds resolved (both tracked `latest`):
+	#
+	#   a5c93cd  1.1.8 build  package/network/utils/nftables -> Makefile, patches
+	#   22aa500  1.1.9 build  package/network/utils/nftables -> Makefile
+	#
+	# The 1.1.9 build then failed its own fullcone verification on precisely the
+	# layer that had not been installed:
+	#
+	#   FAIL  firewall4 accepts fullcone in its parse_defaults whitelist
+	#   FAIL  zone-masq.uc emits fullcone instead of masquerade
+	#   FAIL  ruleset.uc adds the prerouting fullcone rules
+	#
+	# Whether upstream keeps a patches/ directory says nothing about whether OUR
+	# patches should be installed.  The real precondition is the package itself.
+	[ -f "${dir%/patches}/Makefile" ] \
+		|| die "no nftables package at ${dir%/patches}; the fullcone patches cannot be installed"
+	mkdir -p "$dir" "$libdir" "$fwdir"
 
-	# firewall4 last: it is the layer that actually emits the rules.  Without it
-	# nft knows the `fullcone` keyword and nothing ever writes one.
-	mkdir -p "$fwdir"
-	shopt -s nullglob
-	for f in "${ROOT_DIR}"/firewall4-patches/*.patch; do
-		cp -f "$f" "${fwdir}/$(basename "$f")"
-		log "  installed firewall4 patch $(basename "$f")"
-	done
-	shopt -u nullglob
-
-	# libnftnl first: it is the layer beneath.  nftables' own fullcone code
-	# refers to NFTNL_EXPR_FULLCONE_* constants, and without them the nftables
-	# build stops with "'NFTNL_EXPR_FULLCONE_FLAGS' undeclared" — which is
-	# exactly how the missing layer announced itself.
-	# libnftnl ships without a patches/ directory, so create it.  OpenWrt picks
-	# up any patches/ directory next to a package Makefile at build time.
-	mkdir -p "$libdir"
-	if [ -d "$libdir" ]; then
+	# One layer's patches, copied into the directory the build reads them from.
+	# A zero count is fatal on purpose: every layer below is ours, so an empty
+	# glob means this repository lost a patch file, and the firmware that would
+	# result is one where `nft` knows `fullcone` and firewall4 never emits it.
+	install_fullcone_layer() {
+		local src="$1" dst="$2" name="$3" n=0 f
 		shopt -s nullglob
-		for f in "${ROOT_DIR}"/libnftnl-patches/*.patch; do
-			cp -f "$f" "${libdir}/$(basename "$f")"
-			log "  installed libnftnl patch $(basename "$f")"
+		for f in "${ROOT_DIR}/${src}"/*.patch; do
+			cp -f "$f" "${dst}/$(basename "$f")"
+			log "  installed ${name} patch $(basename "$f")"
+			n=$((n + 1))
 		done
 		shopt -u nullglob
-	fi
+		[ "$n" -gt 0 ] \
+			|| die "no ${name} patch in ${ROOT_DIR}/${src}; refusing to build a firmware without fullcone"
+	}
 
-	shopt -s nullglob
-	for f in "${ROOT_DIR}"/nftables-patches/*.patch; do
-		cp -f "$f" "${dir}/$(basename "$f")"
-		log "  installed nftables patch $(basename "$f")"
-	done
-	shopt -u nullglob
+	# firewall4 is the layer that actually emits the rules.  Without it nft knows
+	# the `fullcone` keyword and nothing ever writes one.
+	install_fullcone_layer firewall4-patches "$fwdir" firewall4
+
+	# libnftnl is the layer beneath.  nftables' own fullcone code refers to
+	# NFTNL_EXPR_FULLCONE_* constants, and without them the nftables build stops
+	# with "'NFTNL_EXPR_FULLCONE_FLAGS' undeclared" — which is exactly how the
+	# missing layer announced itself.  OpenWrt picks up any patches/ directory
+	# next to a package Makefile, which is why creating it is enough.
+	install_fullcone_layer libnftnl-patches "$libdir" libnftnl
+
+	install_fullcone_layer nftables-patches "$dir" nftables
 
 	return 0
 }
