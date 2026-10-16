@@ -1955,9 +1955,26 @@ prune_dangling_depends() {
 # written, let alone take effect.  Upstream nftables has no such support.
 #
 # The patch is the single commit from fullcone-nat-nftables/
-# nftables-1.0.2-with-fullcone rebased onto the 1.1.6 that mainline ships: 200
-# lines across seven files, 9 of its 13 hunks applying as-is and 4 needing only
-# the surrounding context updated.
+# nftables-1.0.2-with-fullcone, carried forward onto whatever version mainline
+# ships.  It was last regenerated against **nftables 1.1.7** (the version
+# mainline has bumped to since the 1.1.6 this was originally rebased onto).
+#
+# Regenerating it is not optional maintenance.  Between 1.1.6 and 1.1.7 upstream
+# added `<*>` start-condition prefixes to the NAT keywords in src/scanner.l, so
+# the old hunk stopped matching and the `fullcone` keyword would never have been
+# recognised — while the *other* twelve hunks still applied fine, which is what
+# makes this the kind of breakage that only shows up in a 2–3 hour build log.
+#
+# The libnftnl half has a nastier failure mode and is worth spelling out, because
+# it is the reason scripts/verify-upstream-integration.sh exists:
+# libnftnl 1.3.2 added `nftnl_expr_set_imm` to include/libnftnl/expr.h, which is
+# the same hunk that carries `NFTNL_EXPR_FULLCONE_*`.  patch(1) then saw its own
+# `+` lines already in the target, declared the hunk "Reversed (or previously
+# applied)" and **skipped it whole** — taking the FULLCONE constants with it.  The
+# patch "applied", the build got much further, and died in nftables with
+# `'NFTNL_EXPR_FULLCONE_FLAGS' undeclared`.  A skipped hunk is never silent here:
+# scripts/verify-upstream-integration.sh dry-runs every patch against the exact
+# version mainline builds, with -F0, and treats "Reversed" as drift.
 #
 # It goes into the package's own patches/ directory, not patches/ at the top
 # level: nftables' source is downloaded into build_dir at build time, so it is
@@ -1966,7 +1983,25 @@ install_nftables_patches() {
 	local fwdir="${SRC}/package/network/config/firewall4/patches"
 	local libdir="${SRC}/package/libs/libnftnl/patches"
 	local dir="${SRC}/package/network/utils/nftables/patches"
-	local f
+	local f mk want ver
+
+	# Say out loud whether this tree is still the version the patches were
+	# regenerated against.  A mismatch does NOT mean the patch is broken — a
+	# patch-level bump often leaves the context alone — so this must not stop the
+	# build.  It is the first line of a failure report, not a gate: the gate is
+	# scripts/verify-upstream-integration.sh, which actually dry-runs them.
+	for mk in "${SRC}/package/network/utils/nftables/Makefile:1.1.7" \
+		"${SRC}/package/libs/libnftnl/Makefile:1.3.2"; do
+		want="${mk##*:}"
+		mk="${mk%:*}"
+		[ -f "$mk" ] || continue
+		ver="$(sed -n 's/^PKG_VERSION:=//p' "$mk" | head -n1)"
+		if [ "$ver" = "$want" ]; then
+			log "  $(basename "$(dirname "$mk")") ${ver} — the version the fullcone patches were regenerated against"
+		else
+			warn "fullcone patches were regenerated against $(basename "$(dirname "$mk")") ${want}, but this tree ships ${ver}; if the build dies in a patch step, run scripts/verify-upstream-integration.sh first"
+		fi
+	done
 
 	[ -d "$dir" ] || {
 		warn "No nftables patches directory; fullcone will not be available to nft"

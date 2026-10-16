@@ -36,19 +36,37 @@ Ruleset `master-protection`，**id `23816928`**，`current_user_can_bypass: neve
 | **Deletion / Non-fast-forward** | 禁止 | 防止误删 master 或强推覆盖历史。 |
 | **Required Signatures** | ✅ 已启用 | 本机已生成专用 SSH 签名密钥并注册到 GitHub（实测提交 `verified=true, reason=valid`）。**合并方式收窄为 squash-only**——见下方说明。 |
 
-五个 Required Status Checks 及其归属：
+五个 Required Status Checks 及其归属。**第三列是 job 的 `id`，Ruleset 里要填的
+是第二列 job 的 `name:` 字面值**（包括中文与全角括号）——`docs/conventions.md`
+把这条写成了硬规则：`required_status_checks.context` 匹配 `name:` 而不是 `id:`。
+写错不会报错，只会让那条检查永远停在 `Expected`。
 
-| Check | 来源 | 耗时 |
+| Ruleset 里的 `context` | 来源（workflow::job id） | 耗时 |
 | --- | --- | --- |
-| Repository and host checks | `checks.yml::check` | 分钟级 |
-| Conventional Commits | `checks.yml::commitlint` | 分钟级 |
-| Configuration coverage | `coverage.yml::coverage` | ~4 分钟 |
-| Workflow static analysis (zizmor) | `security.yml::zizmor` | 分钟级 |
-| Dependency review | `security.yml::dependency-review` | 分钟级 |
+| `仓库与主机检查` | `checks.yml::check` | 分钟级 |
+| `提交信息规约` | `checks.yml::commitlint` | 分钟级 |
+| `配置覆盖测试` | `coverage.yml::coverage` | ~4 分钟 |
+| `工作流静态审计（zizmor）` | `security.yml::zizmor` | 分钟级 |
+| `依赖审查` | `security.yml::dependency-review` | 分钟级 |
+
+> 本文此前把这五条写成了英文（`Repository and host checks`、`Conventional
+> Commits` 等）。那是**文档漂移**：job 的 `name:` 是中文，而 Ruleset 比的是
+> `name:`，所以照这份文档去核对 Ruleset 只会得出"配置错了"的结论。判定依据是
+> 真实 check run 的名字，不是这份文档：
+>
+> ```sh
+> gh api repos/<owner>/<repo>/commits/master/check-runs \
+>   --jq '.check_runs[].name' | sort -u
+> ```
+>
+> 反证也很直接：若 Ruleset 里真的填了英文名，PR 会因为那五条检查永远
+> `Expected` 而**永久 blocked**，但 #27–#30 都正常合并了。
 
 > 注意：一个 Ruleset 只能要求 **PR 上真的会跑**的检查。这三个 workflow 原先
 > 没有 `pull_request` 触发器，导致 Required Checks 永不可能通过、PR 永久
 > `blocked`——这是本轮修掉的真实缺陷（`checks.yml`/`coverage.yml` 已补）。
+
+> `checks.yml::upstream`（`上游集成校验`）**刻意不进** Required Checks，见第五节。
 
 | 术语 | 落地 | 作用 |
 | --- | --- | --- |
@@ -90,17 +108,51 @@ Ruleset `master-protection`，**id `23816928`**，`current_user_can_bypass: neve
 │   └── verify-repo/action.yml       # Composite Action：apk 仓库校验
 └── workflows/
     ├── build.yml                    # 固件构建 + 发布 + 证明（3 job）
-    ├── checks.yml                   # 仓库/主机检查 + commitlint（Required）
+    ├── checks.yml                   # 仓库/主机检查 + 上游集成校验 + commitlint
     ├── coverage.yml                 # ENABLE_* 配置覆盖矩阵（Required）
     ├── security.yml                 # zizmor / CodeQL / DepReview / Scorecard / attest
     ├── release-please.yml           # release PR + changelog + tag
     └── reusable-script-test.yml     # Reusable Workflow（workflow_call）
+scripts/verify-upstream-integration.sh # 上游漂移门禁（补丁 / 锚点 / 钉住版本）
 .pre-commit-config.yaml              # 本地钩子（全部镜像 CI 检查）
 commitlint.config.mjs                # Conventional Commits 规则与 scope 枚举
 docs/ci.md                            # 本文
 ```
 
-## 六、Signed Commits（已启用）
+## 六、上游漂移门禁（`上游集成校验`）
+
+这个仓库里其余所有门禁都是**本仓库自身的性质**；只有这一条是
+`openwrt/openwrt` 的性质，而它每天都在动。四层 fullcone 补丁里的三层、以及
+Nikki-RS 的三处默认值改写都是**上下文补丁**，所以上游的一个 commit 就能让一个
+全绿的仓库变成"计划构建跑到 2–3 小时后才红"。
+
+更坏的一种形态值得单独写下来，因为它正是 `libnftnl` 补丁身上发生过的事：
+
+* 上游 libnftnl 1.3.2 把 `nftnl_expr_set_imm` 加进了
+  `include/libnftnl/expr.h`，而本仓库的补丁要加的正是同一行的下一行；
+* `patch(1)` 于是看到自己的 `+` 行已在目标文件里，判定
+  `Reversed (or previously applied)`，把**整个 hunk 丢掉**——包括同一个 hunk
+  里的 `NFTNL_EXPR_FULLCONE_*` 定义；
+* 补丁"打上了"，构建继续跑了很久，最后死在 nftables 里：
+  `'NFTNL_EXPR_FULLCONE_FLAGS' undeclared`。
+
+`scripts/verify-upstream-integration.sh` 把这类判断变成一条自动断言：它按
+mainline **当前真正会构建的版本**取源码（nftables / libnftnl 的官方 tarball，
+并用上游 Makefile 的 `PKG_HASH` 校验 tarball 就是那一份；firewall4 / mt76 取
+`PKG_SOURCE_VERSION` 的快照），用 `patch -p1 -F0 --dry-run --forward` 逐条试，
+再把 Nikki-RS 的四处锚点与 `clash-rs` 钉住版本的五个资产哈希一起核对。
+
+设计约定：
+
+| 约定 | 理由 |
+| --- | --- |
+| `-F0`（不允许 fuzz） | fuzz 命中意味着补丁**打进去了但落点靠猜**。这一次猜对了不代表文件形状是对的。 |
+| 退出码 `1` = 漂移，`2` = 没能验证 | 网络故障与补丁失效必须在日志里长得不一样，否则一次代理抖动会被读成"补丁坏了"。 |
+| 先跑 `--self-test` | 一条抓不到缺陷的门禁比没有门禁更坏。自检离线造出三种形态（适用 / 上下文对不上 / 已被上游应用），要求检测器如实区分。 |
+| 刻意不做成 Required Check | 它需要网络。Required Check 因抖动变红会拦住本仓库的每个 PR——那是把"少一道人工审批"换成"多一道随机拦截"。它依然是真实门禁：每周计划运行、每个 PR 都会跑，红了就出现在 PR 的检查列表里。 |
+| 与 `build.yml` 无 `needs:` 依赖 | `build.yml` 的注释已经写明"检查都在 `checks.yml`，两个 workflow 各自独立"。加依赖会推翻一个已记录的取舍。 |
+
+## 七、Signed Commits（已启用）
 
 本机已生成专用 SSH 签名密钥并注册到 GitHub，`required_signatures` 已生效。
 
@@ -132,7 +184,7 @@ gh ssh-key add ~/.ssh/id_ed25519_signing.pub --type signing --title "H5000M buil
 验证：`git log --format='%h %G?' -1` 应为 `G`；推送到 GitHub 后
 `verified` 应为 `true`。
 
-## 七、本地开发
+## 八、本地开发
 
 ```sh
 pipx install pre-commit
@@ -145,7 +197,7 @@ pre-commit run --all-files             # 全部钩子
 
 ---
 
-## 八、签名提交状态
+## 九、签名提交状态
 
 本机已生成专用 SSH 签名密钥（`~/.ssh/id_ed25519_signing`），并配置：
 
