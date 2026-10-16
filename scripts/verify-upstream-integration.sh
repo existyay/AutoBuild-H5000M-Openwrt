@@ -34,8 +34,9 @@
 #   scripts/verify-upstream-integration.sh --self-test
 #
 # --self-test 完全离线：它造一个恰好含三种形态（适用 / 上下文对不上 / 已被上游
-# 应用）的临时树，然后要求本脚本的判定**如实**区分它们。一条抓不到缺陷的门禁
-# 比没有门禁更坏。
+# 应用）的临时树，然后要求本脚本的判定**如实**区分它们；再复刻上游 22aa500 删掉
+# package/network/utils/nftables/patches/ 之后的目录形态，跑一遍 scripts/local-build.sh
+# 里的真安装器，要求三层补丁仍然装得进去。一条抓不到缺陷的门禁比没有门禁更坏。
 #
 # 面向 Linux（CI 就是这个环境）。在 Windows 的 Git Bash 下也能跑，但 firewall4
 # 与 mt76 的快照里含符号链接，而 Windows 默认不许普通用户创建符号链接，于是这两
@@ -553,11 +554,121 @@ EOF
 		printf '  OK    Reversed → 判为漂移且归因正确\n'
 	fi
 
+	printf '\n'
+	self_test_installer
+	fails=$((fails + INSTALLER_FAILS))
+
 	if [ "$fails" -ne 0 ]; then
 		printf '\n自检失败：%d 项 —— 门禁本身坏了，比没有门禁更坏\n' "$fails" >&2
 		return 1
 	fi
 	printf '\n自检通过\n'
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# 自检：补丁安装器会不会因为上游删掉一个目录就静默什么都不装
+# ---------------------------------------------------------------------------
+# 这不是假想的形态。上游把 nftables 升到 1.1.7 之后删掉了
+# package/network/utils/nftables/patches/，而安装器当时拿这个**上游自己的**目录
+# 当开关：
+#
+#   [ -d "$dir" ] || { warn "No nftables patches directory"; return 0; }
+#
+# 目录一没，三层补丁（firewall4 / libnftnl / nftables）一个都没装，只留一条
+# 警告。1.1.9 的构建于是在它自己的 fullcone 校验上失败：
+#
+#   FAIL  firewall4 accepts fullcone in its parse_defaults whitelist
+#   FAIL  zone-masq.uc emits fullcone instead of masquerade
+#   FAIL  ruleset.uc adds the prerouting fullcone rules
+#
+# 两个构建实际解析到的上游版本就是这条分界线（都在 track=latest 上）：
+#
+#   a5c93cd  1.1.8  package/network/utils/nftables -> Makefile, patches
+#   22aa500  1.1.9  package/network/utils/nftables -> Makefile
+#
+# 这里跑的是 scripts/local-build.sh 里的**真函数**：把判断逻辑复制一份进自检，
+# 它会随实现一起漂移，而这次要防的恰恰是实现本身。
+INSTALLER_FAILS=0
+self_test_installer() {
+	local fix="$WORK/self-test-installer"
+	local fn="$fix/install.sh"
+	local fake="$fix/root"
+	local layer name srcdir dstdir src_n dst_n rc
+
+	# `|| true` 不是防御性写法：这两个计数会去看一个**故意不存在**的目录，而
+	# set -Eeuo pipefail 会把 find 的退出码算到赋值头上，静默中断整个自检。
+	count_patches() {
+		local n
+		n=$(find "$1" -maxdepth 1 -name '*.patch' 2>/dev/null | wc -l || true)
+		printf '%s' "${n// /}"
+	}
+
+	mkdir -p "$fix/src/package/network/utils/nftables" \
+		"$fix/src/package/libs/libnftnl" \
+		"$fix/src/package/network/config/firewall4"
+	printf 'PKG_VERSION:=1.1.7\n' >"$fix/src/package/network/utils/nftables/Makefile"
+	printf 'PKG_VERSION:=1.3.2\n' >"$fix/src/package/libs/libnftnl/Makefile"
+	printf 'PKG_VERSION:=1\n' >"$fix/src/package/network/config/firewall4/Makefile"
+
+	sed -n '/^install_nftables_patches()/,/^}$/p' "$ROOT_DIR/scripts/local-build.sh" >"$fn"
+	if [ ! -s "$fn" ]; then
+		printf '  FAIL  没能从 scripts/local-build.sh 取出 install_nftables_patches\n' >&2
+		INSTALLER_FAILS=$((INSTALLER_FAILS + 1))
+		return 0
+	fi
+
+	printf '== 自检：上游没有 patches/ 目录时，三层补丁还装得进去吗\n'
+	rc=0
+	(
+		SRC="$fix/src"
+		. "$fn"
+		install_nftables_patches
+	) >"$fix/install.log" 2>&1 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		printf '  FAIL  安装器在上游无 patches/ 时退出 %s：%s\n' \
+			"$rc" "$(tail -n1 "$fix/install.log")" >&2
+		INSTALLER_FAILS=$((INSTALLER_FAILS + 1))
+	fi
+
+	for layer in \
+		"firewall4:firewall4-patches:package/network/config/firewall4/patches" \
+		"libnftnl:libnftnl-patches:package/libs/libnftnl/patches" \
+		"nftables:nftables-patches:package/network/utils/nftables/patches"; do
+		name="${layer%%:*}"
+		srcdir="${layer#*:}"
+		srcdir="${srcdir%%:*}"
+		dstdir="${layer##*:}"
+		src_n=$(count_patches "$ROOT_DIR/$srcdir")
+		dst_n=$(count_patches "$fix/src/$dstdir")
+		if [ "$src_n" -gt 0 ] && [ "$dst_n" = "$src_n" ]; then
+			printf '  OK    %s：%s 个补丁都装上了\n' "$name" "$dst_n"
+		else
+			printf '  FAIL  %s：本仓库有 %s 个，目标目录只有 %s 个\n' "$name" "$src_n" "$dst_n" >&2
+			INSTALLER_FAILS=$((INSTALLER_FAILS + 1))
+		fi
+	done
+
+	# 反过来：本仓库自己少了一层补丁时必须**拒绝构建**，而不是装半套就出货。
+	mkdir -p "$fake/firewall4-patches" "$fake/libnftnl-patches" "$fake/nftables-patches"
+	cp "$ROOT_DIR"/firewall4-patches/*.patch "$fake/firewall4-patches/" 2>/dev/null || true
+	cp "$ROOT_DIR"/libnftnl-patches/*.patch "$fake/libnftnl-patches/" 2>/dev/null || true
+	rm -rf "$fix/src2"
+	cp -r "$fix/src" "$fix/src2"
+	rc=0
+	(
+		SRC="$fix/src2"
+		ROOT_DIR="$fake"
+		. "$fn"
+		install_nftables_patches
+	) >"$fix/refuse.log" 2>&1 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		printf '  OK    少一层补丁时拒绝构建\n'
+	else
+		printf '  FAIL  少一层补丁时安装器仍然成功退出，会静默出货\n' >&2
+		INSTALLER_FAILS=$((INSTALLER_FAILS + 1))
+	fi
+
 	return 0
 }
 
