@@ -208,15 +208,15 @@ pre-commit run --all-files             # 全部钩子
 
 ---
 
-## 九、剩下的人工审批：Release PR 的运行批准
+## 九、Release PR 的运行批准（已自动化）
 
 把上面这些规则都落实之后，日常 PR 已经不需要任何人点任何按钮：Ruleset 里
 `required_approving_review_count` 是 `0`，不需要 review 批准，检查全绿即可 squash 合并。
-**唯一还在等人工批准的是 Release PR。**
 
-Release Please 用 `GITHUB_TOKEN` 推送 `release-please--branches--master`，GitHub 对这类
-事件创建的 `pull_request` 运行不直接执行，而是停在 `action_required` 等有写权限的人
-批准——而 5 条必需检查正是这些运行产生的。实测（2026-10-16，PR #34，head `793d5e87`）：
+Release PR 曾是这个结论的唯一例外，因为它的运行不是"人"触发的。Release Please 用
+`GITHUB_TOKEN` 推送 `release-please--branches--master`，GitHub 对这类事件创建的
+`pull_request` 运行不直接执行，而是停在 `action_required` 等有写权限的人批准——而 5 条
+必需检查正是这些运行产生的。实测（2026-10-16，PR #34，head `793d5e87`）：
 
 | 运行 | 状态 |
 | --- | --- |
@@ -228,18 +228,35 @@ Release Please 用 `GITHUB_TOKEN` 推送 `release-please--branches--master`，Gi
 Checks 永远等不到结果。前两个 Release PR（#28 / #30）的 head 上最终都有 11 个
 `success`，说明这一步一直被以某种方式补上——但它不写在仓库里，也不会自己发生。
 
-两条路：
+**现在由 `release-please.yml` 里的 `批准发布 PR 上待批准的检查运行` 完成**：它在 Release
+Please 推完分支后轮询 `release-please--branches--<默认分支>` 上 `conclusion` 为
+`action_required` 的运行，逐个调 `POST /repos/{owner}/{repo}/actions/runs/<id>/approve`。
 
-1. **让 Release Please 用 PAT 或 GitHub App token 推送**（例如
-   `secrets.RELEASE_PLEASE_TOKEN`）。运行改由"人"触发，就不再需要批准。代价是多一个
-   长期 secret 要保管、要轮换——与第三节"没有可泄漏、可轮换的签名 secret"的取舍相反。
-2. **用 API 批准**，不引入任何 secret：
+为什么可以自动化：那次点击批准的是**执行检查**，不是内容。内容决定是合并，而合并仍然由人
+决定——发布 PR 上从不开启 auto-merge。
 
-   ```sh
-   gh api --method POST repos/{owner}/{repo}/actions/runs/<run_id>/approve
-   ```
+这一步的边界：它只认发布分支上的运行；而且发布 PR 的 diff 只有 `CHANGELOG.md` 一个文件
+（实测 1.1.8 的发布提交 `620e12e`，stat 恰好是 `CHANGELOG.md | 7 +++++++`），所以被批准
+执行的是 master 自己的工作流，没有被 PR 改动过。
 
-   实测返回 `201`。缺点是要有人或脚本每次点一下，但这一步脚本化没有门槛。
+它刻意做成"尽力而为"（`continue-on-error` + `::warning::`）：人工在 Actions 页面点
+"Approve and run" 这条路必须保留——`GITHUB_TOKEN` 是否有权批准它自己触发出来的运行
+**尚未验证**，而这一步就是那次验证。
 
-没有第三条可走：这是 GitHub 对"机器人用 `GITHUB_TOKEN` 创建 PR"的既定行为，不是本
+### PAT 那条路已经堵死（实测，不是推断）
+
+"让 Release Please 用 PAT 推送"是最直觉的替代方案，但 `release-please.yml` 里已经记录了
+它被试过并被迫回退：
+
+| 推送用的 token | 发布提交的 committer | 结果 |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | `GitHub <noreply@github.com>` | `verified=true` |
+| PAT | token 的主人 | `verified=false, reason=unsigned` |
+
+未签名的发布提交会被本仓库的 `required_signatures` 规则拒绝，发布 PR 永远合不了。
+release-please-action 自己不能签名（它唯一的签名相关输入就是 `token`），所以"PAT + 已签名
+的发布提交"无法兼得。GitHub App token 没有实测过，但它同样不是 web-flow 签名，很可能同样
+走不通——如果哪天要试，先用一个一次性 PR 验证提交的 `verification` 字段再决定。
+
+除此之外没有别的路：这是 GitHub 对"机器人用 `GITHUB_TOKEN` 创建 PR"的既定行为，不是本
 仓库配置错了。
