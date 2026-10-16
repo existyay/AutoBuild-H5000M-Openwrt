@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.9](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.8...v1.1.9) (2026-10-16)
+
+
+### Bug Fixes
+
+* **ci:** 自动批准发布 PR 上待批准的检查运行 ([#37](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/37)) ([5d6efbe](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/5d6efbea0d04cc14ce2c3fb442013032bd10d246))
+* **fullcone:** 按 nftables 1.1.7 / libnftnl 1.3.2 重新生成补丁，并把上游漂移做成门禁 ([#33](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/33)) ([829426e](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/829426e2bde3ce6cd1a251091a73e7d7ad74140b))
+
 ## [1.1.8](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.7...v1.1.8) (2026-09-28)
 
 
