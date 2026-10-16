@@ -34,7 +34,7 @@ Ruleset `master-protection`，**id `23816928`**，`current_user_can_bypass: neve
 | **Required Linear History** | 启用 | 固件按 commit 溯源，线性历史让 `git bisect` 与发布对应关系成立。 |
 | **Pull Request** | 必需、必须解决全部 review thread、仅允许 squash/rebase | 保证每个进入 master 的提交都过了门禁。 |
 | **Deletion / Non-fast-forward** | 禁止 | 防止误删 master 或强推覆盖历史。 |
-| **Required Signatures** | ✅ 已启用 | 本机已生成专用 SSH 签名密钥并注册到 GitHub（实测提交 `verified=true, reason=valid`）。**合并方式收窄为 squash-only**——见下方说明。 |
+| **Required Signatures** | ✅ 已启用 | 签名密钥已注册在 GitHub（实测 master 上的 squash 提交 `verified=true, reason=valid`）。**合并方式收窄为 squash-only**——见下方说明。 |
 
 五个 Required Status Checks 及其归属。**第三列是 job 的 `id`，Ruleset 里要填的
 是第二列 job 的 `name:` 字面值**（包括中文与全角括号）——`docs/conventions.md`
@@ -154,14 +154,25 @@ mainline **当前真正会构建的版本**取源码（nftables / libnftnl 的�
 
 ## 七、Signed Commits（已启用）
 
-本机已生成专用 SSH 签名密钥并注册到 GitHub，`required_signatures` 已生效。
+`required_signatures` 已生效，签名密钥已注册在 GitHub 上：
 
 ```
-密钥      ~/.ssh/id_ed25519_signing（无口令，供自动化使用）
-GitHub id 1194013
-配置      gpg.format=ssh  user.signingkey=<pub>  commit.gpgsign=true
-实测      verified=true, reason=valid
+GitHub id  1194013   H5000M build machine (commit signing)   ssh-ed25519
+实测        master 上的 squash 提交 verified=true, reason=valid
 ```
+
+**但当前这台机器上没有对应的私钥。** 实测（2026-10-16）：`~/.ssh` 里只有
+`known_hosts`；`git config` 的 `gpg.format` / `user.signingkey` / `commit.gpgsign`
+三项全部未设置，所以从这里产生的提交是**未签名**的（`git log --format='%G?'` 得到 `N`）。
+
+### 未签名的提交不挡 squash 合并（实测，不是推断）
+
+PR #33 的分支提交 `13ed429` 未签名，5 项必需检查全绿后 squash 合并**成功**；合并结果
+`829426e` 在 GitHub 上是 `verified=true, reason=valid` —— GitHub 用 web-flow 密钥
+重新签了合并结果本身。
+
+所以"这台机器缺私钥"只影响提交上的徽章，**不影响能否合并**。前提正是下面这条：
+合并方式必须是 squash。若放开 rebase，PR 里的未签名提交会被原样落到 master。
 
 ### 为什么合并方式必须是 squash-only
 
@@ -197,25 +208,38 @@ pre-commit run --all-files             # 全部钩子
 
 ---
 
-## 九、签名提交状态
+## 九、剩下的人工审批：Release PR 的运行批准
 
-本机已生成专用 SSH 签名密钥（`~/.ssh/id_ed25519_signing`），并配置：
+把上面这些规则都落实之后，日常 PR 已经不需要任何人点任何按钮：Ruleset 里
+`required_approving_review_count` 是 `0`，不需要 review 批准，检查全绿即可 squash 合并。
+**唯一还在等人工批准的是 Release PR。**
 
-```
-gpg.format         = ssh
-user.signingkey    = ~/.ssh/id_ed25519_signing.pub
-commit.gpgsign     = true
-tag.gpgsign        = true
-```
+Release Please 用 `GITHUB_TOKEN` 推送 `release-please--branches--master`，GitHub 对这类
+事件创建的 `pull_request` 运行不直接执行，而是停在 `action_required` 等有写权限的人
+批准——而 5 条必需检查正是这些运行产生的。实测（2026-10-16，PR #34，head `793d5e87`）：
 
-本地验证为 `G`（good signature）。**公钥尚未上传到 GitHub**，因此远端提交
-暂时不会显示 Verified 徽章；上传后 `required_signatures` 规则即可启用。
+| 运行 | 状态 |
+| --- | --- |
+| `仓库与主机检查` | `action_required` |
+| `配置覆盖测试` | `action_required` |
+| `供应链安全` | `action_required` |
 
-上传（需要 `admin:ssh_signing_key` scope 的 token）：
+该 head 上因此有 **0 个 check run**，PR 停在 `mergeable_state=blocked`，而 Required
+Checks 永远等不到结果。前两个 Release PR（#28 / #30）的 head 上最终都有 11 个
+`success`，说明这一步一直被以某种方式补上——但它不写在仓库里，也不会自己发生。
 
-```sh
-gh auth refresh -h github.com -s admin:ssh_signing_key
-gh api --method POST user/ssh-signing-keys \
-  -f title="H5000M build machine (commit signing)" \
-  -f key="$(cat ~/.ssh/id_ed25519_signing.pub)"
-```
+两条路：
+
+1. **让 Release Please 用 PAT 或 GitHub App token 推送**（例如
+   `secrets.RELEASE_PLEASE_TOKEN`）。运行改由"人"触发，就不再需要批准。代价是多一个
+   长期 secret 要保管、要轮换——与第三节"没有可泄漏、可轮换的签名 secret"的取舍相反。
+2. **用 API 批准**，不引入任何 secret：
+
+   ```sh
+   gh api --method POST repos/{owner}/{repo}/actions/runs/<run_id>/approve
+   ```
+
+   实测返回 `201`。缺点是要有人或脚本每次点一下，但这一步脚本化没有门槛。
+
+没有第三条可走：这是 GitHub 对"机器人用 `GITHUB_TOKEN` 创建 PR"的既定行为，不是本
+仓库配置错了。
