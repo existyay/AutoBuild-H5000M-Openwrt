@@ -57,7 +57,7 @@
 ```sh
 OPENWRT_REPO_URL=https://github.com/openwrt/openwrt.git
 OPENWRT_REPO_BRANCH=main
-OPENWRT_PINNED_REVISION=f0d3e332e5f839508f77fba8c7420ceeb079ab86
+OPENWRT_PINNED_REVISION=99426e4f7d5d712f4cb488dddf30a0af32e6d407
 OPENWRT_TRACK=latest          # latest 跟随分支头；pinned 复现指定 revision
 OPENWRT_TARGET=mediatek
 OPENWRT_SUBTARGET=filogic
@@ -84,7 +84,10 @@ OPENWRT_PROFILE=hiveton_h5000m
 （从该插件 2.1.0 的 `openwrt-patches/` 原样导入）删掉 `cpu-active-high` / `cpu-active-low` /
 `cpu-passive`，**保留 `cpu-active-hot`**，所以内核的 CPU 降频、高温与临界关机保护不受影响。
 
-已验证该补丁对 `OPENWRT_PINNED_REVISION` 上的树 `git apply --check` 通过。
+该补丁由 `scripts/verify-upstream-integration.sh` 对 mainline 当前 head 的树
+`git apply --check` 验证（该脚本同时是 `checks.yml::upstream` 门禁）。注意
+`mt7987.dtsi` 里那四个 cooling-map 节点必须仍然存在，否则 `/delete-node/` 会
+找不到目标——这正是"上游漂移"的一种，脚本会报出来。
 
 ### 2. 出口优先级 — `luci-app-h5000m-netmode`
 
@@ -1763,3 +1766,170 @@ download.pl ... "x" || ( dl_github_archive.py ... || ( git clone 固定 commit �
 ---
 
 ---
+
+## 十二、上游对齐：让补丁不再腐烂
+
+（本节是**工程侧**的说明；对应的 CI 门禁见 `docs/ci.md` 第六节。）
+
+本工程在 mainline 之上叠了五处**上下文补丁**。它们不是"一次写好就不管"的资产：
+每一处都断言上游某个文件在某个位置的形状，而 mainline 每天都在动。这一节记录
+失效的形态、自动化的检查方式，以及重新生成补丁的实际步骤。
+
+### 1. 五处补丁与它们依赖的上游
+
+| 层 | 本仓库的文件 | 作用点 |
+| --- | --- | --- |
+| ① 内核 | `local-packages/nft-fullcone/`（独立包，不是补丁） | 注册 `NFT_NAT_FULLCONE` 表达式 |
+| ② libnftnl | `libnftnl-patches/100-fullcone-expression.patch` | `NFTNL_EXPR_FULLCONE_*` 常量、`src/expr/fullcone.c` 的序列化/反序列化 |
+| ③ nftables | `nftables-patches/100-fullcone-expression.patch` | `fullcone` 关键字：scanner / parser / 线性化 / 反线性化 / 语句名 |
+| ④ firewall4 | `firewall4-patches/100-fullcone-support.patch` | 让 `option fullcone` 生成 `fullcone` 而不是 `masquerade` |
+| ⑤ 设备树 / mt76 | `patches/0001-h5000m-userspace-fan-control.patch`、`patches/0002-h5000m-mt76-txwi-fix.patch`、`mt76-patches/100-mt7996-always-fill-txwi.patch` | 删掉三张与用户态抢 PWM 的 cooling map；补 mt76 的 TXWI 缺陷（`0002` 把 `mt76-patches/` 里那一份拷进包内） |
+
+②③④ 是**包内补丁**（由 `install_nftables_patches()` 拷进 `package/*/patches/`，
+再由 OpenWrt 用 `patch(1)` 打），⑤ 是**树补丁**（由 `apply_patches()` 用
+`git apply` 打）。两条路径的判定口径不同，检查脚本也分别照它们的口径来。
+
+### 2. 两种失效形态，以及为什么第二种更贵
+
+**形态 A：上下文对不上。** `patch` 报 `FAILED`。吵闹、但诚实 —— 构建在 2–3 小时
+后变红，翻日志能找到是哪个包的哪个 hunk。
+
+**形态 B：上游自己加了同一段代码。** `patch` 看到自己的 `+` 行已在目标文件里，
+判定 `Reversed (or previously applied)`，把**整个 hunk 丢掉**。补丁"打上了"，
+构建继续往前跑，故障推迟到很远的地方以一句与原因无关的话出现。
+
+形态 B 在本仓库真实发生过，值得完整写下来：
+
+* 上游 libnftnl 1.3.2 在 `include/libnftnl/expr.h` 里加了 `nftnl_expr_set_imm`
+  的声明；
+* 本仓库的 libnftnl 补丁第 1 个 hunk 加的正是**同一行**，于是它被判为"已应用"；
+* 更麻烦的是第 2 个 hunk 与它同处一个文件、共用一个 `@@` 语境，实战中很容易连带
+  一起被跳过 —— 而第 2 个 hunk 里装着 `NFTNL_EXPR_FULLCONE_*` 的定义；
+* 结果是 nftables 编译时才失败：`'NFTNL_EXPR_FULLCONE_FLAGS' undeclared`。
+
+这就是 `scripts/verify-upstream-integration.sh` 存在的理由，也是它把
+`Reversed (or previously applied)` 单独识别、单独归因的原因。
+
+### 3. 自动化检查
+
+```sh
+scripts/verify-upstream-integration.sh            # 对着 mainline 当前 head 全量核
+scripts/verify-upstream-integration.sh --self-test # 离线，证明检测器本身还能抓
+scripts/verify-upstream-integration.sh --ref <sha> # 对着指定 revision 核
+```
+
+它做四件事：读 mainline 的包 Makefile 决定"这次构建会用哪个版本"→ 取那一份源码
+（nftables / libnftnl 用官方 tarball，**并用上游 `PKG_HASH` 校验下载的就是构建
+对象**；firewall4 / mt76 取 `PKG_SOURCE_VERSION` 的快照）→ `patch -p1 -F0
+--dry-run --forward` 逐条试（`-F0` 表示**不允许 fuzz**：fuzz 命中意味着补丁打进去
+了但落点靠猜）→ 核对 Nikki-RS 的四处锚点与 `clash-rs` 钉住版本的五个资产哈希。
+
+退出码刻意分成 `1`（漂移）与 `2`（没能验证）：网络故障与补丁失效必须在日志里
+长得不一样，否则一次代理抖动会被读成"补丁坏了"。
+
+### 4. 本轮对齐的实测结果（`openwrt/openwrt@99426e4`）
+
+主线从 `0f8cceb` 走到 `99426e4` 时，`nftables` 与 `libnftnl` 都升了版，两层用户态
+补丁因此**同时失效**——这正是 `configs/upstream.env` 里那个 pin 必须前移的原因
+（按 1.1.7 重生成的补丁打不到 1.1.6 上）。重生成后的实测：
+
+| 包 | 上游在 `99426e4` 的版本 | 结论 |
+| --- | --- | --- |
+| nftables | `1.1.7`（`PKG_HASH` 校验一致） | 补丁 `patch -F0` 与 `git apply --check` 均 exit 0，无 fuzz |
+| libnftnl | `1.3.2`（`PKG_HASH` 校验一致） | 同上；已不再声明上游已有的 `nftnl_expr_set_imm` |
+| firewall4 | `b6e5157527d361f99ad52eaa6da273cb0f2dfd59` | exit 0 |
+| mt76 | `467ae2e3f190baf737e15e318906da0dc7d0ab91` | exit 0，无 offset |
+| openwrt 树 | `99426e4` | `patches/0001`、`patches/0002` 均 `git apply --check` exit 0 |
+| Nikki-RS | `CHKayanami/OpenWrt-nikki-rs@main` | 四处锚点都在，且都还没有被上游自己补上 |
+| clash-rs | `v0.20.10-alpha` | 五个架构的资产都还在，sha256 与 `pin_clash_rs()` 逐条一致 |
+
+同一套补丁对 `e1bd479b`（main 在这轮对齐期间又前进的一个 revision）同样全部通过
+—— 那两个 revision 的 `nftables` / `libnftnl` 版本与 `firewall4` / `mt76` 的
+`PKG_SOURCE_VERSION` 都相同，所以这是预期结果，而不是巧合。
+
+nftables 那一层为什么会断，是一个值得记住的例子：1.1.7 给 `src/scanner.l` 里的
+NAT 关键字规则加了 `<*>` 起始条件前缀，于是老补丁的上下文行不再匹配。**另外十二
+个 hunk 全都照常应用** —— 这正是形态 A 里最难查的那一类。
+
+### 5. 重新生成一个包内补丁
+
+```sh
+# 1) 取"构建真正会用的那一份"源码，并用上游 PKG_HASH 校验
+curl -O https://netfilter.org/projects/nftables/files/nftables-1.1.7.tar.xz
+sha256sum nftables-1.1.7.tar.xz     # 必须等于 package/network/utils/nftables/Makefile 的 PKG_HASH
+
+# 2) 展开成两棵 pristine 树（全部在仓库根目录下的 work/ 里做）
+mkdir -p work/a work/b
+tar -xJf nftables-1.1.7.tar.xz -C work/a --strip-components=1
+cp -a work/a/. work/b/
+
+# 3) 把老补丁打进 b/，**逐行读它的报告**
+(cd work/b && patch -p1 -f --no-backup-if-mismatch \
+   < ../../nftables-patches/100-fullcone-expression.patch)
+#    FAILED       -> 上游挪了/改了上下文，要按补丁的**意图**修 b/，不是按 patch 的猜测
+#    offset/fuzz  -> 能打上但落点靠猜，同样要修
+#    Reversed     -> 上游自己加了这段：**不要**手工补回去，正确的结果是补丁里删掉它
+#    这里刻意用 -f 而不是 --forward：--forward 会把整个文件判为"已应用"而整块跳过，
+#    重建时你需要的是逐 hunk 的报告。
+
+# 4) 消除 .rej/.orig，然后生成补丁（去掉 ---/+++ 行的时间戳，并确保是 LF）
+find work/b -name '*.rej' -o -name '*.orig' | xargs -r rm -f
+(cd work && diff -urN a b > 100-fullcone-expression.patch)
+
+# 5) 证明它：两把尺子都要过，且不许有 fuzz/offset
+(cd work/a && patch -p1 -F0 --dry-run --forward < ../100-fullcone-expression.patch) ; echo "patch exit=$?"
+(cd work/a && git apply --check ../100-fullcone-expression.patch)                    ; echo "git exit=$?"
+```
+
+第 5 步不能省。`patch(1)` 允许 2 行 fuzz，`git apply` 一次都不允许 —— 两把尺子
+都要过，才说明补丁的落点是对的而不是猜对的。
+
+### 6. 两个已知的、当前不影响行为的隐患
+
+**a) `NFTA_FULLCONE_*` 的属性编号，内核侧与用户态侧不一致。**
+
+| | `UNSPEC` | 1 | 2 | 3 |
+| --- | --- | --- | --- | --- |
+| 内核 `nf_nat_fullcone.h` | 0 | `REG_PROTO_MIN` | `REG_PROTO_MAX` | `FLAGS` |
+| ②③ 用户态补丁 | 0 | `FLAGS` | `REG_PROTO_MIN` | `REG_PROTO_MAX` |
+
+今天无害，因为④让 firewall4 只发出**裸的** `fullcone`（没有 `to :port`、没有
+flags），所以两侧根本不交换这三个属性中的任何一个；内核那侧还只在
+`flags != 0` 时才回写 `FLAGS`。但一旦有人写出 `fullcone to :8080` 或带 flag 的
+规则，属性会错位 —— 用户态的"proto 起始端口"会被内核读成"proto 结束端口"。
+
+不改的理由：两侧都是 vendored 的上游实现（内核侧来自 `sbwml/nft-fullcone`），
+单方面改编号会让本工程与上游两个仓库都无法直接对比；而正确的修法是两侧一起改、
+并补一条真机用例。在那之前，**不要**在 firewall4 之外写带 `to :port` 的 fullcone
+规则。`scripts/verify-upstream-integration.sh` 当然也不会替你发现这个 —— 它不是
+补丁适用性问题，是补丁本身的语义问题。
+
+**b) `clash-rs` 的钉住版本刻意落后于上游 release。**
+
+`pin_clash_rs()` 钉的是 `0.20.10_alpha`，而上游已经发到 `0.20.22-alpha`。这不是
+"忘了升"：钉住的目的正是**让内核版本与 feed 当前那份配置相配**，而 feed 的 main
+自 2026-09-26 起没有再动过。升内核要重新核对配置项（字段可能改名或移除），属于
+需要实测的改动，不是版本号替换。真正的风险不是"有新版"，而是**那个 release 被
+撤下** —— 那时构建会在下载时 404，所以检查脚本会把该 release 的五个资产哈希逐条
+核对。
+
+### 7. 与上游变化的交互（快照）
+
+main 在这一轮里前进了 1000+ 个 commit。绝大多数（内核小版本、包升级、hostapd 的
+MLO 系列）是**跟着 main 自动到来**的，本工程不需要"合并"动作。真正需要人判断的是
+那些**触碰本工程假设**的改动：
+
+| 上游改动 | 与本工程的交互 | 判断 |
+| --- | --- | --- |
+| `mediatek: filogic: rename netdevs on hotplug`（新增 `hotplug.d/net/00-netdev-name` + `lib/functions/netdev-name.sh`） | 它把 netdev 改名成设备树里 `label` / `openwrt,netdev-name` 的值。而 `h5000m-wwan-provision` 的 `find_mt5700m()` 是按 `/sys/bus/usb/devices/<dev>:*/net/*` **现读** netdev 名（`${net##*/}`），从不硬编码前缀 | **无冲突**。USB 网卡没有 `of_node`，`netdev_name_set()` 对它直接 `return 0`，根本不会改名；有线侧的名字变化由 profile 的 board.d 一起带走，`h5000m-netmode` 配置的是 uci 接口而不是 netdev 名 |
+| `mediatek: filogic: add dtsi for shared thermal trip levels & cooling maps` | 只新增 `target/linux/mediatek/dts/thermal-trips-cooling-maps.dtsi`，不动 `mt7987.dtsi` | **无冲突**，但 `patches/0001` 的四个 `/delete-node/` 目标必须仍在 `mt7987.dtsi` 里 —— 这一点由 §3 的脚本代查 |
+| `netifd: parse_bool() accepts JSON booleans and numbers` | 与 [七.5](#5-烧录重启后无线默认关闭--已修复) 那个"写进去是 `'0'` 而不是 `0`"的真实 bug 同源 | **有利**：上游放宽了写法。本工程的修复仍然必要（它修的是**写入端**），但这类配置以后更不容易踩 |
+| `mt76` 更新到 `467ae2e3` | `mt76-patches/100-mt7996-always-fill-txwi.patch` 的落点 | **已验证**：零 offset 适用 |
+| `kernel: backport fix for MTK WED 2.0 WDMA TX hang issue`、`generic: restore EEE support on mt753x and mtk_eth_soc` | 直接落在本工程所用 SoC 的以太网路径上 | 跟随 main 自动到来；属于本工程真正关心的"性能/稳定性"合并，**无需动作** |
+| hostapd / mac80211 的 MLO 系列（约 117 个 commit） | MT7992 是 Wi-Fi 7 | 能力随 main 自动到来；实际生效与否只有真机能答 |
+| `CHKayanami/clash-rs` 已发到 `v0.20.22-alpha` | `pin_clash_rs()` 仍钉 `0.20.10_alpha` | **刻意不动**，理由见上面 6.b |
+
+这类"上游变化 → 本工程假设"的核对**不该靠人定期做，因为一定会忘**。§3 的脚本把
+其中可机检的部分（补丁适用性、锚点、钉住版本）变成了每个 PR 都会跑的断言；
+而**语义层**的判断（内核行为变化、Wi-Fi 能力、性能收益）仍然需要真机 —— 那是本
+工程"已知限制"一节里明确划出的边界。

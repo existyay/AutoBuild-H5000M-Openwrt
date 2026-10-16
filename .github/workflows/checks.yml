@@ -815,6 +815,60 @@ jobs:
         uses: ./.github/actions/diagnose
         with:
           title: 仓库与主机检查失败
+
+  # ---------------------------------------------------------------------------
+  # 上游漂移：本仓库唯一无法自己控制的那一类故障。
+  # ---------------------------------------------------------------------------
+  # 这个文件里其余每一条断言都是本仓库自身的性质；只有这一条是
+  # openwrt/openwrt 的性质，而它每天都在动。四层补丁里的三层、以及 Nikki-RS 的
+  # 三处锚点都是**上下文补丁**，所以上游的一个 commit 就能让一个全绿的仓库变成
+  # "计划构建跑到 2–3 小时后才红"，或者更坏 —— 变成 libnftnl 那种形态：补丁的
+  # FULLCONE hunk 被判为"已应用"而**整块跳过**，补丁看起来打上了，构建却在
+  # nftables 里以 `'NFTNL_EXPR_FULLCONE_FLAGS' undeclared` 结束。
+  #
+  # 刻意做成独立 job，而不是折进 `check`：
+  #   * 它需要网络（netfilter.org 的 tarball、GitHub 的 git 快照），而 `check`
+  #     是一个 required status check —— 代理抖动不该有能力拦住本仓库的每个 PR；
+  #   * 它对"真的漂移"退出 1、对"没能验证"退出 2，所以网络故障和补丁失效在
+  #     日志里永远长得不一样。
+  #
+  # 它最坏的情况是吵，而不可能悄悄变绿：下面第一步先跑 --self-test，证明检测器
+  # 自己仍能识别全部三种形态（适用 / 上下文对不上 / 已被上游应用）。
+  upstream:
+    name: 上游集成校验
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # zizmor artipacked: 与本文件其它 checkout 一致。
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl xz-utils patch git python3 ca-certificates
+
+      - name: The detector itself still detects drift
+        run: ./scripts/verify-upstream-integration.sh --self-test
+
+      - name: Verify every patch against the versions mainline builds
+        env:
+          # 只读令牌，唯一作用是抬高匿名 API 配额（60 次/小时/IP，且被同一台
+          # runner 上的其它 job 共享）。本步骤只需一次 API 调用。
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/verify-upstream-integration.sh
+
+      # 失败时自动产出诊断报告（可复用的 Composite Action）
+      - name: 失败诊断
+        if: failure()
+        uses: ./.github/actions/diagnose
+        with:
+          title: 上游集成校验失败
   commitlint:
     name: 提交信息规约
     runs-on: ubuntu-24.04
