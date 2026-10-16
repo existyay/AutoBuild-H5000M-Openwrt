@@ -58,9 +58,12 @@ jobs:
           #   * the tag-triggered build — by the explicit dispatch step below,
           #     since `workflow_dispatch` is the documented exception to the
           #     "GITHUB_TOKEN events do not start workflows" rule;
-          #   * the release PR's checks needing approval — accepted.  One click
-          #     on "Approve and run" per release is a reasonable human gate on
-          #     shipping firmware, and it is the price of signed release commits.
+          #   * the release PR's checks needing approval — by the approval step
+          #     below.  This was previously recorded here as an accepted one
+          #     click per release.  It was automated because the click approved
+          #     *executing* the checks, not the content: the content decision is
+          #     the merge, and that stays human (auto-merge is never enabled on
+          #     a release PR).  The step's own comment records what bounds it.
           token: ${{ secrets.GITHUB_TOKEN }}
           # `simple` for a repository whose artefact is not an npm/pypi package:
           # it bumps a VERSION-bearing release and writes CHANGELOG.md, and the
@@ -99,6 +102,74 @@ jobs:
           # (openwrt-<sha>), which Release Please cannot know.  So this manages
           # the PROJECT version and the changelog; build.yml keeps naming the
           # firmware after the upstream commit it was built from.
+
+      # Click "Approve and run" on the checks Release Please's own push cannot
+      # start.
+      #
+      # Measured on PR #34 (2026-10-16): the release branch is pushed with
+      # `GITHUB_TOKEN`, and GitHub holds every `pull_request` run that push
+      # creates at `action_required` until someone with write access approves it.
+      # The Required Status Checks are produced BY those runs, so while they are
+      # unapproved the release PR sits at
+      #
+      #     mergeable_state=blocked, 0 check runs on the head commit
+      #
+      # waiting for a check that will never appear on its own.
+      #
+      # Best-effort on purpose: `continue-on-error` and `::warning::` rather than
+      # a red job, because the fallback — approving by hand in the Actions tab —
+      # has to stay usable if GitHub refuses a `GITHUB_TOKEN` approval.
+      #
+      # What bounds it, since approving a run means letting a workflow execute:
+      #   * it only looks at runs whose head branch is the release branch Release
+      #     Please maintains, never at an arbitrary branch;
+      #   * a release PR's diff is `CHANGELOG.md` alone — measured on the 1.1.8
+      #     release commit `620e12e`, whose stat is exactly
+      #     `CHANGELOG.md | 7 +++++++`, one file — so the workflows being
+      #     approved are master's own, unmodified by the PR.
+      - name: 批准发布 PR 上待批准的检查运行
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # Release Please's branch naming, taken from the live PR rather than
+          # guessed: the open release PR's head ref is literally
+          # `release-please--branches--master`.  `--components--<name>` is only
+          # appended in config-file mode, which this job does not use.
+          RELEASE_BRANCH: release-please--branches--${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          ids=""
+          # The push happens inside the previous step, so the runs it creates do
+          # not exist yet — the `pull_request` event lands a few seconds later.
+          for _ in $(seq 1 20); do
+            ids="$(gh api \
+                     "repos/${GH_REPO}/actions/runs?branch=${RELEASE_BRANCH}&per_page=50" \
+                     --jq '.workflow_runs[]
+                           | select(.conclusion == "action_required"
+                                    or .status == "waiting")
+                           | .id' 2>/dev/null || true)"
+            if [ -n "$ids" ]; then break; fi
+            sleep 10
+          done
+
+          if [ -z "$ids" ]; then
+            echo "no run on ${RELEASE_BRANCH} is waiting for approval (nothing to do)"
+            exit 0
+          fi
+
+          failed=0
+          for id in $ids; do
+            if gh api --method POST "repos/${GH_REPO}/actions/runs/${id}/approve" >/dev/null; then
+              echo "approved run ${id}"
+            else
+              echo "::warning::run ${id} was not approved by GITHUB_TOKEN"
+              failed=$((failed + 1))
+            fi
+          done
+          if [ "$failed" -gt 0 ]; then
+            echo "::warning::${failed} run(s) still need a human: approve them in the Actions tab, then merge the release PR"
+          fi
 
       # Start the firmware build for the tag Release Please just created.
       #
