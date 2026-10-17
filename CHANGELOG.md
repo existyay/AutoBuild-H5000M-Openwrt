@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.10](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.9...v1.1.10) (2026-10-16)
+
+
+### Bug Fixes
+
+* **ci:** 自动批准那一步先看分支还在不在，别空等 200 秒挡住构建派发 ([#39](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/39)) ([f917aca](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/f917aca1d3158b463e986282613abc8ae6f9d464))
+* **fullcone:** 上游删掉 nftables 的 patches/ 后，三层补丁曾一个都没装 ([#41](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/41)) ([1d13ac8](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/1d13ac8929c046c9a71fb41ead41fd8983e0cfb1))
+
 ## [1.1.9](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.8...v1.1.9) (2026-10-16)
 
 
