@@ -28,7 +28,9 @@
 # **真正会构建的那些版本**下载源码（nftables / libnftnl 的官方 tarball、
 # firewall4 / mt76 的 git 快照），用 `patch -F0 --dry-run` 逐条试；再把 Nikki-RS
 # 依赖的三处锚点、clash-rs 钉住版本的资产哈希一起核对。带 `--compile` 时还会把
-# 打过补丁的 libnftnl 与 nftables 按**固件自己用的那套 configure 参数**真编一遍。
+# 打过补丁的 libnftnl 与 nftables 按**固件自己用的那套 configure 参数**真编一遍；
+# 带 `--ebpf-config` 时会把 feed 真正写进 config.yaml 的 ebpf 段喂给钉住的
+# clash-rs 核心，用 --strict-config 解析一遍。
 #
 # 退出码刻意分成两种，因为"补丁坏了"和"没能查到"必须能被区分开：
 #
@@ -37,12 +39,17 @@
 #   2  无法验证（网络/工具缺失 —— 不要把它读成补丁坏了）
 #
 # Usage:
-#   scripts/verify-upstream-integration.sh [--ref <sha|branch>] [--keep] [--compile] [仓库根目录]
+#   scripts/verify-upstream-integration.sh [--ref <sha|branch>] [--keep] [--compile] [--ebpf-config] [仓库根目录]
 #   scripts/verify-upstream-integration.sh --self-test
 #
 # --compile 需要 gcc / make / pkg-config / flex / bison 与 libmnl、libjansson 的
 # 开发头文件。缺件时它报退出码 2（没能验证）而**不是** 0：要求了编译却因缺件
 # 静默跳过，正是这个脚本最不想制造的那种假通过。
+#
+# --ebpf-config 在 Linux x86_64 以外没有意义（钉住的那批资产里只有 x86_64-musl 能
+# 在宿主上跑，固件用的 aarch64 跑不了），别处报退出码 2。它在**执行**下载来的
+# 二进制之前先核对 sha256 是否等于 pin_clash_rs() 里写死的值 —— 这道检查必须在 CI
+# 里跑一个第三方二进制，哈希对不上就不跑。
 #
 # --self-test 完全离线：它造一个恰好含三种形态（适用 / 上下文对不上 / 已被上游
 # 应用）的临时树，然后要求本脚本的判定**如实**区分它们；再复刻上游 22aa500 删掉
@@ -63,6 +70,7 @@ REF=""
 KEEP=0
 SELF_TEST=0
 COMPILE=0
+EBPF_CONFIG=0
 
 usage() {
 	sed -n '2,/^set -Eeuo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
@@ -88,6 +96,10 @@ while [ "$#" -gt 0 ]; do
 			;;
 		--compile)
 			COMPILE=1
+			shift
+			;;
+		--ebpf-config)
+			EBPF_CONFIG=1
 			shift
 			;;
 		-h | --help)
@@ -515,7 +527,216 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# 6) 编译验证：打得进去不等于编得出来
+# 6) feed 会写的 eBPF 字段，钉住的核心都认得吗
+# ---------------------------------------------------------------------------
+# 文本级核对看得见"钉住了哪个版本"，看不见"那个版本听不听得懂 feed 说的话"。
+# feed 的 nikki-rs/files/ucode/mixin.uc 在 ebpf 开启时会把一整段 ebpf.* 写进
+# config.yaml，而 clash-rs 默认**静默忽略**不认识的字段（它自己的 --help 就写着：
+# 为了让别的客户端共享的配置也能加载）。于是"feed 加了字段、钉住的核心还不认识"
+# 在设备上的表现是"配了但不生效"，不是报错 —— 最难查的那一类。
+#
+# 这里把 feed 的 ebpf 段抓下来，喂给钉住的二进制用 --strict-config 解析一遍。
+# 两个细节不能省：
+#   * 值不按 feed 原样给。这道检查只问字段名认不认识，而 enable: true 会连带
+#     触发端口/MAC 之类的取值校验 —— 那是另一件事，也是假漂移的来源。
+#   * 必须有反向对照：同一份配置再加一个编造字段，要求它**被拒绝**。否则万一
+#     strict 模式没生效，这道检查会永远通过，而永远通过的检查比没有检查更糟。
+check_clash_rs_ebpf_fields() {
+	printf '\n== clash-rs 的 eBPF 字段\n'
+
+	if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
+		unverified "eBPF 字段核对要 Linux x86_64（本机 $(uname -s)/$(uname -m)）：钉住的这批资产里只有 x86_64-musl 能在宿主上跑"
+		return 0
+	fi
+
+	local body want_url tag asset want
+	body="$(sed -n '/^pin_clash_rs()/,/^}/p' "$ROOT_DIR/scripts/local-build.sh")"
+	want_url="$(printf '%s\n' "$body" | sed -n 's/.*local want_url="\([^"]*\)".*/\1/p' | head -n1)"
+	if [ -z "$want_url" ]; then
+		unverified "从 pin_clash_rs() 里读不出 want_url"
+		return 0
+	fi
+	tag="$(basename "$want_url")"
+	asset="clash-rs-minimal-x86_64-unknown-linux-musl.tar.gz"
+	want="$(printf '%s\n' "$body" | sed -n 's/.*local x86_64_h="\([^"]*\)".*/\1/p' | head -n1)"
+	if [ -z "$want" ]; then
+		unverified "从 pin_clash_rs() 里读不出 x86_64_h"
+		return 0
+	fi
+	log "钉住的核心：${tag} 的 ${asset}"
+
+	if ! curl_retry "https://github.com/CHKayanami/clash-rs/releases/download/$tag/$asset" \
+		-o "$WORK/$asset"; then
+		drift "取不到 clash-rs ${tag} 的 ${asset} —— 核心无从核对，pin_clash_rs 也会 404。"
+		return 0
+	fi
+
+	# 执行之前先对哈希：这道检查要在 CI 里跑一个第三方二进制，只有哈希与
+	# pin_clash_rs() 里写死的一致才允许跑。
+	local got
+	got="$(sha256sum "$WORK/$asset" | awk '{print $1}')"
+	if [ "$got" != "$want" ]; then
+		drift "${asset} 的 sha256 与 pin_clash_rs() 不一致（期望 ${want}，实际 ${got}）—— 不执行它。"
+		return 0
+	fi
+
+	rm -rf "$WORK/clash-rs"
+	mkdir -p "$WORK/clash-rs"
+	if ! tar -xzf "$WORK/$asset" -C "$WORK/clash-rs"; then
+		unverified "解不开 ${asset}"
+		return 0
+	fi
+	local bin
+	bin="$(find "$WORK/clash-rs" -type f -name 'clash-rs' | head -n1)"
+	if [ -z "$bin" ]; then
+		unverified "${asset} 里找不到 clash-rs 可执行文件"
+		return 0
+	fi
+	chmod +x "$bin"
+
+	# 判据本身要先验一遍：没有 --strict-config 就没有这道检查。
+	"$bin" --help >"$WORK/clash-rs-help.txt" 2>&1 || true
+	if ! grep -q -- '--strict-config' "$WORK/clash-rs-help.txt"; then
+		unverified "钉住的这个版本不认识 --strict-config —— 判据变了，这道检查没法进行"
+		return 0
+	fi
+
+	if ! curl_retry "$NIKKI_RAW/nikki-rs/files/ucode/mixin.uc" -o "$WORK/mixin.uc"; then
+		unverified "取不到 Nikki-RS 的 mixin.uc"
+		return 0
+	fi
+
+	local rc=0
+	python3 -X utf8 - "$WORK/mixin.uc" "$WORK/ebpf.yaml" "$WORK/ebpf-bogus.yaml" \
+		"$WORK/ebpf-keys.txt" <<'PY' || rc=$?
+import re
+import sys
+
+src_path, ok_path, bogus_path, keys_path = sys.argv[1:5]
+src = open(src_path, encoding="utf-8").read()
+
+m = re.search(r"config\['ebpf'\]\s*=\s*\{", src)
+if not m:
+    print("找不到 config['ebpf'] = { ... } 段", file=sys.stderr)
+    sys.exit(3)
+
+depth, i = 1, m.end()
+while i < len(src) and depth:
+    if src[i] == "{":
+        depth += 1
+    elif src[i] == "}":
+        depth -= 1
+    i += 1
+if depth:
+    print("ebpf 段的大括号没配平", file=sys.stderr)
+    sys.exit(3)
+block = src[m.end():i - 1]
+
+
+def sample(key, expr):
+    """按 feed 用的 uci_* 辅助函数给一个类型正确的占位值。
+
+    只给字段名，不给真实取值：这道检查问的是"认不认识这个字段"。
+    """
+    if key == "enable":
+        return False           # 关掉连带的取值校验，见上面的注释
+    if "uci_bool(" in expr:
+        return False
+    if "uci_int(" in expr:
+        return 12345
+    if any(h in expr for h in ("uci_ports(", "uci_dscps(", "uci_fwmarks(", "uci_array(")):
+        return []
+    if "uci.get(" in expr:
+        return ""
+    return []
+
+
+root = {}
+stack = [root]
+names = [""]
+paths = []
+for line in block.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    mo = re.match(r"^'([A-Za-z0-9_-]+)'\s*:\s*\{\s*$", line)
+    if mo:
+        child = {}
+        stack[-1][mo.group(1)] = child
+        stack.append(child)
+        names.append(names[-1] + mo.group(1) + ".")
+        continue
+    if re.match(r"^\},?\s*$", line):
+        if len(stack) > 1:
+            stack.pop()
+            names.pop()
+        continue
+    mo = re.match(r"^'([A-Za-z0-9_-]+)'\s*:\s*(.+?),?\s*$", line)
+    if not mo:
+        continue
+    key, expr = mo.group(1), mo.group(2)
+    stack[-1][key] = sample(key, expr)
+    paths.append(names[-1] + key)
+
+if not paths:
+    print("ebpf 段里一个字段都没解析出来", file=sys.stderr)
+    sys.exit(3)
+
+
+def emit(d, indent):
+    pad = "  " * indent
+    out = []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.append("%s%s:" % (pad, k))
+            out.extend(emit(v, indent + 1))
+        elif isinstance(v, bool):
+            out.append("%s%s: %s" % (pad, k, "true" if v else "false"))
+        elif isinstance(v, int):
+            out.append("%s%s: %d" % (pad, k, v))
+        elif isinstance(v, str):
+            out.append('%s%s: "%s"' % (pad, k, v))
+        else:
+            out.append("%s%s: []" % (pad, k))
+    return out
+
+
+open(ok_path, "w", encoding="utf-8").write("\n".join(["ebpf:"] + emit(root, 1)) + "\n")
+
+# 反向对照：同一个 ebpf 段里塞一个编造的字段，strict 模式必须拒绝它。
+bogus = dict(root)
+bogus["__h5000m_must_reject"] = 1
+open(bogus_path, "w", encoding="utf-8").write("\n".join(["ebpf:"] + emit(bogus, 1)) + "\n")
+open(keys_path, "w", encoding="utf-8").write("\n".join(paths) + "\n")
+
+print("  feed 的 ebpf 段解出 %d 个字段：" % len(paths))
+for p in paths:
+    print("    - " + p)
+PY
+	case "$rc" in
+	0) : ;;
+	*)
+		unverified "没能从 mixin.uc 里抽出 ebpf 段（python3 退出码 ${rc}）"
+		return 0
+		;;
+	esac
+
+	if ! "$bin" -t -f "$WORK/ebpf.yaml" --strict-config >"$WORK/ebpf-check.log" 2>&1; then
+		drift "feed 写的 eBPF 字段里有钉住的核心不认识的：$(tr '\n' ' ' <"$WORK/ebpf-check.log" | cut -c1-320)"
+		return 0
+	fi
+	log "OK    上面这些字段，钉住的核心在 --strict-config 下全部接受"
+
+	if "$bin" -t -f "$WORK/ebpf-bogus.yaml" --strict-config >"$WORK/ebpf-control.log" 2>&1; then
+		unverified "反向对照失败：编造的字段也被接受了，说明 --strict-config 没在把关，这道检查会永远通过"
+		return 0
+	fi
+	log "OK    反向对照：编造的字段被拒绝（strict 模式确实在把关）"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# 7) 编译验证：打得进去不等于编得出来
 # ---------------------------------------------------------------------------
 # 这一节的由来（v1.1.10，run 38984193085）：libnftnl 1.3.2 给 struct expr_ops.set
 # 加了第 5 个参数（uint32_t byteorder），而本仓库补丁里 fullcone.c 的 set 还是
@@ -917,6 +1138,9 @@ check_git_packages mt76 \
 check_tree_patches
 check_nikki_anchors
 check_clash_rs_pin
+if [ "$EBPF_CONFIG" -eq 1 ]; then
+	check_clash_rs_ebpf_fields
+fi
 
 if [ "$COMPILE" -eq 1 ]; then
 	compile_userspace

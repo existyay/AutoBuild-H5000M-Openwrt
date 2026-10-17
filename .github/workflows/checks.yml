@@ -864,6 +864,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/verify-upstream-integration.sh --compile
 
+      # 上面那一步只回答"补丁对不对"。这一步回答另一个问题：feed 会写进
+      # config.yaml 的那一整段 ebpf.*，钉住的核心认不认识 —— clash-rs 默认静默
+      # 忽略未知字段，所以"feed 加了字段、核心还不认识"在设备上是"配了但不生效"。
+      - name: The pinned core still parses every eBPF field the feed emits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/verify-upstream-integration.sh --ebpf-config
+
       # 失败时自动产出诊断报告（可复用的 Composite Action）
       - name: 失败诊断
         if: failure()
