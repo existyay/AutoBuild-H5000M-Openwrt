@@ -214,6 +214,18 @@ gh ssh-key add ~/.ssh/id_ed25519_signing.pub --type signing --title "H5000M buil
 验证：`git log --format='%h %G?' -1` 应为 `G`；推送到 GitHub 后
 `verified` 应为 `true`。
 
+上面两条 `gh` 命令都要 `admin:ssh_signing_key` scope。本仓库这台开发机的凭证是
+Git Credential Manager 的 `gho_` OAuth 令牌（scopes 只有 `gist, repo, workflow`），
+所以 `gh auth refresh` 与 `POST /user/ssh_signing_keys` 都拿不到权限 —— 后者直接回
+**404**，而 GitHub 对越权一律回 404 而不是 403，别把这个 404 读成"接口不存在"
+（实测，2026-10-17）。
+
+这种凭证下注册只能走网页：**Settings → SSH and GPG keys → New SSH key**，
+Key type 选 **Signing Key**，粘贴 `~/.ssh/id_ed25519_signing.pub` 的内容。在公钥
+注册之前，本机提交会带 `ssh-ed25519` 签名但被判成 `Unverified`（密钥不在账号上），
+`mergeable_state` 仍是 `blocked` —— 也就是说"等必需检查全绿再调合并 API"这条路
+照旧可用，只是拿不到原生 auto-merge。
+
 ## 八、本地开发
 
 ```sh
