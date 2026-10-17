@@ -104,7 +104,7 @@ diff -urN a/src/Makefile.in b/src/Makefile.in
 diff -urN a/src/expr/fullcone.c b/src/expr/fullcone.c
 --- a/src/expr/fullcone.c
 +++ b/src/expr/fullcone.c
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,167 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +/*
 + * (C) 2022 wongsyrone
@@ -128,7 +128,8 @@ diff -urN a/src/expr/fullcone.c b/src/expr/fullcone.c
 +};
 +
 +static int nftnl_expr_fullcone_set(struct nftnl_expr *e, uint16_t type,
-+				   const void *data, uint32_t data_len)
++				   const void *data, uint32_t data_len,
++				   uint32_t byteorder)
 +{
 +	struct nftnl_expr_fullcone *fullcone = nftnl_expr_data(e);
 +

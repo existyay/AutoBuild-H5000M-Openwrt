@@ -1789,7 +1789,7 @@ download.pl ... "x" || ( dl_github_archive.py ... || ( git clone 固定 commit �
 再由 OpenWrt 用 `patch(1)` 打），⑤ 是**树补丁**（由 `apply_patches()` 用
 `git apply` 打）。两条路径的判定口径不同，检查脚本也分别照它们的口径来。
 
-### 2. 三种失效形态，以及为什么后两种更贵
+### 2. 四种失效形态，以及为什么后三种更贵
 
 **形态 A：上下文对不上。** `patch` 报 `FAILED`。吵闹、但诚实 —— 构建在 2–3 小时
 后变红，翻日志能找到是哪个包的哪个 hunk。
@@ -1869,12 +1869,35 @@ nftables 1.1.7 源码树），不是本次真的装上了：那几条断言读�
 自检取的是真函数而不是复制一份判断逻辑：复制品会随实现一起漂移，而这类故障要防的
 恰恰是实现本身。
 
+**形态 D：打得进去、也真的打上了，但打完编不过。** 这一种同样安静，而且它可以
+在 A/B/C 全部通过之后才出现 —— 补丁的上下文一行不差，`patch` 报 OK，dry-run
+也报 OK，唯一会说话的是编译器。
+
+`v1.1.10` 的构建就是这么失败的（run `38984193085`，安装器修好后的第一轮构建，
+也就是说三层补丁第一次真的被装上、真的被编译）：
+
+```
+expr/fullcone.c:161:27: error: initialization of
+  'int (*)(struct nftnl_expr *, uint16_t, const void *, uint32_t, uint32_t)'
+from incompatible pointer type
+  'int (*)(struct nftnl_expr *, uint16_t, const void *, uint32_t)'
+  161 |         .set            = nftnl_expr_fullcone_set,
+ERROR: package/libs/libnftnl failed to build.
+```
+
+上游 libnftnl 1.3.2 给 `struct expr_ops.set` 加了第 5 个参数
+（`include/expr_ops.h:22`，`uint32_t byteorder`，就是 `set_imm` 那一支的字节序），
+而补丁里 `fullcone.c` 的 `set` 还是 4 个参数。C 层面的这类不匹配与架构无关，
+却要等到 75 分钟的固件构建跑到 libnftnl 才现形 —— 所以 `--compile` 把它挪到
+门禁里（见下一节）。
+
 ### 3. 自动化检查
 
 ```sh
 scripts/verify-upstream-integration.sh            # 对着 mainline 当前 head 全量核
 scripts/verify-upstream-integration.sh --self-test # 离线，证明检测器本身还能抓
 scripts/verify-upstream-integration.sh --ref <sha> # 对着指定 revision 核
+scripts/verify-upstream-integration.sh --compile   # 上面这些再加一步：把两层真编一遍
 ```
 
 它做四件事：读 mainline 的包 Makefile 决定"这次构建会用哪个版本"→ 取那一份源码
@@ -1891,6 +1914,17 @@ scripts/verify-upstream-integration.sh --ref <sha> # 对着指定 revision 核
 "只有 `Makefile`、没有 `patches/`"的目录形态复刻出来，跑 `local-build.sh` 里的真
 `install_nftables_patches()`，要求 ②③④ 三层都落进目标目录，并要求本仓库自己少
 一层补丁时**拒绝构建**。两组都只在"门禁本身坏了"时失败。
+
+`--compile` 是形态 D（打得上、编不过）的答案：补丁打完之后，用宿主 gcc 把
+libnftnl 与 nftables **按固件自己用的那套 configure 参数**（照抄 openwrt 的两个包
+Makefile）真编一遍。两点容易忽略：nftables 那一层必须对着**打过补丁的** libnftnl
+编（`NFTNL_EXPR_FULLCONE_*` 定义在它的头文件里），所以先 `make install` 进一个
+prefix 再用 `PKG_CONFIG_PATH` 指过去；flex/bison 是硬依赖，因为补丁改的是
+`src/scanner.l` 与 `src/parser_bison.y`，打完它们的 mtime 比 tarball 里预生成的
+`.c` 新，make 必然重新生成解析器（固件那次构建同样走了这一步，顺带把语法也查了）。
+缺件时报 `2` 而不是 `0`：要求了编译却因缺件静默跳过，正是门禁最不想制造的假通过。
+代价很小 —— 实测 CI 上"核对 + 编译"这一步 37 秒，整轮 54 秒，而它换掉的是
+75 分钟一轮的固件构建盲试。
 
 ### 4. 本轮对齐的实测结果（`openwrt/openwrt@99426e4`）
 
