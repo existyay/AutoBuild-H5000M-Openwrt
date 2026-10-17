@@ -1789,7 +1789,7 @@ download.pl ... "x" || ( dl_github_archive.py ... || ( git clone 固定 commit �
 再由 OpenWrt 用 `patch(1)` 打），⑤ 是**树补丁**（由 `apply_patches()` 用
 `git apply` 打）。两条路径的判定口径不同，检查脚本也分别照它们的口径来。
 
-### 2. 两种失效形态，以及为什么第二种更贵
+### 2. 三种失效形态，以及为什么后两种更贵
 
 **形态 A：上下文对不上。** `patch` 报 `FAILED`。吵闹、但诚实 —— 构建在 2–3 小时
 后变红，翻日志能找到是哪个包的哪个 hunk。
@@ -1810,6 +1810,65 @@ download.pl ... "x" || ( dl_github_archive.py ... || ( git clone 固定 commit �
 这就是 `scripts/verify-upstream-integration.sh` 存在的理由，也是它把
 `Reversed (or previously applied)` 单独识别、单独归因的原因。
 
+**形态 C：补丁是对的，但根本没有被装上。** 这一种最安静：`patch(1)` 没有任何机会
+报错，因为它压根没运行。
+
+2026-10-12 落进 mainline 的 `556dc4525b`（"nftables: update to version 1.1.7"）把
+上游自己那 4 个构建补丁上游化之后删掉了本地副本：
+
+```
+removed  package/network/utils/nftables/patches/000-build-fix-configure-with-non-bash-shell.patch
+removed  package/network/utils/nftables/patches/001-build-simplify-the-instantiation-of-nftversion-h.patch
+removed  package/network/utils/nftables/patches/002-build-generate-build-time-stamp-once-at-configure.patch
+removed  package/network/utils/nftables/patches/003-build-support-SOURCE_DATE_EPOCH-for-build-time-stamp.patch
+```
+
+（这个提交的作者日期是 9/18、合并进 main 是 10/12。GitHub 的 `commits?path=`
+按作者日期返回，所以只查那个接口会把它读成"9/18 就删了"，结论正好错两周。）
+
+空目录在 git 里不留痕迹，`package/network/utils/nftables/patches/` 随之消失。而
+`install_nftables_patches()` 当时的第一行是：
+
+```sh
+[ -d "$dir" ] || { warn "No nftables patches directory"; return 0; }
+```
+
+它拿**上游自己的**目录当成了"要不要装我们补丁"的开关。目录一没，②③④ 三层补丁
+**一个都没装**，只留一条警告 —— 而这三层恰好就是"让 nft 认识 fullcone"和"让
+firewall4 真的发出它"的全部。
+
+后果出现在 `v1.1.9` 的构建（run `38974323448`）：它自己第 21 步的运行时校验把它
+抓了出来。逐层看是这样（摘录）：
+
+```
+=== layer 1: kernel module ===
+OK    nft_fullcone.ko was built
+=== layer 2+3: libnftnl and nftables userspace ===
+OK    libnftnl resolves expr_ops_fullcone (no dangling symbol)
+OK    the nftables scanner knows the fullcone keyword
+=== layer 4: firewall4 ===
+FAIL  firewall4 accepts fullcone in its parse_defaults whitelist
+FAIL  zone-masq.uc emits fullcone instead of masquerade
+FAIL  ruleset.uc adds the prerouting fullcone rules
+结论：3 项未通过
+```
+
+第 2+3 层那两条 `OK` 是**构建缓存**喂出来的（缓存里还留着 9/28 那次已打补丁的
+nftables 1.1.7 源码树），不是本次真的装上了：那几条断言读的是 `build_dir`，缓存
+能骗过它们。真正没被缓存盖住的是 firewall4，于是它成了第一个喊出来的。
+
+时间线也值得记：`9/28`、`10/5`、`10/12` 三次周构建的日志里都有
+`installed firewall4 / libnftnl / nftables patch` 各一条（10/12 那次跑在
+11:36 UTC，早于当天那次上游合并），所以**发布出去的周构建产物是干净的，
+`v1.1.9` 是唯一受害者**。
+
+修法见 `install_nftables_patches()`：前提换成包本身（nftables 的 `Makefile` 在
+不在），`patches/` 用 `mkdir -p` 建；三层任一为空即 `die`。防复发的门禁加在
+`--self-test` 里 —— 它复刻"只有 `Makefile`、没有 `patches/`"的上游形态，跑
+`local-build.sh` 里的**真函数**，要求三层都落进目标目录，并要求少一层时拒绝构建。
+自检取的是真函数而不是复制一份判断逻辑：复制品会随实现一起漂移，而这类故障要防的
+恰恰是实现本身。
+
 ### 3. 自动化检查
 
 ```sh
@@ -1826,6 +1885,12 @@ scripts/verify-upstream-integration.sh --ref <sha> # 对着指定 revision 核
 
 退出码刻意分成 `1`（漂移）与 `2`（没能验证）：网络故障与补丁失效必须在日志里
 长得不一样，否则一次代理抖动会被读成"补丁坏了"。
+
+`--self-test` 离线跑两组用例，都不联网。**判定器**那组证明"适用 / 上下文对不上 /
+已被上游应用"三种形态仍被如实区分；**安装器**那组（形态 C 的防复发）把上游
+"只有 `Makefile`、没有 `patches/`"的目录形态复刻出来，跑 `local-build.sh` 里的真
+`install_nftables_patches()`，要求 ②③④ 三层都落进目标目录，并要求本仓库自己少
+一层补丁时**拒绝构建**。两组都只在"门禁本身坏了"时失败。
 
 ### 4. 本轮对齐的实测结果（`openwrt/openwrt@99426e4`）
 
@@ -1850,6 +1915,12 @@ scripts/verify-upstream-integration.sh --ref <sha> # 对着指定 revision 核
 nftables 那一层为什么会断，是一个值得记住的例子：1.1.7 给 `src/scanner.l` 里的
 NAT 关键字规则加了 `<*>` 起始条件前缀，于是老补丁的上下文行不再匹配。**另外十二
 个 hunk 全都照常应用** —— 这正是形态 A 里最难查的那一类。
+
+形态 C 那次之后又对着 `22aa500`（`v1.1.9` 构建实际解析到的版本，核这一遍时也是
+main 的 head）重新走了一遍全量：nftables 1.1.7 与 libnftnl 1.3.2 两层补丁
+`patch -F0` 与 `git apply --check` 均 exit 0 且无 fuzz，`patches/0001`、`0002`
+同样通过，Nikki-RS 四处锚点都在，`clash-rs` 五个资产哈希逐条一致。也就是说补丁
+内容一直是对的 —— `v1.1.9` 缺的只是"没被装上"这一步。
 
 ### 5. 重新生成一个包内补丁
 
