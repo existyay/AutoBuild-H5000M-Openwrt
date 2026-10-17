@@ -17,11 +17,18 @@
 #      上游 libnftnl 1.3.2 把 `nftnl_expr_set_imm` 加进 `include/libnftnl/expr.h`
 #      时，本仓库的 libnftnl 补丁正是被这样整块丢掉的 —— 而丢掉的那一块里还
 #      包括 `NFTNL_EXPR_FULLCONE_*` 的定义，于是 nftables 的编译会失败。
+#   3. **最安静的一种**：补丁打得进去、也真的打上了，但打完的代码编不过。
+#      上游 libnftnl 1.3.2 给 `struct expr_ops.set` 加了第 5 个参数
+#      （`uint32_t byteorder`），而补丁里 fullcone.c 的 set 仍是 4 个参数：
+#      上下文一行不差，`patch` 报 OK，`--dry-run` 也报 OK —— 只有编译器会说话，
+#      而它的声音出现在固件构建跑到 libnftnl 的那一刻（v1.1.10 就是这样失败的，
+#      一轮 75 分钟）。
 #
 # 所以这个脚本把"补丁还成不成立"变成一条可自动跑的断言：它按 mainline 当前
 # **真正会构建的那些版本**下载源码（nftables / libnftnl 的官方 tarball、
 # firewall4 / mt76 的 git 快照），用 `patch -F0 --dry-run` 逐条试；再把 Nikki-RS
-# 依赖的三处锚点、clash-rs 钉住版本的资产哈希一起核对。
+# 依赖的三处锚点、clash-rs 钉住版本的资产哈希一起核对。带 `--compile` 时还会把
+# 打过补丁的 libnftnl 与 nftables 按**固件自己用的那套 configure 参数**真编一遍。
 #
 # 退出码刻意分成两种，因为"补丁坏了"和"没能查到"必须能被区分开：
 #
@@ -30,8 +37,12 @@
 #   2  无法验证（网络/工具缺失 —— 不要把它读成补丁坏了）
 #
 # Usage:
-#   scripts/verify-upstream-integration.sh [--ref <sha|branch>] [--keep] [仓库根目录]
+#   scripts/verify-upstream-integration.sh [--ref <sha|branch>] [--keep] [--compile] [仓库根目录]
 #   scripts/verify-upstream-integration.sh --self-test
+#
+# --compile 需要 gcc / make / pkg-config / flex / bison 与 libmnl、libjansson 的
+# 开发头文件。缺件时它报退出码 2（没能验证）而**不是** 0：要求了编译却因缺件
+# 静默跳过，正是这个脚本最不想制造的那种假通过。
 #
 # --self-test 完全离线：它造一个恰好含三种形态（适用 / 上下文对不上 / 已被上游
 # 应用）的临时树，然后要求本脚本的判定**如实**区分它们；再复刻上游 22aa500 删掉
@@ -51,6 +62,7 @@ ROOT_DIR=""
 REF=""
 KEEP=0
 SELF_TEST=0
+COMPILE=0
 
 usage() {
 	sed -n '2,/^set -Eeuo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
@@ -72,6 +84,10 @@ while [ "$#" -gt 0 ]; do
 			;;
 		--self-test)
 			SELF_TEST=1
+			shift
+			;;
+		--compile)
+			COMPILE=1
 			shift
 			;;
 		-h | --help)
@@ -434,13 +450,30 @@ check_clash_rs_pin() {
 	# -X utf8：这段输出是中文（下面每行都有 OK/FAIL），而 python 的 stdout 编码
 	# 取决于宿主的 locale。在 C/POSIX locale 的 runner 上不显式指定，就会变成
 	# 一串问号或 mojibake —— 日志里最关键的一行反而不可读。
-	if ! python3 -X utf8 - "$WORK/clash-rs-$tag.json" "$WORK/clash-rs-pairs.txt" "$tag" <<'PY'
+	#
+	# 退出码三分，因为"哈希不一致"和"根本没比成"必须能被区分开：0 一致、1 漂移、
+	# 3 没能验证。实测踩过：Git Bash 里的 python3 会解析到 Windows 商店的"应用
+	# 执行别名"桩 —— 它存在、不输出、退出码非 0，于是这里原本会把"检查器没跑起来"
+	# 报成"资产哈希与 pin 不一致"，把一次环境问题说成上游换过二进制。
+	local rc=0
+	python3 -X utf8 - "$WORK/clash-rs-$tag.json" "$WORK/clash-rs-pairs.txt" "$tag" <<'PY' || rc=$?
 import json
 import sys
 
 release_path, pairs_path, tag = sys.argv[1], sys.argv[2], sys.argv[3]
-release = json.load(open(release_path, encoding="utf-8"))
+
+def cannot_verify(msg):
+    print("  ??    %s" % msg)
+    sys.exit(3)
+
+try:
+    release = json.load(open(release_path, encoding="utf-8"))
+except Exception as exc:  # noqa: BLE001
+    cannot_verify("读不了 release JSON（%s）" % exc)
+
 assets = {a["name"]: a for a in release.get("assets", [])}
+if not assets:
+    cannot_verify("%s 的资产清单是空的" % tag)
 
 expected = []
 for line in open(pairs_path, encoding="utf-8"):
@@ -451,8 +484,7 @@ for line in open(pairs_path, encoding="utf-8"):
     expected.append((name, digest))
 
 if not expected:
-    print("  FAIL  没解析出任何期望哈希")
-    sys.exit(1)
+    cannot_verify("没从 pin_clash_rs() 里解析出任何期望哈希")
 
 bad = 0
 for name, want in expected:
@@ -462,16 +494,163 @@ for name, want in expected:
         bad += 1
         continue
     got = (asset.get("digest") or "").removeprefix("sha256:")
+    if not got:
+        # 这个字段是 API 后来才加的，老资产可能没有。没有它就无从比对，
+        # 那是"没能验证"，不是"哈希不一致"。
+        cannot_verify("%s 在 API 里没有 digest" % name)
     if got != want:
-        print("  FAIL  %s\n        期望 sha256:%s\n        实际 sha256:%s" % (name, want, got or "(API 未提供 digest)"))
+        print("  FAIL  %s\n        期望 sha256:%s\n        实际 sha256:%s" % (name, want, got))
         bad += 1
         continue
     print("  OK    %s sha256 与 pin_clash_rs() 一致" % name)
 
 sys.exit(1 if bad else 0)
 PY
-	then
-		drift "clash-rs ${tag} 的资产哈希与 pin_clash_rs() 里写死的不一致（详见上方逐条输出）。"
+	case "$rc" in
+	0) : ;;
+	1) drift "clash-rs ${tag} 的资产哈希与 pin_clash_rs() 里写死的不一致（详见上方逐条输出）。" ;;
+	*) unverified "clash-rs 的资产核对没跑起来（python3 退出码 $rc）—— 这不是哈希不一致，别读成漂移。" ;;
+	esac
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# 6) 编译验证：打得进去不等于编得出来
+# ---------------------------------------------------------------------------
+# 这一节的由来（v1.1.10，run 38984193085）：libnftnl 1.3.2 给 struct expr_ops.set
+# 加了第 5 个参数（uint32_t byteorder），而本仓库补丁里 fullcone.c 的 set 还是
+# 4 个参数。补丁的上下文一行不差，于是 patch 与 --dry-run 都报 OK —— 唯一会说话
+# 的是编译器，而它的话出现在 75 分钟的固件构建末尾。
+#
+# 这里用宿主 gcc 把那两层真编一遍，configure 参数**照抄固件自己用的那一套**
+# （openwrt 的 package/network/utils/nftables/Makefile 与 package/libs/libnftnl/
+# Makefile），这样编到的源文件与走到的条件编译分支都尽量贴近真实构建。它不替代
+# 固件构建（架构与工具链都不同），但"函数指针类型不匹配""符号未定义"这类错误与
+# 架构无关，正是这一节要抓的东西。
+#
+# 为什么不给这一节写自检：它的判定器是编译器本身，不是本脚本写的启发式。真正要防
+# 的是"要求了编译却静默跳过"，所以缺件一律走 unverified（退出码 2），绝不走通过。
+compile_userspace() {
+	local -a missing=()
+	local c
+
+	for c in gcc make pkg-config flex bison; do
+		command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+	done
+	pkg-config --exists libmnl 2>/dev/null || missing+=("libmnl 开发头文件")
+	pkg-config --exists jansson 2>/dev/null || missing+=("libjansson 开发头文件")
+
+	if [ "${#missing[@]}" -gt 0 ]; then
+		unverified "--compile 需要这些，而环境里没有：${missing[*]}"
+		return 0
+	fi
+
+	local ver_lb ver_nft
+	ver_lb="$(pkgvar package/libs/libnftnl/Makefile PKG_VERSION)"
+	ver_nft="$(pkgvar package/network/utils/nftables/Makefile PKG_VERSION)"
+	if [ -z "$ver_lb" ] || [ -z "$ver_nft" ]; then
+		unverified "读不到 libnftnl / nftables 的 PKG_VERSION，没法决定编哪个版本"
+		return 0
+	fi
+
+	printf '\n== 编译验证：libnftnl %s 与 nftables %s，打完本仓库的补丁还编得过吗\n' \
+		"$ver_lb" "$ver_nft"
+
+	# 两行分开写：同一个 local 里的展开发生在 builtin 执行之前，写成
+	# `local base=... prefix="$base/..."` 在 set -u 下会直接以 unbound variable 崩掉。
+	local base="$WORK/compile"
+	local prefix="$base/prefix"
+
+	compile_layer libnftnl "$base/libnftnl" libnftnl-patches "$prefix" "$WORK/libnftnl" || return 0
+	# nftables 要用**打过补丁的** libnftnl：NFTNL_EXPR_FULLCONE_* 就定义在它的
+	# 头文件里。先把 libnftnl 装进 prefix，再让 nftables 通过 pkg-config 找到它，
+	# 否则编的是 pacify 过的上游头文件，"编过了"毫无意义。
+	PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+		LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+		compile_layer nftables "$base/nftables" nftables-patches "$prefix" "$WORK/nftables" || return 0
+	return 0
+}
+
+# compile_layer <名字> <工作目录> <补丁目录> <prefix> <已解包的 pristine 树>
+compile_layer() {
+	local name="$1" dir="$2" patchdir="$3" prefix="$4" pristine="$5"
+	local p rc n=0 out log="$WORK/$name.build.log"
+	local -a patches=() cfg=()
+
+	if [ ! -d "$pristine" ]; then
+		unverified "$name 的源码这一次没解包成功，跳过它的编译验证"
+		return 0
+	fi
+
+	rm -rf "$dir"
+	mkdir -p "$dir" "$prefix"
+	cp -a "$pristine/." "$dir/"
+
+	shopt -s nullglob
+	patches=("$ROOT_DIR/$patchdir"/*.patch)
+	shopt -u nullglob
+	if [ "${#patches[@]}" -eq 0 ]; then
+		unverified "$patchdir 里没有补丁，编译验证无从谈起"
+		return 0
+	fi
+
+	# 这里必须**真打**：上面 verify_patches 只做了 dry-run，不真改文件就编不到
+	# 补丁引入的代码，这一节也就白跑了。
+	for p in "${patches[@]}"; do
+		rc=0
+		out="$(cd "$dir" && patch -p1 -F0 --forward --batch <"$p" 2>&1)" || rc=$?
+		if [ "$rc" -ne 0 ]; then
+			printf '%s\n' "$out" | sed 's/^/        /' >&2
+			drift "$name：$(basename "$p") 在编译验证里打不上 —— 同一棵树刚刚 dry-run 却过了，说明这期间上游动了，或磁盘上的树被改过。"
+			return 0
+		fi
+		n=$((n + 1))
+	done
+
+	# 固件自己用的参数（见 openwrt 的两个包 Makefile）。--with-json 是
+	# nftables-json=y 那一支；--with-mini-gmp/--without-cli 让宿主不需要
+	# libgmp 与 libedit，同时与固件编的是同一批源文件。
+	case "$name" in
+	libnftnl)
+		cfg=(--enable-static --enable-shared)
+		;;
+	nftables)
+		cfg=(--disable-debug --disable-man-doc --with-mini-gmp --without-cli --with-json)
+		;;
+	esac
+
+	log "$name：真打了 $n 个补丁，按固件的 configure 参数编译"
+
+	if ! (cd "$dir" && ./configure --prefix="$prefix" "${cfg[@]}" >"$log" 2>&1); then
+		tail -n 25 "$log" | sed 's/^/        /' >&2
+		unverified "$name 的 configure 没跑通（宿主缺依赖？），编译验证没能进行"
+		return 0
+	fi
+
+	# 补丁改的是 src/scanner.l 与 src/parser_bison.y，打完它们的 mtime 比 tarball
+	# 里预生成的 .c 新，make 一定会重新生成解析器 —— 所以 flex/bison 是硬依赖，
+	# 而这也顺带把语法本身查了一遍（固件那一次构建同样走了这一步）。
+	if ! (cd "$dir" && make -j"$(nproc 2>/dev/null || echo 2)" >>"$log" 2>&1); then
+		local errs first
+		errs="$(grep -nE ': (error|fatal error):|undefined reference|No rule to make target' "$log" | head -n 12 || true)"
+		if [ -n "$errs" ]; then
+			printf '%s\n' "$errs" | sed 's/^/        /' >&2
+			first="$(printf '%s\n' "$errs" | head -n1 | sed 's/^[0-9]*://' | cut -c1-200)"
+			drift "$name：补丁打得上，但打完编不过 —— $first"
+		else
+			tail -n 25 "$log" | sed 's/^/        /' >&2
+			drift "$name：打完补丁 make 失败，而日志里没有一行 error（用 --keep 保留完整日志）"
+		fi
+		return 0
+	fi
+	log "$name：编译通过"
+
+	if [ "$name" = libnftnl ]; then
+		if ! (cd "$dir" && make install >>"$log" 2>&1); then
+			unverified "$name 编译过了，但 make install 失败 —— nftables 那一层要用它打过补丁的头文件"
+			return 0
+		fi
+		log "$name：已装入 $prefix（给 nftables 用）"
 	fi
 	return 0
 }
@@ -695,6 +874,15 @@ fi
 
 for c in curl tar patch git sha256sum python3; do need "$c"; done
 
+# 只看 command -v 是不够的：Windows 上 python3 常常解析到 Microsoft Store 的
+# "应用执行别名"桩，它存在、没有任何输出、退出码非 0。这样的 python3 会让下面
+# 那段校验悄悄不执行，而 if ! 会把它翻成"资产哈希不一致"——一次环境问题被说成
+# 上游换过二进制。所以先让它真的算一下。这里走 die（退出码 2）：整轮核对都没法
+# 进行时，报"没能验证"才是诚实的。
+if ! python3 -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+	die "python3 存在但不能用（Windows 商店的应用执行别名桩？）—— 换成真的解释器再跑"
+fi
+
 # REF 必须是本项目真正会对齐的那个上游 head。默认直接问远端，而不是读
 # configs/upstream.env 里的 pin：pin 可能落后，而"最新的上游有没有新东西"正是
 # 这个脚本要回答的问题。
@@ -729,6 +917,10 @@ check_git_packages mt76 \
 check_tree_patches
 check_nikki_anchors
 check_clash_rs_pin
+
+if [ "$COMPILE" -eq 1 ]; then
+	compile_userspace
+fi
 
 printf '\n'
 if [ "${#DRIFT_REASONS[@]}" -gt 0 ]; then

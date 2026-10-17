@@ -851,17 +851,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            curl xz-utils patch git python3 ca-certificates
+            curl xz-utils patch git python3 ca-certificates \
+            build-essential pkg-config flex bison libmnl-dev libjansson-dev
 
       - name: The detector itself still detects drift
         run: ./scripts/verify-upstream-integration.sh --self-test
 
-      - name: Verify every patch against the versions mainline builds
+      - name: Verify every patch against the versions mainline builds, then compile them
         env:
           # 只读令牌，唯一作用是抬高匿名 API 配额（60 次/小时/IP，且被同一台
           # runner 上的其它 job 共享）。本步骤只需一次 API 调用。
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/verify-upstream-integration.sh
+        run: ./scripts/verify-upstream-integration.sh --compile
 
       # 失败时自动产出诊断报告（可复用的 Composite Action）
       - name: 失败诊断
