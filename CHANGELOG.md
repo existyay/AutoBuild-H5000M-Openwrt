@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.11](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.10...v1.1.11) (2026-10-17)
+
+
+### Bug Fixes
+
+* **fullcone:** libnftnl 1.3.2 的 ops.set 多了 byteorder，补丁打完编不过 ([#43](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/43)) ([fbf6be7](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/fbf6be7fae6eeb418d09eed70b01a02b054f0c46))
+
 ## [1.1.10](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.9...v1.1.10) (2026-10-16)
 
 
