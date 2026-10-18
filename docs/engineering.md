@@ -1894,10 +1894,11 @@ ERROR: package/libs/libnftnl failed to build.
 ### 3. 自动化检查
 
 ```sh
-scripts/verify-upstream-integration.sh            # 对着 mainline 当前 head 全量核
-scripts/verify-upstream-integration.sh --self-test # 离线，证明检测器本身还能抓
-scripts/verify-upstream-integration.sh --ref <sha> # 对着指定 revision 核
-scripts/verify-upstream-integration.sh --compile   # 上面这些再加一步：把两层真编一遍
+scripts/verify-upstream-integration.sh             # 对着 mainline 当前 head 全量核
+scripts/verify-upstream-integration.sh --self-test  # 离线，证明检测器本身还能抓
+scripts/verify-upstream-integration.sh --ref <sha>  # 对着指定 revision 核
+scripts/verify-upstream-integration.sh --compile    # 上面这些再加一步：把两层真编一遍
+scripts/verify-upstream-integration.sh --ebpf-config # 再加一步：把 feed 的 ebpf 段喂给核心解析
 ```
 
 它做四件事：读 mainline 的包 Makefile 决定"这次构建会用哪个版本"→ 取那一份源码
@@ -1926,14 +1927,27 @@ prefix 再用 `PKG_CONFIG_PATH` 指过去；flex/bison 是硬依赖，因为补�
 代价很小 —— 实测 CI 上"核对 + 编译"这一步 37 秒，整轮 54 秒，而它换掉的是
 75 分钟一轮的固件构建盲试。
 
-**已知缺口：clash-rs 那条断言只到文本层。** 现在核的是"feed 的 Makefile 钉住了哪个
-版本、四处锚点还在不在、五个资产哈希对不对"。这挡得住"钉错版本"与"资产被换"，挡不住
-"feed 以后给 eBPF 加了新字段、而钉住的核心不认识它"。要挡这一种，得下载钉住的
-x86_64-musl 二进制，用 feed 自己产出的配置跑 `clash-rs -t -f config.yaml
---strict-config` —— 那意味着在 CI 里下载并执行第三方二进制，供应链上要单独权衡，
-所以暂时只记录、不实现。当前的判断依据：feed 的 main 自 2026-09-26 起没有动过，唯一
-与 eBPF 相关的提交 `424abb38` 加的是 `proxy_src_macs`，`mixin.uc` 没变 —— 钉住的
-`v0.20.10-alpha` 覆盖它现在会发的全部字段，缺口在**检测能力**，不在**当前支持度**。
+`--ebpf-config` 补的是"钉住哪个版本"之外的另一半：**那个版本听不听得懂 feed 说的话。**
+光核锚点与资产哈希，挡得住"钉错版本"和"资产被换"，挡不住"feed 给 eBPF 加了新字段、
+而钉住的核心不认识它" —— 因为 clash-rs 默认**静默忽略**未知字段（它自己的 `--help`
+就写着：为了让别的客户端共享的配置也能加载），设备上的表现是"配了但不生效"，不是
+报错。这一节把 feed 的 `nikki-rs/files/ucode/mixin.uc` 里那段
+`config['ebpf'] = { ... }` 解析成字段名（当前 19 个，含 `lan.proxy-src-macs`），
+生成一份只有字段名、没有真实取值的 `config.yaml`，喂给钉住的 x86_64-musl 核心跑
+`-t -f … --strict-config`。
+
+三个设计要点，缺一个这道检查就会骗人：
+
+- **执行之前先对哈希。** 它在 CI 里跑一个下载来的第三方二进制，所以先要求
+  `sha256sum` 等于 `pin_clash_rs()` 里写死的值，对不上就不执行。
+- **`enable: false`。** 值不按 feed 原样给：这道检查只问字段名认不认识，而
+  `enable: true` 会连带触发端口/MAC 之类的取值校验 —— 那是另一件事，也是假漂移的
+  来源（和 `--compile` 里"缺失即报 2"是同一个思路：别让无关原因伪装成结论）。
+- **反向对照。** 同一份配置再塞一个编造字段，要求 strict 模式**拒绝**它。否则万一
+  `--strict-config` 没生效，这道检查会永远通过 —— 永远通过的检查比没有检查更糟。
+
+字段是从 feed 的源码里**抓**的，不是在本仓库抄一份清单：feed 加字段的那一天，这道
+检查要么报"核心不认识 X"，要么自动跟着通过，而不会因为清单过期而沉默。
 
 ### 4. 本轮对齐的实测结果（`openwrt/openwrt@99426e4`）
 
