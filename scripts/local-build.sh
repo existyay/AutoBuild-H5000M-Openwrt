@@ -1042,13 +1042,28 @@ pin_sing_box() {
 # be re-synced on every such commit.  Pinning the core keeps the two halves in
 # step by construction.
 #
+# 2026-10-22 upstream raised the stakes: commit 67ffca956 ("fix: always package
+# the latest clash-rs release") moved the package from `nikki-rs/files/clash-rs/`
+# to the repository root and made the feed's CI resolve the newest release at
+# build time (`scripts/packaging/update-clash-rs.sh` recomputes every hash).  So
+# the hash written in the feed's Makefile can change under us without a feed
+# commit, and following it would make the same feed revision build a different
+# core on different days.  An explicit pin is therefore the only way to keep a
+# build reproducible; upgrading is a decision made here, not by the feed's
+# release cadence.  The pin was moved forward to v0.20.23-alpha on 2026-10-24
+# (v0.20.10-alpha -> 13 releases behind): field surface is unchanged between
+# them (verified against `clash-lib/src/config/def.rs`), and the published
+# minimal-* assets still carry the `ebpf` feature — v0.20.23's matrix sets
+# `extra-features: "jemallocator,ebpf"` for every Linux target and builds the
+# bytecode in a dedicated job, so this is not a feature downgrade.
+#
 # The rewrite is a plain text substitution with a post-check, following
 # pin_sing_box.  It dies loudly rather than silently pinning nothing if upstream
 # restructures the Makefile.
 pin_clash_rs() {
 	local mk="${SRC}/package/OpenWrt-nikki-rs/clash-rs/Makefile"
-	local want_v="0.20.10_alpha"
-	local want_url="https://github.com/CHKayanami/clash-rs/releases/download/v0.20.10-alpha/"
+	local want_v="0.20.23_alpha"
+	local want_url="https://github.com/CHKayanami/clash-rs/releases/download/v0.20.23-alpha/"
 
 	# Only when the package is actually part of this build.  Every ENABLE_NIKKI
 	# path that pulls the front-end also pulls the core, and
@@ -1084,11 +1099,11 @@ pin_clash_rs() {
 	# differs from HASH, so the download stage replaces it — but only because
 	# PKG_HASH changes here.  That is also why the hash has to be right: a
 	# wrong-but-stable hash would keep the old binary and every check would pass.
-	local aarch64_h="b6ad0f7014d6fc03a9ab56cd1a61ea61574db9e3e483a637cc04bf022bf6c065"
-	local x86_64_h="1ac876892965b3249659931c0c6f7e3dc87673daeab90f4a9744ff2caf5fb139"
-	local armv7_h="33321d4b6311714a91992fe0a5f5f78de1e169653e9603d9556deb01813400c9"
-	local riscv64_h="bc9d29081f7a665e82135045c30eedb6d37b642013cd20ef056c109f588b35ad"
-	local i686_h="834cc83b4d34f0c06126f51d4de0584ce74540c0bcf3e1edc67b342e2fbf4136"
+	local aarch64_h="f5a6143dc46e29a4668d111f229a7eaf55c4348979817e05b7d2e1cb541eb199"
+	local x86_64_h="50ba876081c35a2f3d4936ad370e64631c5a20a4e0c8af991bc310caaf8960b9"
+	local armv7_h="938d196fb00edbfd9e5c9145334caf20f189b916bd873f07c7bd26da9a5f3213"
+	local riscv64_h="0b3bf62f216b6503b7d5c6a322c1a072c8ee598c11f8218d7d09bc87bc91a6d3"
+	local i686_h="c7e30586bb14e1816caa0011d4e2c74111c74dc9ea4a8b37cf7da458e9420153"
 
 	# Replace the version, the release URL and every architecture hash.  Done
 	# with awk rather than sed because the hash lines are indented and identical
@@ -1156,7 +1171,7 @@ pin_clash_rs() {
 	[ "$pinned" -gt 0 ] ||
 		die "clash-rs pin matched no architecture block in ${mk}; the Makefile layout changed and pin_clash_rs needs updating"
 
-	log "clash-rs pinned to ${want_v} (the feed's eBPF page emits proxy-src-macs and quic, which v0.20.0-alpha lacks)"
+	log "clash-rs pinned to ${want_v} (the feed's Makefile still says v0.20.0-alpha and its CI now chases the newest release at build time; this pin, not the feed, decides which core the image gets)"
 	return 0
 }
 
@@ -3528,6 +3543,12 @@ enable_mt5700m=${ENABLE_MT5700M}
 enable_upnp=${ENABLE_UPNP}
 enable_adblock=${ENABLE_ADBLOCK}
 enable_dockerman=${ENABLE_DOCKERMAN}
+enable_nikki=${ENABLE_NIKKI}
+enable_openclash=${ENABLE_OPENCLASH}
+enable_mosdns=${ENABLE_MOSDNS}
+enable_homeproxy=${ENABLE_HOMEPROXY}
+enable_adguardhome=${ENABLE_ADGUARDHOME}
+enable_ebpf_proxy_kernel=${ENABLE_EBPF_PROXY_KERNEL}
 EOF
 
 	log "Wrote ${dest}/BUILD-INFO.txt (kernel ${kver:-?}, abi ${abi:-?})"

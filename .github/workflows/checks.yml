@@ -627,13 +627,36 @@ jobs:
 
           want scripts/local-build.sh 'pin_clash_rs' \
             "local-build.sh has the clash-rs pin"
-          # The exact version the field-skew analysis concluded with.  Bumping
-          # this is fine; removing it, or dropping to a version without
-          # proxy-src-macs, is the regression.
-          want scripts/local-build.sh 'want_v="0.20.10_alpha"' \
-            "the pin names a core version that understands proxy-src-macs"
-          want scripts/local-build.sh 'releases/download/v0.20.10-alpha/' \
-            "the pin points at the matching release"
+          # The pin must name *a* version whose release carries proxy-src-macs,
+          # and the download URL has to point at that same version — a mismatch
+          # is what makes the build fetch a core its hashes do not describe.
+          #
+          # Deliberately NOT a literal version.  The previous form asserted
+          # `want_v="0.20.10_alpha"`, which turned the routine upgrade to
+          # 0.20.23 into a red required check even though the check's own
+          # comment said bumping was fine.  What must be caught is a *regression*
+          # (a pin below the floor, or a URL that disagrees with the version),
+          # not a version number that moved.
+          pinned=$(sed -n 's/^	local want_v="\([0-9][0-9.]*\)_alpha"$/\1/p' scripts/local-build.sh | head -n1)
+          url_ver=$(sed -n 's|^	local want_url=".*/download/v\([0-9.]*\)-alpha/"$|\1|p' scripts/local-build.sh | head -n1)
+          if [ -z "$pinned" ]; then
+            echo "  FAIL  the pin does not name an X.Y.Z_alpha version"
+            fail=1
+          elif [ "$pinned" != "$url_ver" ]; then
+            echo "  FAIL  want_v=${pinned} but want_url points at '${url_ver}'"
+            fail=1
+          else
+            echo "  OK    the pin is self-consistent: version ${pinned} and its release URL"
+            # v0.20.10-alpha is the first release that knows proxy-src-macs
+            # (0.20.1 .. 0.20.9 silently drop it), so it is the floor.
+            extra=${pinned#0.}
+            minor=${extra%%.*}
+            patch=${pinned##*.}
+            if [ "$minor" -lt 20 ] || { [ "$minor" -eq 20 ] && [ "$patch" -lt 10 ]; }; then
+              echo "  FAIL  ${pinned}-alpha is below the proxy-src-macs floor (0.20.10)"
+              fail=1
+            fi
+          fi
           # The pin is a no-op if it never runs.
           want scripts/local-build.sh '^	pin_clash_rs$' \
             "pin_clash_rs is called from main"

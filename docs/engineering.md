@@ -289,7 +289,7 @@ ENABLE_WWAND=false ENABLE_MT5700M=true ENABLE_NIKKI=true THREADS=8 ./scripts/loc
 | `openwrt-mediatek-filogic-hiveton_h5000m-initramfs-kernel.bin` | initramfs 恢复镜像 |
 | `*-targz-rootfs.tar.gz` / `*-rootfs.tar.gz` | rootfs 压缩包（本配置 `CONFIG_TARGET_ROOTFS_TARGZ=y`） |
 | `*.manifest` | 镜像内实际安装的包清单（约 274 个） |
-| `BUILD-INFO.txt` | 本次上游 revision、kernel 版本与 **kernel ABI** |
+| `BUILD-INFO.txt` | 本次上游 revision、kernel 版本与 **kernel ABI**，以及全部功能开关（`enable_fancontrol`…`enable_dockerman`，2026-10-24 起补上 `enable_nikki`/`enable_openclash`/`enable_mosdns`/`enable_homeproxy`/`enable_adguardhome`/`enable_ebpf_proxy_kernel` —— 在此之前从产物里看不出这个镜像带的是哪套代理前端） |
 | `profiles.json` | 上游生成的版本/内核元数据（ABI 的权威来源） |
 | `sha256sums` | 校验和 |
 | `enabled-packages.txt` | 进入最终 `.config` 的符号清单（约 297 个），见下方说明 |
@@ -951,9 +951,16 @@ MACs」→ UCI 存下来 → 生成的配置里带着这个键 → 核心把它�
    直接报错，而不是静默地什么都没钉。
 
 `checks.yml` 里的「Verify the clash-rs pin covers the eBPF fields the feed emits」
-把这些约束变成门禁：pin 函数存在、版本号与 release URL 指向
-`0.20.10-alpha`、`main` 里真的调用了它、feed 仍从移动分支克隆、五个架构哈希都是
-完整 sha256。这是文本级断言 —— 能在 PR 阶段抓住「pin 被回退」，而不需要下载二进制。
+把这些约束变成门禁：pin 函数存在且由 `main` 调用、`want_v` 与 `want_url` 指向**同一个**
+版本、该版本不低于 `0.20.10-alpha`（第一个认识 `proxy-src-macs` 的 release）、feed 仍从
+移动分支克隆、五个架构哈希都是完整 sha256。这是文本级断言 —— 能在 PR 阶段抓住「pin 被
+回退」，而不需要下载二进制。
+
+断言刻意**不**写死版本号：最初那版断言的是 `want_v="0.20.10_alpha"` 这个字面量，于是
+2026-10-24 把 pin 升到 `0.20.23-alpha` 时，一次例行升级就把必需检查变红 —— 而那段断言
+自己的注释正写着"bumping this is fine"。要抓的是**回退**（低于下限、或 URL 与版本不
+一致），不是版本号本身动了。三种情形都用改后的判定跑过：当前版本通过、降到 `0.20.9`
+报错、`want_v` 与 URL 不一致报错。
 
 #### adblock-fast 的两类提示：一类是缺包，一类是缺 DNS 后端
 
@@ -1963,7 +1970,7 @@ prefix 再用 `PKG_CONFIG_PATH` 指过去；flex/bison 是硬依赖，因为补�
 | mt76 | `467ae2e3f190baf737e15e318906da0dc7d0ab91` | exit 0，无 offset |
 | openwrt 树 | `99426e4` | `patches/0001`、`patches/0002` 均 `git apply --check` exit 0 |
 | Nikki-RS | `CHKayanami/OpenWrt-nikki-rs@main` | 四处锚点都在，且都还没有被上游自己补上 |
-| clash-rs | `v0.20.10-alpha` | 五个架构的资产都还在，sha256 与 `pin_clash_rs()` 逐条一致 |
+| clash-rs | `v0.20.23-alpha`（2026-10-24 由 `v0.20.10-alpha` 升上来） | 五个架构的资产都还在，sha256 与 `pin_clash_rs()` 逐条一致；Linux 目标的构建矩阵仍是 `extra-features: "jemallocator,ebpf"` |
 
 同一套补丁对 `e1bd479b`（main 在这轮对齐期间又前进的一个 revision）同样全部通过
 —— 那两个 revision 的 `nftables` / `libnftnl` 版本与 `firewall4` / `mt76` 的
@@ -2032,14 +2039,37 @@ flags），所以两侧根本不交换这三个属性中的任何一个；内核
 规则。`scripts/verify-upstream-integration.sh` 当然也不会替你发现这个 —— 它不是
 补丁适用性问题，是补丁本身的语义问题。
 
-**b) `clash-rs` 的钉住版本刻意落后于上游 release。**
+**b) `clash-rs` 的钉住版本与上游 release 的关系（2026-10-24 已升级）。**
 
-`pin_clash_rs()` 钉的是 `0.20.10_alpha`，而上游已经发到 `0.20.22-alpha`。这不是
-"忘了升"：钉住的目的正是**让内核版本与 feed 当前那份配置相配**，而 feed 的 main
-自 2026-09-26 起没有再动过。升内核要重新核对配置项（字段可能改名或移除），属于
-需要实测的改动，不是版本号替换。真正的风险不是"有新版"，而是**那个 release 被
-撤下** —— 那时构建会在下载时 404，所以检查脚本会把该 release 的五个资产哈希逐条
-核对。
+`pin_clash_rs()` 现在钉 `0.20.23_alpha`（当天最新的 release）。上一版这里写的是"刻意
+落后于上游"：当时的依据是"钉住的目的正是让内核版本与 feed 当前那份配置相配，而 feed
+的 main 自 2026-09-26 起没有再动过"。**那个前提已经不再成立**，所以结论也换了。
+
+2026-10-20～10-22，feed 的 main 前进了 9 个 commit，其中三个直接冲着核心来：
+
+| feed 提交 | 内容 | 对本工程的意义 |
+| --- | --- | --- |
+| `67ffca956` | always package the latest clash-rs release | `clash-rs/` 从 `nikki-rs/files/` 挪到仓库根，且 feed 的 CI 在构建时**现算**最新 release 的哈希 |
+| `90dd011d4` / `392f60357` | 用原生架构打包替换 SDK 矩阵 | 包产物的分发方式变了，钉住的核心来源没变 |
+| `a7be43ab1` | feat(dns2): upstream settings + ordered routing rules | `mixin.uc` 现在写 9 个 `dns2.*` 键，需要核心都认识 |
+
+于是做了三件事，都是可核对的：
+
+1. **字段面向后兼容**：把 `clash-lib/src/config/def.rs` 的 `EbpfConfig` /
+   `EbpfLanConfig` / `EbpfHostConfig` / `EbpfTargetConfig` / `Dns2Config` /
+   `Dns2UpstreamDef` 在 `v0.20.10-alpha` 与 `v0.20.23-alpha` 之间逐字段比对，**结构体
+   与字段数完全一致**（11/5/3/4/13/7）。feed 写的 19 个 ebpf 键与 9 个 dns2 键两版核心
+   都认（`type` 是 `pub r#type` + `#[serde(rename = "type")]`，不是未知字段）。
+2. **eBPF 功能没丢**：`v0.20.23-alpha` 的发布矩阵给每个 Linux 目标都是
+   `extra-features: "jemallocator,ebpf"`，另外单独有一个 `build-ebpf` 作业编字节码。
+   这一点必须查，因为 `def.rs` 里的 ebpf 结构体**不受 feature gate 控制** —— 只看
+   `--strict-config` 能不能解析，证明不了功能真的编进去了。
+3. **钉住仍然必要，而且比以前更必要**：feed 的 CI 现在会在构建时追最新 release，同一份
+   feed 提交在不同日子会产出不同核心。显式钉住是这个工程唯一能保住"可复现"的手段。
+
+还没做的那一步：真机/真构建验证。字段与特性是静态核对，运行期行为（eBPF 卸载、fakeip
+范围、DNS 缓存）只有开 `ENABLE_NIKKI=true` 跑一次完整构建才说得清 —— 那次构建会把它写进
+`BUILD-INFO.txt`（这一版起 `enable_nikki` 等六个开关也会被记录，见下）。
 
 ### 7. 与上游变化的交互（快照）
 
@@ -2055,7 +2085,9 @@ MLO 系列）是**跟着 main 自动到来**的，本工程不需要"合并"动�
 | `mt76` 更新到 `467ae2e3` | `mt76-patches/100-mt7996-always-fill-txwi.patch` 的落点 | **已验证**：零 offset 适用 |
 | `kernel: backport fix for MTK WED 2.0 WDMA TX hang issue`、`generic: restore EEE support on mt753x and mtk_eth_soc` | 直接落在本工程所用 SoC 的以太网路径上 | 跟随 main 自动到来；属于本工程真正关心的"性能/稳定性"合并，**无需动作** |
 | hostapd / mac80211 的 MLO 系列（约 117 个 commit） | MT7992 是 Wi-Fi 7 | 能力随 main 自动到来；实际生效与否只有真机能答 |
-| `CHKayanami/clash-rs` 已发到 `v0.20.22-alpha` | `pin_clash_rs()` 仍钉 `0.20.10_alpha` | **刻意不动**，理由见上面 6.b |
+| `CHKayanami/clash-rs` 已发到 `v0.20.23-alpha` | `pin_clash_rs()` 原钉 `0.20.10_alpha` | **2026-10-24 已升到 `0.20.23-alpha`**：字段面两版一致、eBPF feature 仍在，理由见上面 6.b |
+| `OpenWrt-nikki-rs` 把 `clash-rs/` 挪到仓库根 | 四处锚点里的 `clash-rs/Makefile` | **无冲突**：本仓库的锚点本来就按 `clash-rs/Makefile` 取，2026-10-24 全量核对 4/4 通过 |
+| feed 的 `mixin.uc` 新增 9 个 `dns2.*` 键（`a7be43ab1`） | 核心的 `Dns2Config` / `Dns2UpstreamDef` | **无缺口**：9 个键两版核心都认；`--ebpf-config` 那道检查只覆盖 ebpf，dns2 这一面靠上面的逐字段比对 |
 
 这类"上游变化 → 本工程假设"的核对**不该靠人定期做，因为一定会忘**。§3 的脚本把
 其中可机检的部分（补丁适用性、锚点、钉住版本）变成了每个 PR 都会跑的断言；
