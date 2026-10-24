@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.11...v1.2.0) (2026-10-24)
+
+
+### Features
+
+* **ci:** 把 feed 的 ebpf 段喂给钉住的核心，用 --strict-config 验字段 ([#46](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/46)) ([c0b1d64](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/c0b1d64ad16c3f7db5c0df6b4a27c4dd74e51102))
+
+
+### Bug Fixes
+
+* **build:** clash-rs 核心升到 v0.20.23-alpha，BUILD-INFO 记全代理开关 ([#49](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/49)) ([4211ad8](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/4211ad8f3136f7e1afdcd7e9391822953570c450))
+
 ## [1.1.11](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.10...v1.1.11) (2026-10-17)
 
 
