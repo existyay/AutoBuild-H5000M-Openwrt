@@ -11,13 +11,21 @@ Hiveton H5000M（Airpi H5000M，MT7987A + MT7992）的**主线 OpenWrt** 固件�
 
 ## 下载与刷机
 
-到 [Releases](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) 下载：
+Releases 页面上只有两种条目：
+
+| 条目 | 是什么 | 什么时候用 |
+| --- | --- | --- |
+| [`vX.Y.Z`](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) | **版本线**，每个 tag 一份产物，永不覆盖 | 想要一个能引用的版本号、能长期留在设备上 |
+| `snapshot`（预发布） | **滚动快照**，每周构建覆盖这一条，只有最新一版 | 想试上游最新修复，不在乎版本号 |
+
+两者产物格式相同：
 
 | 文件 | 用途 |
 | --- | --- |
 | `*-squashfs-sysupgrade.bin` | **刷机用这个** |
 | `*-initramfs-kernel.bin` | 恢复镜像，系统起不来时用 |
 | `*-targz-rootfs.tar.gz` | 容器 / chroot 使用 |
+| `SHA256SUMS.txt` | 全部产物的 sha256，`sha256sum -c SHA256SUMS.txt` 校验 |
 | `BUILD-INFO.txt` | 上游版本与**内核 ABI** |
 
 在 LuCI 的「系统 → 备份/刷写固件」里刷入 sysupgrade 镜像，或：

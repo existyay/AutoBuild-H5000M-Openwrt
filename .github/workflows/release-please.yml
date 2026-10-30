@@ -125,10 +125,13 @@ jobs:
           # and commitlint exempts exactly that shape (`chore(<anything>): release`)
           # — see the `ignores` list in commitlint.config.mjs.  That rule, not
           # this file, is what keeps the gate green.
-          # The firmware itself is versioned by its upstream revision
-          # (openwrt-<sha>), which Release Please cannot know.  So this manages
-          # the PROJECT version and the changelog; build.yml keeps naming the
-          # firmware after the upstream commit it was built from.
+          # The firmware itself is versioned by its upstream revision, which
+          # Release Please cannot know.  So this manages the PROJECT version and
+          # the changelog.  Since 2026-10-30 build.yml publishes on two lines
+          # (see docs/ci.md 十): a tag build lands on the release this action
+          # creates and keeps its body, while a scheduled build replaces a single
+          # rolling `snapshot` pre-release instead of piling up one
+          # `openwrt-<sha>` release per week.
 
       # Click "Approve and run" on the checks Release Please's own push cannot
       # start.
