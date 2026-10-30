@@ -1277,11 +1277,26 @@ jobs:
           set -euo pipefail
           cd artifacts
 
+          # 两条发布线，刻意不同：
+          #
+          #   * tag 构建（refs/tags/*）发的是**版本线**：release 名就是 tag，产物挂到
+          #     Release Please 已经建好的那个 release 上，正文保留它生成的变更记录。
+          #     这些是里程碑，永不覆盖。
+          #   * 计划 / 手动构建发的是**滚动快照**：始终只有一条 `snapshot` 预发布，
+          #     每次构建替换它。
+          #
+          # 为什么不再一构建一个 `openwrt-<sha>`（2026-10-30 数出来的后果）：六周里
+          # 积了 12 条互相取代的 release，没有一条是能被引用的版本号，Downloads 页
+          # 对"该刷哪个"的回答是一张列表。一条滚动预发布一行就说清了；而
+          # `/releases/latest` 永远指向最新的**版本线**（GitHub 不会把预发布标成
+          # latest），所以 README 里那个链接照旧正确。
+          is_snapshot=false
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             rel_name="${GITHUB_REF_NAME}"
           else
             rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
-            rel_name="openwrt-${rev}"
+            rel_name="snapshot"
+            is_snapshot=true
           fi
 
           # Every firmware image this build produces, not just the sysupgrade
@@ -1299,36 +1314,113 @@ jobs:
                   -o -name 'profiles.json' \
                   -o -name '*.manifest' \) -print0)
 
+          # 摘要也要发出去。没有它，release 等于请用户相信一个从网络下载的 38 MB
+          # 二进制；有了它，`sha256sum -c SHA256SUMS.txt` 一条命令、离线可验。
+          #
+          # 逐文件拼而不是 `sha256sum "${files[@]}" | sed`：GNU coreutils 的数码流
+          # 有两种形状（`hash  name` 与 `hash *name`，后者是 binary 模式的标记），
+          # 而 `find` 给的又是 `./name`。三层前缀叠在一起，一条 sed 很容易只吃掉
+          # 一部分（第一次写这行时就是这样：`*./name` 原样留在了发布出去的文件里）。
+          # 取第一列再用 `${f#./}` 去前缀，与平台无关。
+          : > SHA256SUMS.txt
+          for f in "${files[@]}"; do
+            printf '%s  %s\n' \
+              "$(sha256sum "$f" | cut -d' ' -f1)" "${f#./}" >> SHA256SUMS.txt
+          done
+          files+=("SHA256SUMS.txt")
+
           rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
           kver="$(sed -n 's/^kernel_version=//p' BUILD-INFO.txt)"
           abi="$(sed -n 's/^kernel_abi=//p' BUILD-INFO.txt)"
           nfiles="$(printf '%s\n' "${files[@]}" | wc -l)"
+          pkgurl="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          runurl="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          notes="主线 OpenWrt（openwrt/openwrt main）Hiveton H5000M 固件。
+          # 固定格式的正文。字段集合是刻意的：手里只有这个页面、没有 BUILD-INFO 的
+          # 人，也要能回答"这版基于哪个上游、内核 ABI 多少、装 kmod 要对齐什么"。
+          #
+          # heredoc 的正文写在 YAML 块标量的缩进上（10 空格），YAML 会把它剥掉，
+          # shell 拿到的就是列 0 的纯文本 —— 所以不要在这里手写 `sed 's/^  //'`：
+          # 那一层剥完已经没有缩进可剥了，写了只会让下一个人以为有两层。
+          notes="$(cat <<EOF
+          ## 上游与构建
 
-          上游版本：${rev}
-          内核版本：${kver}
-          内核 ABI：${abi}
-          构建日期：$(date -u +%Y-%m-%d)
+          | 项 | 值 |
+          | --- | --- |
+          | 上游 | openwrt/openwrt main @ ${rev} |
+          | 内核 | ${kver} |
+          | 内核 ABI | ${abi} |
+          | 构建 | $(date -u +%Y-%m-%d) UTC · [run ${GITHUB_RUN_ID}](${runurl}) |
+
+          ## 产物
+
+          | 文件 | 用途 |
+          | --- | --- |
+          | *-squashfs-sysupgrade.bin | **刷机用这个** |
+          | *-initramfs-kernel.bin | 恢复镜像，系统起不来时用 |
+          | *-targz-rootfs.tar.gz | 容器 / chroot 使用 |
+          | SHA256SUMS.txt | 全部产物的 sha256 |
+          | BUILD-INFO.txt | 上游版本、内核 ABI、编译进的开关 |
+
+          ## 校验
+
+          在下载目录里执行：
+
+              sha256sum -c SHA256SUMS.txt
+
+          ## 升级
+
+          从旧版 sysupgrade 直接刷入，配置保留。内核模块（kmod-*）必须与本版内核 ABI
+          ${abi} 一致，否则 apk 会拒绝安装。
 
           已包含 luci-app-h5000m-fancontrol 风扇温控、luci-app-h5000m-netmode 出口优先级、
           以及 ddimension/wwand 5G 拨号器。
 
-          刷机请用 *squashfs-sysupgrade.bin；*initramfs-kernel.bin 是恢复镜像；
-          *targz-rootfs.tar.gz 供容器或 chroot 使用。内核 ABI 见 BUILD-INFO.txt，
-          安装内核模块时必须与固件一致。
+          软件包仓库：${pkgurl}
+          EOF
+          )"
 
-          软件包仓库：https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          if ${is_snapshot}; then
+            notes="> 这是**滚动快照**：每次构建覆盖这一条，不保留历史。要长期使用的版本请取
+          > 版本线（/releases/latest）。
+
+          ${notes}"
+          fi
 
           echo "publishing ${nfiles} files as ${rel_name}"
           printf '  %s\n' "${files[@]}"
 
-          if gh release view "${rel_name}" >/dev/null 2>&1; then
+          if ${is_snapshot}; then
+            # 替换而不是堆积：`--cleanup-tag` 会把上一条快照的 tag 一起删掉，于是 tag
+            # 永远指向产物所属的那次提交。这里既不 force-push（构建 job 用
+            # `persist-credentials: false` 检出，推不动，也不该推），也不会丢东西 ——
+            # 快照按定义就是被取代的那一个。
+            if gh release view "${rel_name}" >/dev/null 2>&1; then
+              gh release delete "${rel_name}" --cleanup-tag --yes
+            fi
+            gh release create "${rel_name}" "${files[@]}" \
+              --title "H5000M 主线快照（openwrt-${rev}）" \
+              --notes "${notes}" \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          elif gh release view "${rel_name}" >/dev/null 2>&1; then
+            # 版本线的 release 由 Release Please 建好，正文是它生成的变更记录。
+            # 这里只把产物挂上去，并把"固件事实"段落补在它**前面**，形成固定格式；
+            # 幂等靠段落标题判重，重复运行不会叠两遍。
             gh release upload "${rel_name}" "${files[@]}" --clobber
+            if ! gh release view "${rel_name}" --json body --jq .body | grep -qF '## 上游与构建'; then
+              old_notes="$(gh release view "${rel_name}" --json body --jq .body)"
+              gh release edit "${rel_name}" --notes "${notes}
+
+          ---
+
+          ${old_notes}"
+            fi
           else
             gh release create "${rel_name}" "${files[@]}" \
-              --title "H5000M mainline OpenWrt ${rel_name}" \
-              --notes "${notes}"
+              --title "H5000M 固件 ${rel_name}" \
+              --notes "${notes}" \
+              --latest
           fi
 
   # Publishes artifacts/apk-repo/ to GitHub Pages, which is what makes the
