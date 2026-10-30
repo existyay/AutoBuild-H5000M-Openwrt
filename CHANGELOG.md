@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.11...v1.2.0) (2026-10-30)
+
+
+### Features
+
+* **ci:** 把 feed 的 ebpf 段喂给钉住的核心，用 --strict-config 验字段 ([#46](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/46)) ([c0b1d64](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/c0b1d64ad16c3f7db5c0df6b4a27c4dd74e51102))
+* **ci:** 门禁先重放上游自己的包内补丁，再验本仓库那一层 ([#59](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/59)) ([d9dfb3c](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/d9dfb3c13de0a3ea261b5124ce9f24d9e45cc6f7))
+
+
+### Bug Fixes
+
+* **build:** clash-rs 核心升到 v0.20.23-alpha，BUILD-INFO 记全代理开关 ([#49](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/49)) ([4211ad8](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/4211ad8f3136f7e1afdcd7e9391822953570c450))
+* **patches:** 重做被上游 10-29 版本移动打断的两个补丁 ([#52](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/52)) ([85bb2ac](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/85bb2ac7274398793ef4f24150e56a656e6d050a))
+* **release:** 发布收成两条线，正文固定字段并附 SHA256SUMS ([#60](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/60)) ([cf471f9](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/cf471f90b8fa9a05bd858c0ebe941a9b5c7cd883))
+
 ## [1.1.11](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.10...v1.1.11) (2026-10-17)
 
 
