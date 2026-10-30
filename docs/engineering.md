@@ -2019,6 +2019,60 @@ find work/b -name '*.rej' -o -name '*.orig' | xargs -r rm -f
 第 5 步不能省。`patch(1)` 允许 2 行 fuzz，`git apply` 一次都不允许 —— 两把尺子
 都要过，才说明补丁的落点是对的而不是猜对的。
 
+#### 5.b 一次实例：24 小时内两个上游版本移动，两个补丁同时被打断（2026-10-30）
+
+`firewall4` 与 `mt76` 都在 2026-10-29 换了 `PKG_SOURCE_VERSION`，两处补丁当场失效。
+失败的样子各不相同，正好各代表一类：
+
+| 包 | 版本 | `patch -p1 -F0 --dry-run` 的原话 | 真实原因 |
+| --- | --- | --- | --- |
+| firewall4 | `b6e515752` → `e6f600c45` | `Hunk #1 FAILED at 293`（`ruleset.uc`） | 上游在 `chain dstnat` 里插了全局 redirect 遍历，并把 `zone.dflags.dnat` 改成 `zone.dflags.dnat \|\| zone.dflags.npt`（新增 NPT 支持）—— 正好是我们插入 `fullcone` 规则那几行的上下文 |
+| mt76 | `467ae2e3f` → `0936617dc` | `Hunk #1 FAILED at 1132`、`Hunk #2 FAILED at 1184` | 上游把 `if (!is_8023 \|\| pid >= MT_PACKET_ID_FIRST)` 重写成了 `host_txd` 变量（配合 mac80211 的 802.3/MLO 改动），并给 802.3 帧显式设 `link_id = IEEE80211_LINK_UNSPECIFIED` |
+
+两个判断必须先做，再动手：
+
+1. **上游是不是已经替我们修了？** 这决定"删补丁"还是"重做补丁"。mt76 这次的答案
+   是**没有**：新代码仍然只在 `STREAM_CLASSIFIED | EXPLICIT_UP` 或 `pid >= FIRST`
+   时才填 TXWI，普通 IPv4 NAT 的 802.3 帧照旧留空，所以 [#1043] 的修复仍然必要。
+   `firewall4` 那次则纯属上下文位移，我们的语义没变。
+2. **新代码里我们这条更宽的路安全吗？** 我们把 `write_txwi` 调用扩大到**所有**
+   802.3 帧，比上游范围大，所以必须确认 `link_id = IEEE80211_LINK_UNSPECIFIED`
+   是被支持的（`mt7996_mac_write_txwi` 里 `if (!mlink && link_id != LINK_UNSPECIFIED)`
+   和 `/* non-MLD frames are LINK_UNSPECIFIED; use the wcid's own link */` 两处），
+   而不是被上游当成"不该出现"的值。确认是后者才好扩大范围。
+
+重做的办法（Windows 上也能做，且比整包解压更准）：**只取补丁自己碰的那几个文件**，
+在临时树里把它们改到"意图状态"，再让 `diff -u` 算 hunk —— 不要手改 hunk 头，
+手改正是补丁悄悄留下过期上下文的原因。
+
+```sh
+# 补丁碰过哪些文件，从 +++ 行里读，不要凭记忆
+grep '^+++ b/' firewall4-patches/100-fullcone-support.patch
+#   root/usr/share/firewall4/templates/ruleset.uc
+#   root/usr/share/firewall4/templates/zone-masq.uc
+#   root/usr/share/ucode/fw4.uc
+
+# 取 main 当前 PKG_SOURCE_VERSION 下的这几个文件（raw.githubusercontent 即可，
+# 不必解压整包 —— 整包里的符号链接在 Windows 上解不出来，这正是本地门禁
+# 只能报"没能验证"的原因）
+for f in $(grep '^+++ b/' firewall4-patches/100-fullcone-support.patch | sed 's|^+++ b/||'); do
+	curl -fsSL "https://raw.githubusercontent.com/openwrt/firewall4/$SHA/$f" -o "work/a/$f"
+done
+
+# 在 work/b 里按意图改，然后生成并自验（-F0：不许 fuzz）
+(cd work && diff -u a/… b/… > new.patch)
+(cd work/a && patch -p1 -F0 --dry-run --forward < ../new.patch); echo "exit=$?"
+```
+
+**一个必须记住的坑**：`mt76-patches/100-mt7996-always-fill-txwi.patch` 有两份。
+`local-build.sh` 安装的是 `firewall4/libnftnl/nftables` 三层补丁，**没有** `mt76-patches`
+这一层；mt76 那份是通过顶层 `patches/0002-h5000m-mt76-txwi-fix.patch` 以"新增文件"
+的形式注入 `package/kernel/mt76/patches/` 的，且是**逐字内嵌**。所以重做 mt76 补丁时
+必须同时重建 `patches/0002`，并验证内嵌副本与独立文件逐字相同（把 0002 里 `@@` 之后
+的行各去掉一个前导 `+`，再与独立文件比较）。
+
+[#1043]: https://github.com/openwrt/mt76/issues/1043
+
 ### 6. 两个已知的、当前不影响行为的隐患
 
 **a) `NFTA_FULLCONE_*` 的属性编号，内核侧与用户态侧不一致。**
@@ -2082,10 +2136,12 @@ MLO 系列）是**跟着 main 自动到来**的，本工程不需要"合并"动�
 | `mediatek: filogic: rename netdevs on hotplug`（新增 `hotplug.d/net/00-netdev-name` + `lib/functions/netdev-name.sh`） | 它把 netdev 改名成设备树里 `label` / `openwrt,netdev-name` 的值。而 `h5000m-wwan-provision` 的 `find_mt5700m()` 是按 `/sys/bus/usb/devices/<dev>:*/net/*` **现读** netdev 名（`${net##*/}`），从不硬编码前缀 | **无冲突**。USB 网卡没有 `of_node`，`netdev_name_set()` 对它直接 `return 0`，根本不会改名；有线侧的名字变化由 profile 的 board.d 一起带走，`h5000m-netmode` 配置的是 uci 接口而不是 netdev 名 |
 | `mediatek: filogic: add dtsi for shared thermal trip levels & cooling maps` | 只新增 `target/linux/mediatek/dts/thermal-trips-cooling-maps.dtsi`，不动 `mt7987.dtsi` | **无冲突**，但 `patches/0001` 的四个 `/delete-node/` 目标必须仍在 `mt7987.dtsi` 里 —— 这一点由 §3 的脚本代查 |
 | `netifd: parse_bool() accepts JSON booleans and numbers` | 与 [七.5](#5-烧录重启后无线默认关闭--已修复) 那个"写进去是 `'0'` 而不是 `0`"的真实 bug 同源 | **有利**：上游放宽了写法。本工程的修复仍然必要（它修的是**写入端**），但这类配置以后更不容易踩 |
-| `mt76` 更新到 `467ae2e3` | `mt76-patches/100-mt7996-always-fill-txwi.patch` 的落点 | **已验证**：零 offset 适用 |
+| `mt76` 更新到 `0936617dc`（2026-10-29，本轮为 `467ae2e3`） | `mt76-patches/100-mt7996-always-fill-txwi.patch` 与 `patches/0002` 的落点 | **2026-10-30 已重做**：上游把判断重写成 `host_txd` 变量，两个 hunk 全部失配；确认上游**没有**采纳 [#1043] 的修复，故按意图重做并对齐新代码。详见 §5.b |
+| `firewall4` 更新到 `e6f600c45`（2026-10-29，新增 NPT 与全局 dstnat redirect） | `firewall4-patches/100-fullcone-support.patch` 的 `ruleset.uc` hunk | **2026-10-30 已重做**：hunk 上下文被新增的 redirect 遍历打断；我们插入的 `fullcone` 规则位于 zone 循环之前，与 `zone.dflags.npt` 无关，语义不变 |
+| `CHKayanami/clash-rs` 已发到 `v0.20.24-alpha`（10-28） | `pin_clash_rs()` 钉的是 `0.20.23_alpha` | **刻意不动**：v0.20.24 的改动集中在 TUN / Android / macOS / shadowsocks，与这块板子的 eBPF + 透明代理 + DNS2 路径无关；而我们现在钉的 v0.20.23 正是带 `fix(ebpf): preserve full-cone UDP return routing by client endpoint` 的那版 |
+| `CHKayanami/clash-rs` 已发到 `v0.20.23-alpha` | `pin_clash_rs()` 原钉 `0.20.10_alpha` | **2026-10-24 已升到 `0.20.23-alpha`**：字段面两版一致、eBPF feature 仍在，理由见上面 6.b |
 | `kernel: backport fix for MTK WED 2.0 WDMA TX hang issue`、`generic: restore EEE support on mt753x and mtk_eth_soc` | 直接落在本工程所用 SoC 的以太网路径上 | 跟随 main 自动到来；属于本工程真正关心的"性能/稳定性"合并，**无需动作** |
 | hostapd / mac80211 的 MLO 系列（约 117 个 commit） | MT7992 是 Wi-Fi 7 | 能力随 main 自动到来；实际生效与否只有真机能答 |
-| `CHKayanami/clash-rs` 已发到 `v0.20.23-alpha` | `pin_clash_rs()` 原钉 `0.20.10_alpha` | **2026-10-24 已升到 `0.20.23-alpha`**：字段面两版一致、eBPF feature 仍在，理由见上面 6.b |
 | `OpenWrt-nikki-rs` 把 `clash-rs/` 挪到仓库根 | 四处锚点里的 `clash-rs/Makefile` | **无冲突**：本仓库的锚点本来就按 `clash-rs/Makefile` 取，2026-10-24 全量核对 4/4 通过 |
 | feed 的 `mixin.uc` 新增 9 个 `dns2.*` 键（`a7be43ab1`） | 核心的 `Dns2Config` / `Dns2UpstreamDef` | **无缺口**：9 个键两版核心都认；`--ebpf-config` 那道检查只覆盖 ebpf，dns2 这一面靠上面的逐字段比对 |
 
