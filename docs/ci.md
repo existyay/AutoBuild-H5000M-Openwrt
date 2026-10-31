@@ -368,3 +368,35 @@ Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish rel
 `compare/...` 链接会 **404**。保留的只有 `v1.1.8`、`v1.1.11` 和此后每个版本线。
 不手工改 CHANGELOG —— 它是 Release Please 的产物，改了下一次发布会覆盖回去。
 
+### 首发实测（2026-10-30，两条线同时落成）
+
+同一晚跑了两次构建：`v1.2.0` 的 tag 构建（`41086598052`）和一次 master 派发
+（`41086891904`），正好把两条线都验了一遍。
+
+| | 版本线 `v1.2.0` | 滚动快照 `snapshot` |
+| --- | --- | --- |
+| 产物 | 7 个（含 `SHA256SUMS.txt`） | 7 个（同） |
+| 正文固定字段 | 4/4 | 4/4 |
+| Release Please 变更记录 | 保留在 `---` 之后 | 不适用 |
+| `prerelease` | false | **true** |
+| `/releases/latest` | **指向它** | 不参与 |
+
+两边都把 `SHA256SUMS.txt` 下载回来，对 `BUILD-INFO.txt` 和 `profiles.json` 重算 sha256，
+与清单逐字节一致（不是"文件在不在"那种检查）。同一次上游 `116414a3`（内核 6.18.55）下，
+两个 release 的 ABI 都是 `47f4328495e6fd3d5fa53865da56bed1`。
+
+快照的"删掉再建"这条路这次没走到（`snapshot` 之前不存在，创建分支直接命中），但它的两半
+都是被证明过的：删 release 这个动作在清理里做了 21 次，`gh release create --target` 在
+`snapshot` 上成功了一次；runner 上的 `gh 2.103.2` 支持 `--cleanup-tag` 和 `--json`。
+
+### 别同时跑两个构建：342/350 分钟
+
+上面那两次并发构建暴露了唯一的真实代价：单次构建历史上是 80–315 分钟（`build.yml` 的
+job 上限 `timeout-minutes: 350`），而并发跑两个时，tag 那个用了 **342 分钟** —— 距离上限
+只剩 8 分钟。再慢一点就是"固件编完、release 没发"这种最难查的失败。
+
+所以：并发派发只用于验证目的，日常不要同时跑两个。目前也没有任何理由需要 —— 周一那条
+定时构建用 `concurrency: build-${{ github.ref }}` 按 ref 分组，tag 与 master 天然不撞，
+`cancel-in-progress` 对 tag 又是关的，所以真要并行不会互相打断，只是慢。
+
+
