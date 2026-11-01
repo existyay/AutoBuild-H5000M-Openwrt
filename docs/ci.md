@@ -448,6 +448,41 @@ LRU 已经够用，这次没有加权限。
 在一个构建还在跑时派发第二个，它进入 `pending` 排队，而不是像以前那样同时抢 4 个核、把两边都
 拖成 342/350 分钟。
 
+#### 修复后的实测（2026-11-01/02，三次构建）
+
+第一次是冷启动（缓存本来就不存在），它证明的是"缓存这次真的写成了"：
+
+| 步骤 | 耗时 | 产出 |
+| --- | --- | --- |
+| Restore build cache | 5.12 分钟 | 无（本来就没有条目） |
+| Build | 196.30 分钟 | 编译完成 |
+| Save download cache | 0.95 分钟 | 3.09 GB |
+| Save ccache | 0.30 分钟 | 0.54 GB |
+| Pack + Save toolchain | 1.28 + 0.13 分钟 | 1.31 GB |
+| Save build cache（ghcr.io） | 10.95 分钟 | 9–15 GB |
+| 总计（run 41311202932） | 220.2 分钟 | `/actions/caches` 0 条 → 3 条 / 4.95 GB |
+
+同一类构建在修复前是 250.1 分钟（run 41086891904），但两次都是冷启动，这 30 分钟的差不能全算在
+这次改动上。能量化的是缓存条目（0 → 3）与 artifact 体积（427.1 → **158.2 MiB**）。
+
+第三次是命中上面全部缓存、并且只出固件的构建（run 41334310916）：
+
+| 步骤 | 耗时 | 说明 |
+| --- | --- | --- |
+| Restore toolchain | 0.18 分钟 | 精确命中 |
+| Restore download cache | 0.45 分钟 | 精确命中，3.09 GB |
+| Restore build cache | 5.57 分钟 | 从 ghcr 拉归档 |
+| Restore ccache | 0.12 分钟 | 0.54 GB |
+| Build | **22.95 分钟** | 增量编译 |
+| Save download cache | skipped | 精确命中时不再重复上传 3 GB |
+| Save toolchain | skipped | 同上 |
+| Save build cache | skipped | `build_repo=false`，不许覆盖完整构建的归档 |
+| 总计 | **35.4 分钟** | 同一台 4 vCPU runner |
+
+这是整轮审阅唯一一个数量级的数字：**250 分钟 → 35 分钟**。"验证仓库能自洽 / 上传 apk 仓库 /
+Attest / 发布 release / 部署 Pages 那几个步骤也全部按设计跳过，说明 `build_repo=false` 的守卫
+没有留下半个发布链。
+
 ### 编译量最大的那块是 apk 仓库，不是固件
 
 固件本身（内核 + 镜像里那几十个包）不是构建时间的全部。同 ABI 的 apk 软件包仓库才是最大的一块：
