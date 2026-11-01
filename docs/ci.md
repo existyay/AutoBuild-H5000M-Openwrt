@@ -448,6 +448,62 @@ LRU 已经够用，这次没有加权限。
 在一个构建还在跑时派发第二个，它进入 `pending` 排队，而不是像以前那样同时抢 4 个核、把两边都
 拖成 342/350 分钟。
 
+#### 修复后的实测（2026-11-01/02，三次构建）
+
+第一次是冷启动（缓存本来就不存在），它证明的是"缓存这次真的写成了"：
+
+| 步骤 | 耗时 | 产出 |
+| --- | --- | --- |
+| Restore build cache | 5.12 分钟 | 无（本来就没有条目） |
+| Build | 196.30 分钟 | 编译完成 |
+| Save download cache | 0.95 分钟 | 3.09 GB |
+| Save ccache | 0.30 分钟 | 0.54 GB |
+| Pack + Save toolchain | 1.28 + 0.13 分钟 | 1.31 GB |
+| Save build cache（ghcr.io） | 10.95 分钟 | 9–15 GB |
+| 总计（run 41311202932） | 220.2 分钟 | `/actions/caches` 0 条 → 3 条 / 4.95 GB |
+
+同一类构建在修复前是 250.1 分钟（run 41086891904），但两次都是冷启动，这 30 分钟的差不能全算在
+这次改动上。能量化的是缓存条目（0 → 3）与 artifact 体积（427.1 → **158.2 MiB**）。
+
+第三次是命中上面全部缓存、并且只出固件的构建（run 41334310916）：
+
+| 步骤 | 耗时 | 说明 |
+| --- | --- | --- |
+| Restore toolchain | 0.18 分钟 | 精确命中 |
+| Restore download cache | 0.45 分钟 | 精确命中，3.09 GB |
+| Restore build cache | 5.57 分钟 | 从 ghcr 拉归档 |
+| Restore ccache | 0.12 分钟 | 0.54 GB |
+| Build | **22.95 分钟** | 增量编译 |
+| Save download cache | skipped | 精确命中时不再重复上传 3 GB |
+| Save toolchain | skipped | 同上 |
+| Save build cache | skipped | `build_repo=false`，不许覆盖完整构建的归档 |
+| 总计 | **35.4 分钟** | 同一台 4 vCPU runner |
+
+这是整轮审阅唯一一个数量级的数字：**250 分钟 → 35 分钟**。"验证仓库能自洽 / 上传 apk 仓库 /
+Attest / 发布 release / 部署 Pages 那几个步骤也全部按设计跳过，说明 `build_repo=false` 的守卫
+没有留下半个发布链。
+
+第四次是**正常路径**（`build_repo` 默认 `true`，含全部 apk 仓库）命中同一批缓存的构建
+（run 41337900867）：
+
+| 步骤 | 耗时 | 说明 |
+| --- | --- | --- |
+| Restore toolchain / download / ccache | 0.18 / 0.67 / 0.10 分钟 | 全部精确命中 |
+| Restore build cache | 6.95 分钟 | |
+| Build | **14.02 分钟** | 连 apk 仓库一起增量编译 |
+| Save download cache / toolchain | skipped | 精确命中不重传 3.09 GB + 1.31 GB |
+| Save ccache | 0.25 分钟 | |
+| Save build cache | 8.38 分钟 | 只有 master 的完整构建会写，正是这条在刷新共享归档 |
+| 总计 | **37.2 分钟** | 修复前同类构建 250.1 分钟 |
+
+这张表要按它的条件读：**上游 revision 与 config 都没变**，所以它是"同一棵树再编一次"的下界。
+一周一次的定时构建会拉到新的上游提交，实际增量比这个大；真正的复现要看下一次定时构建的数字。
+但它已经说明缓存闭环本身值多少：`Restore build cache` 的 7 分钟换掉了 200 多分钟的编译。
+
+顺带一个结论，和直觉相反：缓存热了以后，"只出固件"（35.4 分钟）和"连仓库一起出"（37.2 分钟）
+几乎一样快 —— 因为仓库的那些包也在缓存里，是增量编译。所以 `build_repo=false` 的价值不在日常，
+而在两个场景：缓存冷/失效时少编一半，以及改 config 导致 stamp 全失效时。
+
 ### 编译量最大的那块是 apk 仓库，不是固件
 
 固件本身（内核 + 镜像里那几十个包）不是构建时间的全部。同 ABI 的 apk 软件包仓库才是最大的一块：
