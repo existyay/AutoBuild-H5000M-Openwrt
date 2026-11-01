@@ -435,6 +435,26 @@ LRU 已经够用，这次没有加权限。
 还会静态断言 Restore < Build < Save、Pack < toolchain Save，以及 download exact key/fallback，
 防止以后重排 YAML 时把这次根因重新引回来。
 
+### 编译量最大的那块是 apk 仓库，不是固件
+
+固件本身（内核 + 镜像里那几十个包）不是构建时间的全部。同 ABI 的 apk 软件包仓库才是最大的一块：
+PassWall / PassWall2 / Momo / NeKoBox / HiJpass / SSR+ 这些面板，以及它们要的 xray-core、
+sing-box、mihomo、v2ray-core、shadowsocks-rust、hysteria 等 Go/Rust 内核，都不进镜像，但每次
+构建都要编译出来，否则 `apk add luci-app-passwall` 无处可下。这是产品承诺，默认不动。
+
+调试固件本身的改动时不需要它。手动派发构建时把 `build_repo` 关掉，就只出固件（约省一半时间）：
+
+```bash
+gh workflow run build.yml -f build_repo=false -f publish_release=false
+```
+
+关掉时发布链整条跳过（`Publish release`、`Attest`、`Upload apk repository`、
+`发布 apk 仓库` job，以及"验证仓库能自洽"那一步）：没有对应仓库的固件如果发布出去，它会指向
+Pages 上另一套内核 ABI 的包，`apk add` 撞版本不匹配，看起来像仓库坏了。这种构建只用于验证，
+产物在 Actions artifact 里。
+
+定时构建与 tag 发布永远 `build_repo=true`，与以前完全一致。
+
 ### `run:` 块里不能写 `${{ ... }}`（CI 抓到的，本地抓不到）
 
 同一轮还踩到一个只有 CI 能暴露的坑：门禁自检要用**真实** `build.yml` 的文本做变异，模式串
