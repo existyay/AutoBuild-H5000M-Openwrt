@@ -468,6 +468,17 @@ Pages 上另一套内核 ABI 的包，`apk add` 撞版本不匹配，看起来�
 
 定时构建与 tag 发布永远 `build_repo=true`，与以前完全一致。
 
+这条快速路径在 CI 里从没跑过（工作流把 `ENABLE_REPO_PACKAGES` 硬编码成 `true` 好几个月），
+第一次实测就发现它是坏的：`emit_service` 把没有仓库时并不存在的包名（`nikki-rs` 等）记进
+`EMITTED_PACKAGES`，而 `verify_config` 要求每个名字都必须是真实包，于是死在第一个上面。
+现在记录形态是 `name=mode`，`=n` 的条目跳过存在性/存活两项断言 —— 默认路径里服务包全是
+`=m`，所以对那些构建逐字未变。
+
+顺带堵上一个缓存污染口：`Save build cache` 原来的条件只有"不是 tag"，意味着任何分支派发的
+构建都会覆盖 master 复用的归档，而 build cache 的 tag 由 config/feeds 派生、两种构建模式
+算出来一样 —— 一次 firmware-only 构建就会让下一次定时构建把整个软件包仓库重编一遍。现在它
+与另外三个 Save 步骤一致：只有 master 的完整构建才写。
+
 ### `run:` 块里不能写 `${{ ... }}`（CI 抓到的，本地抓不到）
 
 同一轮还踩到一个只有 CI 能暴露的坑：门禁自检要用**真实** `build.yml` 的文本做变异，模式串
