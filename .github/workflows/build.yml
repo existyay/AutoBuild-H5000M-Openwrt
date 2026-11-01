@@ -44,6 +44,18 @@ on:
         description: 'eBPF 代理内核支持（Nikki-RS 的 cgroup BPF，会改变内核 ABI）'
         type: boolean
         default: true
+      # 编译量最大的一块不是固件，而是同 ABI 的 apk 软件包仓库：PassWall /
+      # PassWall2 / Momo / NeKoBox / HiJpass / SSR+ 以及 xray-core、sing-box、
+      # mihomo、v2ray-core 等 Go/Rust 内核都不进镜像，但要编译出来供 `apk add`。
+      # 调试固件本身的改动时不需要它，关掉它只出固件，构建时间约减半。
+      #
+      # 默认 true：定时构建与 tag 发布保持"固件 + 仓库"这个承诺不变。关掉时
+      # 发布链一并跳过（见下面各步的 if），因为一个没有对应仓库的固件指向 Pages
+      # 上的旧仓库，`apk add` 会撞 ABI 不匹配 —— 这种构建只用于验证，不要刷机。
+      build_repo:
+        description: '同时编译并发布同 ABI 的 apk 仓库（关掉只出固件，约省一半时间，仅用于验证）'
+        type: boolean
+        default: true
 
   push:
     tags:
@@ -408,7 +420,11 @@ jobs:
           ENABLE_UPNP: 'true'
           ENABLE_THEME_ARGON: 'true'
           ENABLE_ADBLOCK: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_adblock) || 'false' }}
-          ENABLE_REPO_PACKAGES: 'true'
+          # The repository packages are the largest single block of build time.
+          # Scheduled and tag builds keep them (that is the product promise: a
+          # device can `apk add` a matching panel later); a manual dispatch can
+          # drop them to validate a firmware change in about half the time.
+          ENABLE_REPO_PACKAGES: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.build_repo) || 'true' }}
           H5000M_APK_REPO_URL: ${{ vars.H5000M_APK_REPO_URL || '' }}
           ENABLE_DOCKERMAN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_dockerman) || 'false' }}
           ENABLE_NIKKI: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.enable_nikki) || 'false' }}
@@ -999,6 +1015,8 @@ jobs:
       # exits 0 with no output, and `apk query --recursive` exits 0 with its
       # failure on stderr.  Neither the exit status nor stdout alone is enough.
       - name: Verify the built repository can satisfy every frontend on its own
+        # Nothing to verify when this build deliberately produced no repository.
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_repo }}
         env:
           BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
         run: |
@@ -1303,7 +1321,9 @@ jobs:
       # WHICH commit produced it, and the SBOM records what went into it.  OIDC
       # means no long-lived signing secret is involved.
       - name: Attest the firmware and the apk repository
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
+        # The subject list names the apk index, which a repository-less build does
+        # not produce; attesting only part of it would silently weaken the claim.
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.publish_release) && (github.event_name != 'workflow_dispatch' || inputs.build_repo) }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
@@ -1311,6 +1331,7 @@ jobs:
             artifacts/apk-repo/packages.adb
 
       - name: Upload apk repository
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_repo }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: apk-repo
@@ -1326,7 +1347,13 @@ jobs:
         # scheduled build produced a firmware and published nothing, which is
         # the case that most needs an artifact nobody has to fetch by hand.
         # Now only an explicit dispatch with the switch off declines.
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
+        #
+        # A build without the apk repository is not published at all: its
+        # firmware would carry a source entry pointing at Pages, where the
+        # packages come from a different build and a different kernel ABI, so
+        # `apk add` would fail with a mismatch that looks like a broken
+        # repository. The Actions artifact is enough for a validation build.
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.publish_release) && (github.event_name != 'workflow_dispatch' || inputs.build_repo) }}
         env:
           GH_TOKEN: ${{ github.token }}
           # Explicit repository rather than git-remote discovery: this step runs
@@ -1495,6 +1522,9 @@ jobs:
   publish-apk-repo:
     name: 发布 apk 仓库
     needs: build
+    # A validation build with `build_repo` off produces no repository, so there is
+    # nothing to deploy and `download-artifact` would fail on a missing name.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_repo }}
     # Always: the firmware's built-in source entry points here, so
     # publishing it is part of producing a usable firmware.
     #
