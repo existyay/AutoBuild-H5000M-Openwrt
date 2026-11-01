@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.2.0...v1.2.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **build:** 无仓库构建时，不要断言只有仓库才有的包名 ([#66](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/66)) ([7421300](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/7421300e61eeeefd514753965b68d86023dc582b))
+
+
+### Performance Improvements
+
+* **ci:** 手动派发可只出固件，编译时间约减半，默认行为不变 ([#65](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/65)) ([cde2eec](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/cde2eec6a656a28db882f54031e7bd7c733077d2))
+* **ci:** 把三处缓存 Save 移到产出之后，构建缓存才真正闭环 ([#63](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/63)) ([8fdd049](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/8fdd049103b90780e1e244eb60f173ea5f323f5a))
+
 ## [1.2.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.1.11...v1.2.0) (2026-10-30)
 
 
