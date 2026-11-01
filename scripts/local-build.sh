@@ -2208,8 +2208,12 @@ config_set_symbol() {
 	fi
 }
 
+# Both directions used to exist here.  config_disable had no caller anywhere in
+# the repository (checked: 68 shell functions, this was the only one), and the
+# only place a package is deliberately turned off writes the line directly — the
+# `CONFIG_PACKAGE_ip-tiny=n` next to the ip-full note — so the wrapper is gone
+# rather than left as an invitation to use a second way of doing it.
 config_enable() { config_set_symbol "CONFIG_PACKAGE_$1" "y"; }
-config_disable() { config_set_symbol "CONFIG_PACKAGE_$1" "n"; }
 
 append_board_stack_config() {
 	local out="$1"
