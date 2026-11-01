@@ -50,14 +50,19 @@ on:
       - 'openwrt-*'
       - 'v*'
 
-# Concurrency: a firmware build costs ~2-3 hours and a runner.  Two builds of
-# the same ref must never run at once — they would contend for the ghcr.io cache
-# tag and the release, and the second would waste the first's work.  Cancelling
-# a superseded run is correct here: only the newest commit's output matters.
-# NOT cancelled for a tag, because a tag build is a release and must finish.
+# One firmware compiler at a time, across ALL refs.
+#
+# `build-${{ github.ref }}` looked sensible but let a release tag and master run
+# together.  The first real two-line release measured the result: the tag build
+# took 342 of its 350 allowed minutes, versus 80–315 minutes historically.  Both
+# runners also pulled and pushed the same multi-GB GHCR cache tag.  Serialising
+# them lowers the time a build is actually consuming a runner and removes the
+# timeout/race; a release queues behind an existing snapshot but is never
+# cancelled.  GitHub keeps at most one pending member of a concurrency group, so
+# repeated manual/scheduled snapshots also collapse instead of forming a queue.
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: h5000m-firmware-build
+  cancel-in-progress: false
 
 # Least privilege at the WORKFLOW level, then widen per job.  A top-level
 # `contents: write` grants every job — and every third-party action inside
@@ -226,43 +231,37 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .toolchain-cache
+          # v2 abandons exact keys that the old, pre-Build Save step may already
+          # have frozen with a stale fallback archive.  Keep v1 only as the last
+          # bootstrap fallback; the first optimised build re-packs it after make
+          # and writes a correct v2 exact key.
           key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
           restore-keys: |
             h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-
             h5000m-toolchain-
-
-      - name: Save toolchain
-        # Only from a trusted ref: `refs/heads/master` or a release tag.  A pull
-        # request — including one from a fork — must not be able to seed a cache
-        # that a later trusted build will unpack.
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .toolchain-cache
-          key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
 
       - name: Restore download cache
         id: dl-restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: openwrt/dl
-          # Deliberately NOT keyed on the upstream revision.  Downloads are
-          # identified by name and hash, so a tarball fetched for one revision is
-          # exactly the same file in the next; adding the revision produced a
-          # second 3.1 GB entry per run for no benefit and pushed the repository
-          # towards its 10 GB cache ceiling.
-          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
-          restore-keys: h5000m-dl-
-
-      - name: Save download cache
-        # Same cache-poisoning rule as the toolchain above: trusted refs only.
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: openwrt/dl
-          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}
+          # Actions caches are immutable.  A permanent exact key saved the first
+          # download set forever: every tarball introduced by a later upstream
+          # revision was fetched on every run and could never be written back to
+          # that key.  Use one exact key per upstream head, then fall back to the
+          # newest cache for the same feed configuration.  A normal incremental
+          # run restores the old 3 GB set, downloads only what changed, and saves
+          # the expanded set under today's key.
+          # Exact key per upstream head, with the same feed configuration as a
+          # prefix fallback.  Actions caches are IMMUTABLE: the previous key had
+          # no revision, so nothing new could ever be written back to it.
+          # Measured on 2026-11-01: the repository held ZERO cache entries — the
+          # old Save step ran before `make download` created openwrt/dl, so every
+          # save failed and every build re-downloaded ~3 GB.
+          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
+          restore-keys: |
+            h5000m-dl-${{ hashFiles('feeds.conf.default') }}-
+            h5000m-dl-
 
       # The build tree is the expensive part: 40 GB of per-package build
       # directories and their .built stamps.  actions/cache cannot hold it —
@@ -282,6 +281,9 @@ jobs:
           GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
+          # Default is deliberately false: a failed/absent pull must not make the
+          # build skip its own archive integrity guard.
+          echo "valid=false" >> "$GITHUB_OUTPUT"
           image="$(echo "${IMAGE}" | tr '[:upper:]' '[:lower:]')/buildcache"
           tag="$(sha256sum configs/h5000m.config feeds.conf.default | sha256sum | cut -c1-16)"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
@@ -339,6 +341,10 @@ jobs:
           else
             echo "cache is complete and intact; the build will reuse it"
             echo "archive: $(stat -c '%s' .buildcache/build-cache.tar.zst) bytes, sha256 $(cut -d' ' -f1 .buildcache/build-cache.sha256)"
+            # local-build.sh can now avoid scanning the same 9–15 GB zstd stream
+            # for a third time.  The CI already checked sha256 AND zstd; tar's
+            # extraction is the remaining structural check.
+            echo "valid=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Restore ccache
@@ -351,15 +357,9 @@ jobs:
           key: h5000m-ccache-${{ github.run_id }}
           restore-keys: h5000m-ccache-
 
-      - name: Save ccache
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.ccache
-            openwrt/.ccache
-          key: h5000m-ccache-${{ github.run_id }}
+      # Cache saves deliberately live AFTER Build below.  Saving here, next to
+      # the restores, used to save an empty directory or merely copy yesterday's
+      # fallback into a new key before make had produced a single new byte.
 
       # The same signing key for every build.  secrets cannot be used in an
       # `if:`, so the step always runs and decides from the environment.
@@ -393,6 +393,7 @@ jobs:
           CCACHE_COMPRESS: 'true'
           TOOLCHAIN_CACHE_ARCHIVE: ${{ github.workspace }}/.toolchain-cache/toolchain.tar.zst
           BUILD_CACHE_ARCHIVE: ${{ github.workspace }}/.buildcache/build-cache.tar.zst
+          BUILD_CACHE_VERIFIED: ${{ steps.buildcache.outputs.valid || 'false' }}
           H5000M_SIGNING_KEY_FILE: ${{ github.workspace }}/.signing/private-key.pem
           THREADS: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && '8' || '4' }}
           # `format('{0}', <bool>)` renders "true"/"false".  Without it the usual
@@ -459,6 +460,37 @@ jobs:
 
           ./scripts/local-build.sh "${args[@]}"
 
+      # Save the two Actions caches only AFTER make has populated them.  The old
+      # order put all three Save steps next to Restore, before Build: on a miss it
+      # saved nothing, and on a fallback hit it merely copied yesterday's bytes
+      # into today's key.  The newly compiled toolchain/downloads/objects never
+      # reached the next run — the exact opposite of a build cache.
+      - name: Save download cache
+        # Trusted refs only: a fork PR may read a cache but cannot seed one that
+        # a later release will consume.  The revision-suffixed immutable key lets
+        # each run persist the old fallback plus only its newly fetched sources.
+        #
+        # An exact hit means those bytes are already stored under this very key:
+        # re-uploading ~3 GB cannot succeed (Actions caches are immutable), so
+        # skip the attempt rather than fail on purpose.  This is the normal case
+        # for a tag build whose revision master already built.
+        if: success() && steps.dl-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: openwrt/dl
+          key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
+
+      - name: Save ccache
+        if: success() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.ccache
+            openwrt/.ccache
+          key: h5000m-ccache-${{ github.run_id }}
+
       # Both halves are required, and this is the part that is easy to get
       # wrong: OpenWrt's completion markers (.built, .prepared) live in
       # build_dir/toolchain-*/, NOT in staging_dir/.  Caching only the installed
@@ -500,11 +532,33 @@ jobs:
           )
           echo "packed $(du -h .toolchain-cache/toolchain.tar.zst | cut -f1)"
 
+      - name: Save toolchain
+        # Only from a trusted ref, and only now that Pack the toolchain has
+        # created the archive.  Saving it before Build was a no-op on a cold run.
+        # Skip an exact hit: the archive is byte-identical and the key is
+        # immutable, so the upload could only waste minutes and then warn.
+        if: success() && steps.toolchain-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .toolchain-cache
+          key: h5000m-toolchain-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
+
       # Pack and push the build tree.  Split into two blobs so a failure to
       # upload one does not lose the other, and so the layers can be reused
       # independently by the registry.
+      #
+      # A tag build does not push it.  Motivated by measurement, not taste: this
+      # step takes 11–17 minutes (9–15 GB to ghcr.io) and it sits on the critical
+      # path of a release, after the firmware already exists.  On this project's
+      # release flow the tag is cut midweek after a snapshot build of the same
+      # upstream revision, which has already pushed the identical cache — so a
+      # tag build would re-upload the same bytes for a cache nothing needs
+      # sooner.  A tag build still RESTORES the cache and still saves the cheap
+      # caches above (toolchain, dl, ccache), so the next week's build is never
+      # worse off than today.
       - name: Save build cache to GitHub Packages
-        if: success()
+        if: success() && !startsWith(github.ref, 'refs/tags/')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1231,8 +1285,15 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: H5000M-mainline-openwrt
+          # apk-repo is a large copy of the package set and is uploaded by the
+          # very next step for Pages.  packages/ is its unsigned input copy and
+          # no downstream job consumes it.  Uploading both inside this firmware
+          # artifact, then apk-repo again, transferred the same package payload
+          # two or three times.  The rootfs script test only needs the tarball.
           path: |
-            artifacts/
+            artifacts/*
+            !artifacts/apk-repo/**
+            !artifacts/packages/**
             build.log
           if-no-files-found: error
           retention-days: 14

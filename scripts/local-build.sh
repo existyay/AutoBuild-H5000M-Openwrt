@@ -850,9 +850,12 @@ seed_cached_build_state() {
 	# Test the compressed stream before spending minutes unpacking it into the
 	# tree.  A truncated archive fails with "premature end" part-way through,
 	# which leaves a half-populated build_dir behind and makes the real cause
-	# hard to see.  The caller (CI) now removes a cache that fails this test, but
-	# keep the check here too: this script is also run by hand.
-	if command -v zstd >/dev/null 2>&1; then
+	# hard to see.  CI has already scanned a 9–15 GB archive twice (sha256 and
+	# zstd -t); BUILD_CACHE_VERIFIED=true lets it skip this third full read.  A
+	# local caller, or a CI restore that was absent/rejected, still checks here.
+	if [ "${BUILD_CACHE_VERIFIED:-false}" = "true" ]; then
+		log "Build cache integrity was already verified by the caller; skipping duplicate zstd scan"
+	elif command -v zstd >/dev/null 2>&1; then
 		if ! zstd -t "$archive" >/dev/null 2>&1; then
 			warn "Cached build state at ${archive} is truncated or corrupt (zstd -t failed); ignoring it"
 			return 0
