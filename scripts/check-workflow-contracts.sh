@@ -47,7 +47,10 @@ checked_calls = 0
 
 def load(path: pathlib.Path):
     """YAML 1.1 会把裸 `on:` 解析成布尔 True，因此要转回字符串键。"""
-    data = yaml.safe_load(path.read_text())
+    # encoding 必须显式给 UTF-8：这些文件里有中文注释，而 pathlib.read_text()
+    # 默认用系统区域编码。在 Linux CI（UTF-8 locale）上一直没问题，在 Windows
+    # 上直接 `UnicodeDecodeError: 'gbk' codec can't decode`，本地就跑不了这个门禁。
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         return {}
     if True in data and "on" not in data:
@@ -70,7 +73,7 @@ DOTTED_HYPHEN = re.compile(
 )
 
 for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml"))):
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for i, line in enumerate(text.splitlines(), 1):
         if line.lstrip().startswith("#"):
             continue
@@ -276,6 +279,99 @@ for path in sorted(wf_dir.glob("*.yml")):
 
 
 # ---------------------------------------------------------------------------
+# 5) `run:` 块里不得出现 `${{ ... }}`
+# ---------------------------------------------------------------------------
+# 两条互相独立的理由，都在 2026-11-01 的 PR #63 上真实触发过：
+#
+#   * 正确性：runner 在执行前会把 run 标量里的表达式整个替换掉。写进 run 块的
+#     字面量（例如用来做文本变异的模式串）已经不是原来的文本 —— 本仓库新加的
+#     缓存门禁自检因此"什么都没改"，只在 CI 暴露，本地抽取脚本跑永远复现不了。
+#   * 安全：zizmor 的 template-injection 审计会报 info 级 findings，门禁以
+#     exit 11 失败（"steps.upstream.outputs.rev may expand into
+#     attacker-controllable code"）。
+#
+# 正确写法是把值经 `env:` 传入，脚本里用 `$VAR` 读。
+GITHUB_EXPR = "$" + "{{"
+
+
+def walk_runs(node, trail):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "run" and isinstance(value, str) and GITHUB_EXPR in value:
+                yield trail, value
+            else:
+                yield from walk_runs(value, trail + [str(key)])
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from walk_runs(value, trail + [str(index)])
+
+
+run_hits = 0
+for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml"))):
+    for trail, body in walk_runs(load(path), []):
+        run_hits += 1
+        first = next(l.strip() for l in body.splitlines() if GITHUB_EXPR in l)
+        problems.append(
+            f"{path.relative_to(root)}: {'/'.join(trail) or 'run'} 的 run 块里出现了表达式 "
+            f"`{first[:70]}`。runner 会先替换再交给 shell：字面量被改掉，且 zizmor 会报 "
+            f"template-injection。请改用 `env:` 传值。"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6) 构建缓存必须在 make 产出之后保存
+# ---------------------------------------------------------------------------
+# 2026-11-01 的性能审阅发现三个 Save 步骤全在 Build 前面：冷缓存保存空目录，
+# fallback 命中时则只是把旧内容换一个 key 再存一次。本轮新编的 toolchain、下载
+# 和 ccache 一个字节都进不了下轮。这不是小优化，而是让整套缓存从未真正闭环。
+build_wf = load(wf_dir / "build.yml")
+build_steps = ((build_wf.get("jobs") or {}).get("build") or {}).get("steps") or []
+step_pos: dict[str, int] = {}
+for i, step in enumerate(build_steps):
+    if isinstance(step, dict) and isinstance(step.get("name"), str):
+        step_pos[step["name"]] = i
+
+required_order = [
+    ("Restore toolchain", "Build"),
+    ("Restore download cache", "Build"),
+    ("Restore ccache", "Build"),
+    ("Build", "Save download cache"),
+    ("Build", "Save ccache"),
+    ("Build", "Pack the toolchain for the cache"),
+    ("Pack the toolchain for the cache", "Save toolchain"),
+]
+for before, after in required_order:
+    if before not in step_pos or after not in step_pos:
+        problems.append(
+            f".github/workflows/build.yml: 缺少缓存时序步骤 `{before}` 或 `{after}`"
+        )
+    elif step_pos[before] >= step_pos[after]:
+        problems.append(
+            f".github/workflows/build.yml: `{before}` 必须在 `{after}` 之前；"
+            "否则会恢复得太晚或在 make 产出缓存前保存空/旧内容"
+        )
+
+# Actions cache is immutable.  The download key must change as upstream moves,
+# while restore-keys retains incremental reuse of the prior download set.
+dl_restore = next(
+    (s for s in build_steps if isinstance(s, dict) and s.get("name") == "Restore download cache"),
+    {},
+)
+dl_key = str(((dl_restore.get("with") or {}).get("key") or ""))
+dl_fallback = str(((dl_restore.get("with") or {}).get("restore-keys") or ""))
+if "steps.upstream.outputs.rev" not in dl_key:
+    problems.append(
+        ".github/workflows/build.yml: download cache 的精确 key 必须含 upstream rev；"
+        "永久 key 是不可变的，后续新增 tarball 永远写不回（2026-11-01 实测该仓库"
+        "一条缓存都没写成，每轮重下约 3 GB）"
+    )
+if "h5000m-dl-" not in dl_fallback:
+    problems.append(
+        ".github/workflows/build.yml: download cache 必须保留 h5000m-dl- fallback，"
+        "否则每个上游 revision 都会重新下载全部源码"
+    )
+
+# ---------------------------------------------------------------------------
 if problems:
     print(f"\033[31m✗ 发现 {len(problems)} 处复用工作流契约问题：\033[0m\n")
     for p in problems:
@@ -286,6 +382,6 @@ if problems:
 print(
     f"\033[32m✓ 复用工作流契约正常\033[0m"
     f"（检查了 {checked_calls} 处 uses: ./ 调用、表达式中的连字符点号访问，"
-    f"以及 runs-on 的浮动标签）"
+    f"runs-on 的浮动标签、run 块里的表达式替换，以及固件缓存的恢复/保存顺序）"
 )
 PY

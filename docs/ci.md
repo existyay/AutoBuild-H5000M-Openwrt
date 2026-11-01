@@ -395,8 +395,57 @@ Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish rel
 job 上限 `timeout-minutes: 350`），而并发跑两个时，tag 那个用了 **342 分钟** —— 距离上限
 只剩 8 分钟。再慢一点就是"固件编完、release 没发"这种最难查的失败。
 
-所以：并发派发只用于验证目的，日常不要同时跑两个。目前也没有任何理由需要 —— 周一那条
-定时构建用 `concurrency: build-${{ github.ref }}` 按 ref 分组，tag 与 master 天然不撞，
-`cancel-in-progress` 对 tag 又是关的，所以真要并行不会互相打断，只是慢。
+所以不能只靠人记得"别同时点"。2026-11-01 的性能审阅把 concurrency 改成全仓单一的
+`h5000m-firmware-build`，且 `cancel-in-progress: false`：tag 与 master 不再并发争同一个 4 核
+runner / GHCR cache；release 可以排队，但绝不会被 snapshot 取消。GitHub 对同一组只保留一个
+pending run，所以重复手动/定时 snapshot 也不会长成无意义的队列。
+
+### 2026-11-01 性能审阅：先让缓存真的闭环
+
+对 `build.yml` 和 `local-build.sh` 逐步计时后，最确定的主因不是 `-j` 太小（GitHub-hosted
+本来就是 4 vCPU / `THREADS=4`），而是三个 `actions/cache/save` 全都写在真正的 `Build`
+**之前**：
+
+| cache | 旧的 Save 时机 | 真正产生新内容的时机 | 后果 |
+| --- | --- | --- | --- |
+| toolchain | Restore 后立刻 Save | Build 编译、随后 Pack | 冷缓存保存空目录；fallback 只复制旧归档 |
+| download | Restore 后立刻 Save | `make download` | 新源码每次重下，永远写不回 |
+| ccache | Restore 后立刻 Save | `make` 编译 | 本轮对象一个字节都进不了下轮 |
+
+现在 Restore 仍在 Build 前；download / ccache Save 移到 Build 成功后；toolchain Save 移到
+Pack 成功后。download exact key 加 upstream revision，并保留同一 feed 配置的 fallback：
+Actions cache 是不可变的，只有这样才能"恢复昨天 3 GB → 只下载新增 → 保存今天扩展后的集合"，
+而不是第一个 key 永久冻住。
+
+**证据**：2026-11-01 直接查 `/actions/caches`，这个仓库的缓存条目数是 **0**。不是"命中率低"，
+是从来没写成过：`Save toolchain` 执行时 `.toolchain-cache` 还不存在（要等 Build 之后的
+Pack 才创建），`Save download cache` 执行时 `openwrt/dl` 也不存在，`actions/cache` 对不存在的
+路径直接失败，而 `continue-on-error: true` 把这件事变成了日志里的一行 Error 注解。于是每次
+构建都在冷启动：3 GB 源码重下、工具链从零编。这解释了 80 分钟与 315 分钟之间那种毫无规律的
+波动 —— 也只有先修这一步，后面任何"加缓存/调并发"才有意义。
+
+缓存预算顺带记一笔：Actions cache 每仓库 10 GB。修好之后 download（约 3 GB，每个 upstream
+revision 一个新键）会累积几代，靠 LRU 回收；旧代无人恢复，正是最先被淘汰的，而每轮都会恢复
+的 toolchain/ccache 会保留。真要精确控制，可以用 `gh cache delete` 加 `actions: write`，但
+LRU 已经够用，这次没有加权限。
+
+同次审阅还去掉了两处纯 I/O 浪费：CI 已对 9–15 GB build cache 做过 sha256 和 `zstd -t` 时，
+`local-build.sh` 不再第三次扫描整个压缩流；firmware artifact 排除已经单独上传给 Pages 的
+`apk-repo/` 和它的 `packages/` 输入副本，不再把同一 APK 集合传两三遍。工作流契约门禁现在
+还会静态断言 Restore < Build < Save、Pack < toolchain Save，以及 download exact key/fallback，
+防止以后重排 YAML 时把这次根因重新引回来。
+
+### `run:` 块里不能写 `${{ ... }}`（CI 抓到的，本地抓不到）
+
+同一轮还踩到一个只有 CI 能暴露的坑：门禁自检要用**真实** `build.yml` 的文本做变异，模式串
+里含 GitHub 表达式。但 runner 在执行前会把 `run:` 标量里的表达式整个替换掉 —— 于是
+`permanent-key` 那个变异"什么都没改"，自检报 `pattern drifted`；zizmor 同时把这一步判为
+`template-injection`（`steps.upstream.outputs.rev may expand into attacker-controllable
+code`，exit 11）。本地把步骤抽出来单独跑是永远复现不了的，因为替换只发生在 runner 上。
+
+两个后果都记在门禁里了：`check-workflow-contracts.sh` 现在断言**所有**工作流的 `run:` 块内
+不出现表达式（`python` 用 `"$" + "{"` 拼出模式，自己也不写这个字面量），自检步骤还多了一个
+`run-expression` 变异用例要求门禁拒绝它。需要传值的正确写法是 `env:` 后脚本读 `$VAR`。
+
 
 

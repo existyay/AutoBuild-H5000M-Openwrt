@@ -162,6 +162,95 @@ jobs:
           expect_detect check-action-inputs.sh ./scripts/check-action-inputs.sh
           expect_detect check-workflow-contracts.sh ./scripts/check-workflow-contracts.sh
 
+          # The cache-ordering assertions added on 2026-11-01 guard a measured
+          # cost: all three actions/cache/save steps ran BEFORE make produced
+          # anything, so the build cache never closed its loop.  Prove they still
+          # reject each way that bug can return, rendering the REAL build.yml one
+          # defect at a time — a hand-written fixture would not track the file it
+          # protects, and its mutation strings would go stale silently.
+          cache_fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture" "$cache_fixture"' EXIT
+          mkdir -p "$cache_fixture/.github/workflows"
+          cp .github/workflows/reusable-script-test.yml "$cache_fixture/.github/workflows/"
+
+          render_cache_fixture() {
+            python3 - "$cache_fixture" "$1" <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          case = sys.argv[2]
+          src = pathlib.Path(".github/workflows/build.yml").read_text(encoding="utf-8")
+          wf = root / ".github" / "workflows" / "build.yml"
+
+          # Never spell a GitHub expression literally in this block (that is, a
+          # dollar sign immediately followed by two opening braces).  The runner
+          # expands those inside `run:` BEFORE bash sees it, so a literal used as
+          # a match pattern has already been substituted — this fixture silently
+          # mutated nothing and the gate reported "pattern drifted", which only
+          # CI could reveal.  zizmor also reports the step as template-injection.
+          D = "$" + "{"
+          HASH = D + "{ hashFiles('feeds.conf.default') }}"
+          REV = D + "{ steps.upstream.outputs.rev }}"
+
+          def move_save_download_before_build(text):
+              lines = text.split("\n")
+              s = next(i for i, l in enumerate(lines) if l.strip() == "- name: Save download cache")
+              e = next(i for i in range(s + 1, len(lines))
+                       if lines[i].strip().startswith("- name: Save ccache"))
+              block = lines[s:e]
+              del lines[s:e]
+              b = next(i for i, l in enumerate(lines) if l.strip() == "- name: Build")
+              return "\n".join(lines[:b] + block + lines[b:])
+
+          if case == "ordering":
+              out = move_save_download_before_build(src)
+          elif case == "permanent-key":
+              # Drop only the revision: the immutable-key defect this file had.
+              old = f"key: h5000m-dl-{HASH}-{REV}"
+              new = f"key: h5000m-dl-{HASH}"
+              out = src.replace(old, new, 1)
+          elif case == "run-expression":
+              # An expression inside a run: block — the defect that made this
+              # fixture mutate nothing, and that zizmor reports.
+              out = src.replace(
+                  "      - name: Build\n",
+                  "      - name: synthetic expression leak\n"
+                  "        run: echo \"" + D + "{ github.sha }}\"\n\n"
+                  "      - name: Build\n",
+                  1,
+              )
+          elif case == "valid":
+              out = src
+          else:
+              raise SystemExit(f"unknown case {case}")
+          if case != "valid" and out == src:
+              raise SystemExit(f"cache-order fixture: {case} did not apply; the pattern drifted")
+          wf.write_text(out, encoding="utf-8")
+          PY
+          }
+
+          check_cache_fixture() {
+            local expect="$1" case="$2"
+            render_cache_fixture "$case"
+            if ./scripts/check-workflow-contracts.sh "$cache_fixture" >/dev/null 2>&1; then
+              actual=accept
+            else
+              actual=reject
+            fi
+            if [ "$actual" = "$expect" ]; then
+              echo "  OK    cache-order gate: ${case} → ${actual}"
+            else
+              echo "::error::cache-order gate: ${case} → ${actual}, expected ${expect}"
+              fail=1
+            fi
+          }
+
+          check_cache_fixture accept valid
+          check_cache_fixture reject ordering
+          check_cache_fixture reject permanent-key
+          check_cache_fixture reject run-expression
+
           [ "$fail" -eq 0 ] || exit 1
           echo "both gates still detect the defects they exist to catch"
 

@@ -64,7 +64,10 @@ could_not_verify: list[str] = []
 
 def load(path: pathlib.Path):
     """YAML 1.1 会把裸 `on:` 解析成布尔 True，因此要转回字符串键。"""
-    data = yaml.safe_load(path.read_text())
+    # UTF-8 explicitly: pathlib.read_text() defaults to the system locale codec,
+    # which is GBK on Windows — this repository's workflows carry Chinese
+    # comments, so the default made the gate unrunnable outside Linux CI.
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         return {}
     if True in data and "on" not in data:
