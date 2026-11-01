@@ -435,6 +435,19 @@ LRU 已经够用，这次没有加权限。
 还会静态断言 Restore < Build < Save、Pack < toolchain Save，以及 download exact key/fallback，
 防止以后重排 YAML 时把这次根因重新引回来。
 
+这两项耗材是查 artifact 大小而不是凭观感判定的（修复前的两次成功构建，run 41086598052 与
+41086891904，数字完全一致）：
+
+| artifact | 修复前 | 说明 |
+| --- | --- | --- |
+| `H5000M-mainline-openwrt` | 427.1 MiB | 里面除了镜像，还塞了一份 apk 仓库和一份未签名的包副本 |
+| `apk-repo` | 260.5 MiB | 同一个仓库，为 Pages 再传一遍 |
+| 合计 | 687.7 MiB | 同一套包在两条 artifact 里各存一份 |
+
+并发那条也用实测确认过：把 `concurrency` 收成全仓一个组（`cancel-in-progress: false`）之后，
+在一个构建还在跑时派发第二个，它进入 `pending` 排队，而不是像以前那样同时抢 4 个核、把两边都
+拖成 342/350 分钟。
+
 ### 编译量最大的那块是 apk 仓库，不是固件
 
 固件本身（内核 + 镜像里那几十个包）不是构建时间的全部。同 ABI 的 apk 软件包仓库才是最大的一块：
@@ -454,6 +467,17 @@ Pages 上另一套内核 ABI 的包，`apk add` 撞版本不匹配，看起来�
 产物在 Actions artifact 里。
 
 定时构建与 tag 发布永远 `build_repo=true`，与以前完全一致。
+
+这条快速路径在 CI 里从没跑过（工作流把 `ENABLE_REPO_PACKAGES` 硬编码成 `true` 好几个月），
+第一次实测就发现它是坏的：`emit_service` 把没有仓库时并不存在的包名（`nikki-rs` 等）记进
+`EMITTED_PACKAGES`，而 `verify_config` 要求每个名字都必须是真实包，于是死在第一个上面。
+现在记录形态是 `name=mode`，`=n` 的条目跳过存在性/存活两项断言 —— 默认路径里服务包全是
+`=m`，所以对那些构建逐字未变。
+
+顺带堵上一个缓存污染口：`Save build cache` 原来的条件只有"不是 tag"，意味着任何分支派发的
+构建都会覆盖 master 复用的归档，而 build cache 的 tag 由 config/feeds 派生、两种构建模式
+算出来一样 —— 一次 firmware-only 构建就会让下一次定时构建把整个软件包仓库重编一遍。现在它
+与另外三个 Save 步骤一致：只有 master 的完整构建才写。
 
 ### `run:` 块里不能写 `${{ ... }}`（CI 抓到的，本地抓不到）
 

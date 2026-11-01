@@ -574,7 +574,18 @@ jobs:
       # caches above (toolchain, dl, ccache), so the next week's build is never
       # worse off than today.
       - name: Save build cache to GitHub Packages
-        if: success() && !startsWith(github.ref, 'refs/tags/')
+        # Only master writes this cache, and never a repository-less build.
+        #
+        # * The tag is derived from the config and feeds, which do not differ
+        #   between the two build modes, so a firmware-only build would overwrite
+        #   the archive the full builds reuse — and the next scheduled build
+        #   would have to recompile the whole package repository, the largest
+        #   block of build time.  Such a build may still READ the cache; the
+        #   extra package tree in it merely goes unused.
+        # * `!startsWith(github.ref, 'refs/tags/')` alone let any branch that
+        #   someone dispatched overwrite it.  The other three Save steps are
+        #   already limited to master/tags; this one now matches them.
+        if: success() && github.ref == 'refs/heads/master' && (github.event_name != 'workflow_dispatch' || inputs.build_repo)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
