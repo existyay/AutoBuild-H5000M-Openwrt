@@ -11,14 +11,17 @@ Hiveton H5000M（Airpi H5000M，MT7987A + MT7992）的**主线 OpenWrt** 固件�
 
 ## 下载与刷机
 
-Releases 页面上只有两种条目：
+Releases 页面上只有两种条目，**都是正式版本**（没有 pre-release）：
 
 | 条目 | 是什么 | 什么时候用 |
 | --- | --- | --- |
-| [`vX.Y.Z`](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) | **版本线**，每个 tag 一份产物，永不覆盖 | 想要一个能引用的版本号、能长期留在设备上 |
-| `snapshot`（预发布） | **滚动快照**，每周构建覆盖这一条，只有最新一版 | 想试上游最新修复，不在乎版本号 |
+| [`vX.Y.Z`](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) | **里程碑**，由 Release Please 打 tag，每个版本一份产物，永不覆盖 | 想要一个固定不动、能长期留在设备上的版本 |
+| `vX.Y.Z-r<revision>` | **滚动版本**，例如 `v1.2.0-r554f401`：项目版本 + 它所基于的上游 revision，每周构建更新，只保留最近 3 条 | 想试上游最新修复；版本号仍然明确 |
 
-两者产物格式相同：
+滚动版本里的 `<revision>` 是上游 `openwrt/openwrt` 的提交前 7 位，所以"同一个版本号 + 同一个
+revision"重编永远是同一条 release（覆盖，不堆积）。`/releases/latest` 指向最新的那一条。
+
+两者产物格式相同，文件名都带版本号（`H5000M-<版本>-r<revision>-...`）：
 
 | 文件 | 用途 |
 | --- | --- |
@@ -26,7 +29,7 @@ Releases 页面上只有两种条目：
 | `*-initramfs-kernel.bin` | 恢复镜像，系统起不来时用 |
 | `*-targz-rootfs.tar.gz` | 容器 / chroot 使用 |
 | `SHA256SUMS.txt` | 全部产物的 sha256，`sha256sum -c SHA256SUMS.txt` 校验 |
-| `BUILD-INFO.txt` | 上游版本与**内核 ABI** |
+| `BUILD-INFO.txt` | 项目版本、上游版本与**内核 ABI** |
 
 在 LuCI 的「系统 → 备份/刷写固件」里刷入 sysupgrade 镜像，或：
 

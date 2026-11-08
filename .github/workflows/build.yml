@@ -124,6 +124,40 @@ jobs:
           # where any later step — including a third-party package's build
           # script — can read it.  Nothing in these jobs pushes to the repo.
           persist-credentials: false
+          # Tags, because they are the only place this project's version exists.
+          # `release-type: simple` in release-please.yml tags `vX.Y.Z` and bumps
+          # CHANGELOG.md, but this repository has no version file, so a shallow
+          # clone can only be described as `r0-<sha>`.  The history is a few
+          # hundred commits of docs and scripts, so fetching it costs well under
+          # a second — and it is what lets every product carry a version number
+          # instead of "unknown".
+          fetch-depth: 0
+
+      # The version every product of this run is stamped with.
+      #
+      # It comes from the tags release-please creates, not from a file that can
+      # drift, and it is resolved ONCE per run and exported, so the image, the
+      # artifact names and the release title cannot disagree.
+      - name: Resolve the project version
+        id: version
+        run: |
+          set -euo pipefail
+          # Newest vX.Y.Z reachable from HEAD, so a build of an older commit
+          # reports that commit's version rather than the newest tag in the repo.
+          latest="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          if [ -z "${latest}" ]; then
+            # No tag reachable (a fork, or a clone without tags).  Fall back to
+            # the newest CHANGELOG entry, then to 0.0.0, so the value is always
+            # something a user can point at.
+            latest="$(sed -n 's/^## \[\([0-9][0-9.]*\)\].*/v\1/p' CHANGELOG.md | head -n1)"
+          fi
+          if [ -n "${latest}" ]; then
+            version="${latest#v}"
+          else
+            version="0.0.0"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "project version: ${version} (from ${latest:-no tag})"
 
       - name: Free disk space
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.runner_type != 'self-hosted' }}
@@ -318,8 +352,45 @@ jobs:
           # Keep oras's stderr: the previous version sent it to /dev/null, which
           # is precisely why a cache that came back truncated on every single run
           # could never be explained from the logs.
-          if ! oras pull "${image}:${tag}" -o .buildcache; then
+          #
+          # RETRY, and tell "absent" apart from "broken transfer".
+          #
+          # The archive is one 9-16 GB blob, so a pull is a single multi-minute
+          # stream that any network hiccup kills.  The original code treated every
+          # failure as "no cache yet": measured on run 41358560480, a transient
+          #
+          #   copy failed: stream error: stream ID 1; PROTOCOL_ERROR
+          #
+          # 6 minutes in was reported as "this run will create it", the 16 GB
+          # archive was discarded, and the build recompiled for 157 minutes.  The
+          # cache's whole value was thrown away by one wobble, and the run looked
+          # slow because of something else.
+          #
+          # An absent tag is a normal first-run state and costs nothing, so it is
+          # detected up front; every other failure is retried three times before
+          # the cache is given up on.
+          pulled=false
+          if oras manifest fetch "${image}:${tag}" >/dev/null 2>&1; then
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              # A partial blob must not be resumed: oras would see a layer of the
+              # wrong length.  Every attempt starts clean.
+              rm -rf .buildcache
+              mkdir -p .buildcache
+              echo "pulling ${image}:${tag} (attempt ${attempt}/3)"
+              if oras pull "${image}:${tag}" -o .buildcache; then
+                pulled=true
+                break
+              fi
+              echo "::warning::build cache pull failed on attempt ${attempt}"
+              attempt=$((attempt + 1))
+              if [ "$attempt" -le 3 ]; then sleep $((attempt * 30)); fi
+            done
+          else
             echo "no build cache at ${image}:${tag} yet — this run will create it"
+          fi
+          if [ "${pulled}" != "true" ]; then
+            echo "::warning::build cache unavailable after retries; this run builds from scratch and refreshes it"
             rm -rf .buildcache
             mkdir -p .buildcache
             exit 0
@@ -366,7 +437,18 @@ jobs:
           path: |
             ~/.ccache
             openwrt/.ccache
-          key: h5000m-ccache-${{ github.run_id }}
+          # Same shape as the download and toolchain caches: configuration and
+          # upstream revision in the key, so a repeat build of the same tree is
+          # an EXACT hit and needs no save.
+          #
+          # The key used to be `h5000m-ccache-${run_id}`, which can never be hit
+          # by the next run.  Two consequences, both visible in the logs: every
+          # build uploaded the whole 0.53 GB directory again ("Cache saved with
+          # key: h5000m-ccache-41358560480"), and every build pushed one more
+          # entry into a 10 GB budget that also holds 3 GB of downloads and
+          # 1.3 GB of toolchain — so the caches it displaced were the ones that
+          # save minutes rather than seconds.
+          key: h5000m-ccache-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
           restore-keys: h5000m-ccache-
 
       # Cache saves deliberately live AFTER Build below.  Saving here, next to
@@ -406,6 +488,10 @@ jobs:
           TOOLCHAIN_CACHE_ARCHIVE: ${{ github.workspace }}/.toolchain-cache/toolchain.tar.zst
           BUILD_CACHE_ARCHIVE: ${{ github.workspace }}/.buildcache/build-cache.tar.zst
           BUILD_CACHE_VERIFIED: ${{ steps.buildcache.outputs.valid || 'false' }}
+          # Stamped into BUILD-INFO.txt as `project_version`, so the product
+          # itself says which release of this project it is, next to the upstream
+          # revision it was built from.
+          PROJECT_VERSION: ${{ steps.version.outputs.version }}
           H5000M_SIGNING_KEY_FILE: ${{ github.workspace }}/.signing/private-key.pem
           THREADS: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && '8' || '4' }}
           # `format('{0}', <bool>)` renders "true"/"false".  Without it the usual
@@ -497,15 +583,42 @@ jobs:
           path: openwrt/dl
           key: h5000m-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
 
+      # Make the compiler cache answer for itself.
+      #
+      # ccache is the only mechanism that can save work across an upstream bump
+      # (the build cache loses its stamps, but identical preprocessed input still
+      # hits), and until now the workflow could not say whether it hit.  These
+      # numbers are what a future change should be judged against: "hits" going
+      # up means a real, measurable saving; a directory that stays a few hundred
+      # megabytes while packages recompile means the cache is not being used at
+      # all and something else is wrong.
+      - name: Report ccache effectiveness
+        if: always() && hashFiles('openwrt/.ccache/**') != ''
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "== ccache directory sizes =="
+          du -sh ~/.ccache openwrt/.ccache 2>/dev/null || true
+          # OpenWrt builds its own ccache in staging_dir and points CCACHE_DIR at
+          # ./.ccache (configs/h5000m.config leaves CCACHE_DIR empty on purpose),
+          # so the stats have to be asked from that binary and that directory;
+          # /usr/bin/ccache would report a different, nearly empty cache.
+          ccache_bin="$(ls -1 openwrt/staging_dir/host/bin/ccache 2>/dev/null | head -n1)"
+          if [ -n "${ccache_bin}" ]; then
+            CCACHE_DIR="$PWD/openwrt/.ccache" "${ccache_bin}" -s || true
+          else
+            echo "no ccache binary in staging_dir/host/bin yet"
+          fi
+
       - name: Save ccache
-        if: success() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        if: success() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && steps.ccache-restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.ccache
             openwrt/.ccache
-          key: h5000m-ccache-${{ github.run_id }}
+          key: h5000m-ccache-${{ hashFiles('configs/h5000m.config', 'feeds.conf.default') }}-${{ steps.upstream.outputs.rev }}
 
       # Both halves are required, and this is the part that is easy to get
       # wrong: OpenWrt's completion markers (.built, .prepared) live in
@@ -1376,26 +1489,40 @@ jobs:
           set -euo pipefail
           cd artifacts
 
-          # 两条发布线，刻意不同：
+          # 两条发布线，都发**正式版本**（没有 pre-release）：
           #
-          #   * tag 构建（refs/tags/*）发的是**版本线**：release 名就是 tag，产物挂到
-          #     Release Please 已经建好的那个 release 上，正文保留它生成的变更记录。
-          #     这些是里程碑，永不覆盖。
-          #   * 计划 / 手动构建发的是**滚动快照**：始终只有一条 `snapshot` 预发布，
-          #     每次构建替换它。
+          #   * tag 构建（refs/tags/v*）→ 里程碑：release 名就是 tag（v1.2.0），
+          #     产物挂到 Release Please 建好的那条上，正文保留它的变更记录，永不覆盖。
+          #   * 计划 / 手动构建 → 滚动版本：`v<项目版本>-r<上游前 7 位>`，例如
+          #     `v1.2.0-r554f401`。tag、标题、文件名三者同源，都是版本号。
           #
-          # 为什么不再一构建一个 `openwrt-<sha>`（2026-10-30 数出来的后果）：六周里
-          # 积了 12 条互相取代的 release，没有一条是能被引用的版本号，Downloads 页
-          # 对"该刷哪个"的回答是一张列表。一条滚动预发布一行就说清了；而
-          # `/releases/latest` 永远指向最新的**版本线**（GitHub 不会把预发布标成
-          # latest），所以 README 里那个链接照旧正确。
-          is_snapshot=false
+          # 为什么不再是叫 `snapshot` 的预发布：预发布带的是"这还不是正式版"的意思，
+          # 但这条线恰恰是设备上真正要刷的那一个，而且 Downloads 页面上它没有版本号，
+          # 只有一个每次都在变的名字。改成 `v<版本>-r<revision>` 之后：
+          #   - 每个产物都能被一个版本号引用；
+          #   - 同一个上游 revision 重编落在同一个 tag 上，重跑是替换而不是堆积；
+          #   - 它是正式版，所以 `/releases/latest` 指向的就是最新可刷的固件。
+          #
+          # 滚动线只保留最近 3 条，旧的连同 tag 一起删掉 —— 它们按定义已经被取代了。
+          # 里程碑 tag 不在此列，它们永不被自动删除。
+          rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
+          kver="$(sed -n 's/^kernel_version=//p' BUILD-INFO.txt)"
+          abi="$(sed -n 's/^kernel_abi=//p' BUILD-INFO.txt)"
+          project_version="$(sed -n 's/^project_version=//p' BUILD-INFO.txt)"
+          case "${project_version}" in
+            '' | unknown) project_version="0.0.0" ;;
+          esac
+          rev7="${rev:0:7}"
+
+          is_rolling=false
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             rel_name="${GITHUB_REF_NAME}"
+            rel_title="H5000M ${GITHUB_REF_NAME}"
           else
-            rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
-            rel_name="snapshot"
-            is_snapshot=true
+            rev7="${rev:0:7}"
+            rel_name="v${project_version}-r${rev7}"
+            rel_title="H5000M ${project_version}（openwrt ${rev7}）"
+            is_rolling=true
           fi
 
           # Every firmware image this build produces, not just the sysupgrade
@@ -1403,13 +1530,25 @@ jobs:
           # what a chroot or container needs.  A release that carries only one of
           # them means fetching the Actions artifact — which expires — for the
           # others.
+          #
+          # The three images get a `H5000M-<project version>-r<revision>-` prefix
+          # so a file sitting in someone's download directory says which build it
+          # is without opening it.  The metadata files keep their names: docs and
+          # scripts refer to `BUILD-INFO.txt` / `profiles.json` by those names.
+          image_prefix="H5000M-${project_version}-r${rev7}-"
           files=()
-          while IFS= read -r -d '' f; do files+=("$f"); done \
+          while IFS= read -r -d '' f; do
+            base="${f#./}"
+            cp -p "$f" "${image_prefix}${base}"
+            files+=("./${image_prefix}${base}")
+          done \
             < <(find . -maxdepth 1 -type f \( \
                   -name '*squashfs-sysupgrade.bin' \
                   -o -name '*initramfs-kernel.bin' \
-                  -o -name '*targz-rootfs.tar.gz' \
-                  -o -name 'BUILD-INFO.txt' \
+                  -o -name '*targz-rootfs.tar.gz' \) -print0)
+          while IFS= read -r -d '' f; do files+=("$f"); done \
+            < <(find . -maxdepth 1 -type f \( \
+                  -name 'BUILD-INFO.txt' \
                   -o -name 'profiles.json' \
                   -o -name '*.manifest' \) -print0)
 
@@ -1428,9 +1567,6 @@ jobs:
           done
           files+=("SHA256SUMS.txt")
 
-          rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
-          kver="$(sed -n 's/^kernel_version=//p' BUILD-INFO.txt)"
-          abi="$(sed -n 's/^kernel_abi=//p' BUILD-INFO.txt)"
           nfiles="$(printf '%s\n' "${files[@]}" | wc -l)"
           pkgurl="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
           runurl="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -1446,6 +1582,7 @@ jobs:
 
           | 项 | 值 |
           | --- | --- |
+          | 版本 | ${project_version} |
           | 上游 | openwrt/openwrt main @ ${rev} |
           | 内核 | ${kver} |
           | 内核 ABI | ${abi} |
@@ -1459,7 +1596,7 @@ jobs:
           | *-initramfs-kernel.bin | 恢复镜像，系统起不来时用 |
           | *-targz-rootfs.tar.gz | 容器 / chroot 使用 |
           | SHA256SUMS.txt | 全部产物的 sha256 |
-          | BUILD-INFO.txt | 上游版本、内核 ABI、编译进的开关 |
+          | BUILD-INFO.txt | 版本、上游版本、内核 ABI、编译进的开关 |
 
           ## 校验
 
@@ -1479,9 +1616,10 @@ jobs:
           EOF
           )"
 
-          if ${is_snapshot}; then
-            notes="> 这是**滚动快照**：每次构建覆盖这一条，不保留历史。要长期使用的版本请取
-          > 版本线（/releases/latest）。
+          if ${is_rolling}; then
+            notes="> 版本 **${project_version}**，基于 openwrt main @ ${rev7}。
+          > 这是滚动发布：同一个上游 revision 重编会更新这一条，滚动线只保留最近 3 条。
+          > 需要长期不变的里程碑版本，见 Releases 里的 \`vX.Y.Z\`。
 
           ${notes}"
           fi
@@ -1489,19 +1627,29 @@ jobs:
           echo "publishing ${nfiles} files as ${rel_name}"
           printf '  %s\n' "${files[@]}"
 
-          if ${is_snapshot}; then
-            # 替换而不是堆积：`--cleanup-tag` 会把上一条快照的 tag 一起删掉，于是 tag
-            # 永远指向产物所属的那次提交。这里既不 force-push（构建 job 用
-            # `persist-credentials: false` 检出，推不动，也不该推），也不会丢东西 ——
-            # 快照按定义就是被取代的那一个。
+          if ${is_rolling}; then
+            # 替换而不是堆积：同一个 (项目版本, 上游 revision) 只会有一条 release，
+            # 重编就是覆盖它，所以 tag 永远指向产物所属的那次提交。这里既不
+            # force-push（构建 job 用 `persist-credentials: false` 检出，推不动，
+            # 也不该推），也不需要 --latest 之外的额外标记 —— 它本来就是正式版。
             if gh release view "${rel_name}" >/dev/null 2>&1; then
               gh release delete "${rel_name}" --cleanup-tag --yes
             fi
             gh release create "${rel_name}" "${files[@]}" \
-              --title "H5000M 主线快照（openwrt-${rev}）" \
+              --title "${rel_title}" \
               --notes "${notes}" \
-              --prerelease \
+              --latest \
               --target "${GITHUB_SHA}"
+
+            # 只留最近 3 条滚动发布，旧的连 tag 一起删。`gh release list` 按创建时间
+            # 倒序，所以刚建好的这条在前面，跳过前 3 条即为要淘汰的。
+            # 里程碑 tag（v1.2.0 这种没有 -r 后缀的）永远不匹配这个模式。
+            stale="$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-r[0-9a-f]+$' | tail -n +4 || true)"
+            for old in ${stale}; do
+              echo "pruning superseded rolling release ${old}"
+              gh release delete "${old}" --cleanup-tag --yes || true
+            done
           elif gh release view "${rel_name}" >/dev/null 2>&1; then
             # 版本线的 release 由 Release Please 建好，正文是它生成的变更记录。
             # 这里只把产物挂上去，并把"固件事实"段落补在它**前面**，形成固定格式；
@@ -1517,7 +1665,7 @@ jobs:
             fi
           else
             gh release create "${rel_name}" "${files[@]}" \
-              --title "H5000M 固件 ${rel_name}" \
+              --title "${rel_title}" \
               --notes "${notes}" \
               --latest
           fi

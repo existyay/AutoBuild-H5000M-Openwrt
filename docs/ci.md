@@ -316,21 +316,44 @@ release-please-action 自己不能签名（它唯一的签名相关输入就是 
 ## 十、发布：两条线 + 固定格式
 
 Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish release` 步骤按
-`GITHUB_REF` 决定走哪条：
+`GITHUB_REF` 决定走哪条。两条线**都是正式版本**，没有 `--prerelease`：
 
 | 线 | 触发 | release 名 | 行为 |
 | --- | --- | --- | --- |
-| 版本线 | Release Please 打的 tag（`v*`）→ tag 构建 | 就是那个 tag | 只上传产物，正文字段化（见下），正文里的变更记录来自 Release Please，**永不覆盖** |
-| 滚动快照 | 计划构建 / 手动 dispatch | `snapshot` | 先 `gh release delete --cleanup-tag` 再重建，标记 `--prerelease` |
+| 里程碑 | Release Please 打的 tag（`v*`）→ tag 构建 | 就是那个 tag（`v1.2.0`） | 只上传产物，正文字段化（见下），正文里的变更记录来自 Release Please，**永不覆盖** |
+| 滚动版本 | 计划构建 / 手动 dispatch | `v<项目版本>-r<上游前 7 位>`，如 `v1.2.0-r554f401` | 同 tag 重编先 `gh release delete --cleanup-tag` 再重建；只保留最近 3 条，`--latest` |
+
+### 版本号从哪来
+
+本仓库没有版本文件：`release-please.yml` 用 `release-type: simple`，产物是
+`CHANGELOG.md` + 一个 `vX.Y.Z` 的 tag（见 #47 的实际 diff，只动了 CHANGELOG）。所以版本号
+**只能从 tag 读**，而 `actions/checkout` 默认是浅克隆、不带 tag。
+
+因此构建 job 的 checkout 改成 `fetch-depth: 0`（历史是几百个 docs/scripts 提交，代价远小于
+一秒），然后由一个 `Resolve the project version` 步骤解析一次、写进 `GITHUB_OUTPUT`，
+再分发给三处使用：`BUILD-INFO.txt` 的 `project_version=`、产物文件名前缀、release 的 tag 与标题。
+解析顺序是 `git describe --tags --abbrev=0 --match 'v[0-9]*'` → CHANGELOG 最新条目 →
+`0.0.0`，所以在 fork（没有 tag）里也能得到一棵能自洽的字符串，而不是 `unknown`。
+
+产物文件名因此变成 `H5000M-<版本>-r<revision>-<原文件名>`；`BUILD-INFO.txt` / `profiles.json`
+/ `*.manifest` 保持原名，因为文档和脚本按名字引用它们。
+
+### 为什么滚动线不再是叫 `snapshot` 的预发布
+
+`--prerelease` 的含义是"这还不是正式版"，但这条线恰恰是设备上真正要刷的那一个；而且它在
+Downloads 页上没有版本号，只有一个每次都在变的名字。改成 `v<版本>-r<revision>` 之后：
+
+* 每个产物都能被一个版本号引用（`v1.2.0-r554f401`）；
+* 同一个（项目版本, 上游 revision）重编落在**同一个 tag** 上，重跑是覆盖而不是堆积；
+* 它是正式版，所以 `/releases/latest` 直接指向最新可刷的固件 —— 不再依赖"GitHub 不会把
+  预发布标成 latest"这个间接保证。
 
 ### 为什么砍掉了 `openwrt-<sha>`
 
 到 2026-10-30 为止，一构建一条 `openwrt-<sha>` 在六周里积了 **12 条**互相取代的 release：
-没有一条是能引用的版本号，Downloads 页对"该刷哪个"的回答是一张列表。改成一条滚动预发布
-之后，这个问题在结构上不会再出现 —— 不是靠定期手工清理。
-
-`/releases/latest` 不受影响：GitHub 不会把预发布标成 latest，所以那个链接永远指向最新的
-**版本线**，README 里的下载入口照旧正确。
+没有一条是能引用的版本号，Downloads 页对"该刷哪个"的回答是一张列表。现在的形状保留了当时
+那个教训 —— 不堆积 —— 但把"可引用的版本号"加了回来：同 revision 覆盖、且滚动线只保留
+最近 3 条（超出时步骤自己 `gh release delete --cleanup-tag`），清理是结构性的，不靠人记得。
 
 ### 正文的固定字段
 
@@ -371,9 +394,10 @@ Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish rel
 ### 首发实测（2026-10-30，两条线同时落成）
 
 同一晚跑了两次构建：`v1.2.0` 的 tag 构建（`41086598052`）和一次 master 派发
-（`41086891904`），正好把两条线都验了一遍。
+（`41086891904`），正好把两条线都验了一遍。下表是**当时**的形状（滚动线还是 `snapshot`
+预发布，2026-11-08 改成了带版本号的正式发布，见上文）：
 
-| | 版本线 `v1.2.0` | 滚动快照 `snapshot` |
+| | 里程碑 `v1.2.0` | 滚动快照 `snapshot`（旧形状） |
 | --- | --- | --- |
 | 产物 | 7 个（含 `SHA256SUMS.txt`） | 7 个（同） |
 | 正文固定字段 | 4/4 | 4/4 |
@@ -428,6 +452,47 @@ Pack 才创建），`Save download cache` 执行时 `openwrt/dl` 也不存在，
 revision 一个新键）会累积几代，靠 LRU 回收；旧代无人恢复，正是最先被淘汰的，而每轮都会恢复
 的 toolchain/ccache 会保留。真要精确控制，可以用 `gh cache delete` 加 `actions: write`，但
 LRU 已经够用，这次没有加权限。
+
+#### 2026-11-05：一次网络抖动丢掉 16 GB，被记成了"上游变了"
+
+上一节修的是"缓存写不进去"。这一节是反过来的一半：**读不出来**，而且日志把它说成了一件
+正常的事。run 41358560480 的 `Build` 用了 157 分钟，看起来像"上游前进了所以要重编"，我去翻
+日志才看到真正的一行：
+
+```
+Downloaded  1d3232e1f99b build-cache.sha256
+Error: failed to copy content to .../.buildcache/build-cache.tar.zst:
+  copy failed: stream error: stream ID 1; PROTOCOL_ERROR; received from peer
+no build cache at ghcr.io/.../buildcache:767c8fa7714419f9 yet — this run will create it
+```
+
+缓存**存在**，拉到第 6 分钟时流断了。而当时的分支是 `if ! oras pull; then echo "还没有缓存"`：
+任何失败都被当成"第一轮，没有缓存"，于是 16 GB 归档被删掉、整个构建从零开始。一次网络抖动
+的代价被结算成两个半小时，而日志里的结论是错的 —— 这一条比时钟更值得修。
+
+现在分成两件事：先 `oras manifest fetch` 判断 tag 是否**真的**不存在（第一次构建的正常状态，
+代价为零），存在则最多重试 3 次（30/60/90 秒退避，每次前先清空 `.buildcache` —— 半截 blob
+不能续传，oras 会看到一个长度不对的层），全部失败才放弃并打 `::warning::`，明确说"这次从零
+构建并刷新缓存"。这样日志不会再撒谎。
+
+#### ccache 的键从来没被命中过
+
+同一批计时里发现的第二处"重复"：`Restore ccache` 的 key 是 `h5000m-ccache-${run_id}`，
+run_id 每轮都变，所以**永远只能是 restore-keys 的 fallback 命中**，而 Save 又会把整整
+0.53 GB 目录重新上传成一个新条目。日志里两行连着：
+
+```
+Cache hit for restore-key: h5000m-ccache-41337900867
+Cache saved with key: h5000m-ccache-41358560480
+```
+
+后果不只是每次多传 0.5 GB：这个仓库的 10 GB 预算里同时放着 3 GB download、1.3 GB toolchain，
+每轮再多一个 ccache 条目，被挤掉的正是真正省时间的那些。现在键改成
+`h5000m-ccache-<config+feeds 哈希>-<upstream revision>`，与 download/toolchain 同构：同树重编
+是精确命中、精确命中就不 Save。另外加了一个 `Report ccache effectiveness` 步骤，把
+`openwrt/.ccache` 的体积和 `ccache -s` 的命中率打进日志 —— 下一步该不该动 ccache，
+应该有数字可看，而不是靠猜（OpenWrt 用自己编的 ccache 和 `./.ccache`，所以要问的是
+`staging_dir/host/bin/ccache`，`/usr/bin/ccache` 报的是另一个几乎空的缓存）。
 
 同次审阅还去掉了两处纯 I/O 浪费：CI 已对 9–15 GB build cache 做过 sha256 和 `zstd -t` 时，
 `local-build.sh` 不再第三次扫描整个压缩流；firmware artifact 排除已经单独上传给 Pages 的
