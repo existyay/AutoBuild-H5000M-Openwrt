@@ -3548,6 +3548,11 @@ PY
 
 	cat >"${dest}/BUILD-INFO.txt" <<EOF
 project=AutoBuild-H5000M-Openwrt
+# This project's own release number, next to the upstream one it was built from.
+# The two answer different questions — "which firmware build is this" and "which
+# OpenWrt tree is it based on" — and the release title, the artifact names and
+# this file all spell the first one the same way, from the same variable.
+project_version=${PROJECT_VERSION:-unknown}
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
 upstream_track=${OPENWRT_TRACK}
