@@ -57,7 +57,7 @@
 ```sh
 OPENWRT_REPO_URL=https://github.com/openwrt/openwrt.git
 OPENWRT_REPO_BRANCH=main
-OPENWRT_PINNED_REVISION=99426e4f7d5d712f4cb488dddf30a0af32e6d407
+OPENWRT_PINNED_REVISION=058da17df29908b0b77099fb522823723c385a5e
 OPENWRT_TRACK=latest          # latest 跟随分支头；pinned 复现指定 revision
 OPENWRT_TARGET=mediatek
 OPENWRT_SUBTARGET=filogic
@@ -1975,6 +1975,38 @@ prefix 再用 `PKG_CONFIG_PATH` 指过去；flex/bison 是硬依赖，因为补�
 同一套补丁对 `e1bd479b`（main 在这轮对齐期间又前进的一个 revision）同样全部通过
 —— 那两个 revision 的 `nftables` / `libnftnl` 版本与 `firewall4` / `mt76` 的
 `PKG_SOURCE_VERSION` 都相同，所以这是预期结果，而不是巧合。
+
+### 4.1 2026-11-17 再次对齐：`99426e4` → `058da17`（中间 1074 个上游提交）
+
+`latest` 模式本来就每周跟随 main 的 head，所以**产物的内容一直是最新的**；落后的是
+`--pinned` 那条可复现线所指向的基线。这轮同步先回答"上游到底动了什么、哪些会碰到我们
+的补丁"，再决定基线推到哪。
+
+| 关注点 | 旧 pin `99426e4` | 这次核对的 `main` / 构建用时 | 结论 |
+| --- | --- | --- | --- |
+| nftables | `1.1.7-r1` | `1.1.7-r1`（`393efd7` 的 main） | **没变**，两层用户态补丁逐字节照旧 |
+| libnftnl | `1.3.2-r1` | `1.3.2-r1` | **没变** |
+| firewall4 | 源码 `b6e5157` | 源码 `3722ead`（"firewall4: update to Git HEAD (2026-11-08)"） | **变了**，所以要重验 `firewall4-patches/100-fullcone-support.patch` |
+| kernel | 6.18.60 | 6.18.60（`LINUX_VERSION-6.18 = .60`） | **没变** |
+| mediatek 目标 | `KERNEL_PATCHVER=6.18` | 同上 | 没变 |
+
+`firewall4` 是唯一需要动手的地方，而它恰好有三种可能的结果，所以按证据分两步走：
+
+1. 本地对着上游那份源码（`3722ead` 的 `templates/ruleset.uc`、`templates/zone-masq.uc`、
+   `ucode/fw4.uc`）跑 `git apply --check` —— **通过**，不需要重生成；
+2. 更硬的证据是 2026-11-16 那次定时构建：它构建的 revision 是
+   `058da17df29908b0b77099fb522823723c385a5e`，已经包含 firewall4 的那次更新，
+   而它带着这个补丁跑满了整条发布链（镜像 + apk 仓库 + attest + release + Pages）。
+
+所以基线取 `058da17`：它同时满足"补丁对齐"和"整条构建真的过了"这两件事，而 main 今天
+的 head（`393efd7d74ce`，2026-11-16 22:51 UTC）还没有构建证据，等下一次定时构建再去认。
+
+还有一条这一轮才发现的自身缺陷，记在这里而不是藏进提交里：滚动发布的 tag 形状是
+`v<版本>-r<revision>`，而解析"项目版本"用的是 `git describe --tags --match 'v[0-9]*'`，
+于是**上一次滚动发布自己的 tag 被当成了下一个版本号**，三次构建滚成
+`v1.2.0-r706052b` → `v1.2.0-r706052b-rdd72c4c` → `v1.2.0-r706052b-r058da17`，
+`BUILD-INFO.txt` 里写着 `project_version=1.2.0-r706052b`。现在解析只认里程碑 tag
+（`^v[0-9]+\.[0-9]+\.[0-9]+$`），滚动 tag 不再能回流成版本号。
 
 nftables 那一层为什么会断，是一个值得记住的例子：1.1.7 给 `src/scanner.l` 里的
 NAT 关键字规则加了 `<*>` 起始条件前缀，于是老补丁的上下文行不再匹配。**另外十二
