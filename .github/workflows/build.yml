@@ -142,13 +142,24 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          # Newest vX.Y.Z reachable from HEAD, so a build of an older commit
-          # reports that commit's version rather than the newest tag in the repo.
-          latest="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          # ONLY milestone tags count, and the filter is explicit because the
+          # rolling releases this very workflow creates are also `v*` tags.
+          #
+          # Measured failure this fixes: `git describe --tags --abbrev=0 --match
+          # 'v[0-9]*'` matched the previous build's own rolling tag, so the
+          # version fed back into itself three builds in a row —
+          #
+          #   v1.2.0-r706052b  ->  v1.2.0-r706052b-rdd72c4c  ->  v1.2.0-r706052b-r058da17
+          #
+          # and the 2026-11-16 release's BUILD-INFO.txt said
+          # `project_version=1.2.0-r706052b`, which is not a version anybody can
+          # cite.  A milestone tag is exactly `vX.Y.Z`: no suffix, no revision.
+          latest="$(git tag --list --merged HEAD \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
           if [ -z "${latest}" ]; then
-            # No tag reachable (a fork, or a clone without tags).  Fall back to
-            # the newest CHANGELOG entry, then to 0.0.0, so the value is always
-            # something a user can point at.
+            # No milestone tag reachable (a fork, or a clone without tags).  Fall
+            # back to the newest CHANGELOG entry, then to 0.0.0, so the value is
+            # always something a user can point at.
             latest="$(sed -n 's/^## \[\([0-9][0-9.]*\)\].*/v\1/p' CHANGELOG.md | head -n1)"
           fi
           if [ -n "${latest}" ]; then
