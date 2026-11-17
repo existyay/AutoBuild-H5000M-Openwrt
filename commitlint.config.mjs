@@ -73,7 +73,15 @@ export default {
 				'accel',      // luci-app-h5000m-accel
 				'docs',
 				'release',
-				'deps'
+				'deps',
+				// Dependabot derives this scope from the dependency CLASS, so a
+				// devDependency bump is authored as `chore(deps-dev): bump X`.
+				// Without it here the gate rejects a commit nobody wrote —
+				// measured on PR #51 (`chore(deps-dev): bump fast-uri from
+				// 3.1.8 to 3.1.9`), which was green everywhere except this
+				// check.  The alternative, teaching the gate to ignore bot
+				// commits, would also silence a genuinely malformed bot commit.
+				'deps-dev'
 			]
 		],
 		'scope-empty': [1, 'never'],
