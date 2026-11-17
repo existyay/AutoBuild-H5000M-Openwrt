@@ -576,6 +576,42 @@ Attest / 发布 release / 部署 Pages 那几个步骤也全部按设计跳过�
 几乎一样快 —— 因为仓库的那些包也在缓存里，是增量编译。所以 `build_repo=false` 的价值不在日常，
 而在两个场景：缓存冷/失效时少编一半，以及改 config 导致 stamp 全失效时。
 
+#### 2026-11-17：两次 `Failed to save` 其实是磁盘满了
+
+`v1.3.0` 的 tag 构建里出现三个告警，其中两个长这样：
+
+```
+/usr/bin/tar: cache.tzst: Wrote only 4096 of 10240 bytes
+/usr/bin/tar: Child returned status 70
+/usr/bin/tar: Error is not recoverable: exiting now
+##[warning]Failed to save: "/usr/bin/tar" failed with error: ... exit code 2
+```
+
+它读起来像 `actions/cache` 的缺陷，实际是**磁盘写满**：那次恢复的 build cache 归档是
+`24,824,387,899` 字节（24.8 GB），而 `seed_cached_build_state()` 解包后把归档留在原地，
+于是轮到保存 download（约 3 GB）与 toolchain（约 4 GB）缓存时没有空间。
+
+现在归档在解包成功后由脚本删掉（`BUILD_CACHE_ARCHIVE_DISPOSABLE=true`，只有 CI 会设它；
+本地调用者手工放的归档不该被脚本删）。这是**在建编译开始前**就释放 24 GB，所以它同时
+降低了编译中途 ENOSPC 的风险。保存前还加了一步 `Report free disk before the cache saves`，
+把 `df` 与几个目录的体积打进日志 —— 下次出现同样的 `tar` 错误，原因一眼可见，不用再解
+码 `Child returned status 70`。
+
+第三个告警是好事：
+
+```
+pulling ...:767c8fa7714419f9 (attempt 1/3)
+Error: failed to copy content ... PROTOCOL_ERROR; received from peer
+pulling ...:767c8fa7714419f9 (attempt 2/3)
+Downloaded  7cceda1c93cd build-cache.tar.zst
+build-cache.tar.zst: OK
+downloaded 24G from ...
+```
+
+同一类抖动，上次（run 41358560480）代价是 157 分钟的重编，这次代价是 30 秒的退避。中间
+attempt 的提示也从 `::warning::` 降成 `::notice::`：重试成功是预期行为，只有三次都失败才
+值得一个警告。
+
 ### 编译量最大的那块是 apk 仓库，不是固件
 
 固件本身（内核 + 镜像里那几十个包）不是构建时间的全部。同 ABI 的 apk 软件包仓库才是最大的一块：

@@ -871,6 +871,29 @@ seed_cached_build_state() {
 	mkdir -p "${SRC}"
 	if tar -I zstd -xf "$archive" -C "${SRC}"; then
 		log "Build cache applied; unchanged packages should be skipped"
+		# Hand the archive's disk back before the build needs it.
+		#
+		# The archive grew to 24.8 GB (measured: 24,824,387,899 bytes on the
+		# 2026-11-17 v1.3.0 build).  Unpacking it left BOTH the archive and the
+		# expanded tree on the runner, and the two cache saves after the build
+		# then died with
+		#
+		#   /usr/bin/tar: cache.tzst: Wrote only 4096 of 10240 bytes
+		#   /usr/bin/tar: Child returned status 70
+		#   ##[warning]Failed to save: "/usr/bin/tar" failed ... exit code 2
+		#
+		# which reads like a cache-action bug and is really a full disk.  The
+		# archive is disposable once unpacked: CI recreates it in the Save step,
+		# and the workflow's own sha256/zstd checks have already run against it.
+		#
+		# Opt-in, because a LOCAL caller may be reusing a hand-made archive and
+		# deleting someone's file is not this script's business.
+		if is_true "${BUILD_CACHE_ARCHIVE_DISPOSABLE:-false}"; then
+			freed="$(du -h "$archive" 2>/dev/null | cut -f1)"
+			rm -f "$archive"
+			log "Removed the restored build cache archive (${freed}) to leave room for the save steps"
+			log "Disk available now: $(df -BG --output=avail / 2>/dev/null | tail -1 | tr -d ' ' || echo '?')"
+		fi
 	else
 		warn "Could not unpack the cached build state; everything will rebuild"
 	fi

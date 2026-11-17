@@ -393,7 +393,7 @@ jobs:
                 pulled=true
                 break
               fi
-              echo "::warning::build cache pull failed on attempt ${attempt}"
+              echo "::notice::build cache pull attempt ${attempt} failed; retrying"
               attempt=$((attempt + 1))
               if [ "$attempt" -le 3 ]; then sleep $((attempt * 30)); fi
             done
@@ -499,6 +499,12 @@ jobs:
           TOOLCHAIN_CACHE_ARCHIVE: ${{ github.workspace }}/.toolchain-cache/toolchain.tar.zst
           BUILD_CACHE_ARCHIVE: ${{ github.workspace }}/.buildcache/build-cache.tar.zst
           BUILD_CACHE_VERIFIED: ${{ steps.buildcache.outputs.valid || 'false' }}
+          # The restored archive is 24-25 GB and CI owns it: local-build.sh deletes
+          # it after unpacking, so the ~24 GB comes back before the build and the
+          # cache saves that follow it.  Without this the two `actions/cache/save`
+          # steps after the build died with ENOSPC ("Wrote only 4096 of 10240
+          # bytes", exit code 2) on the 2026-11-17 v1.3.0 build.
+          BUILD_CACHE_ARCHIVE_DISPOSABLE: 'true'
           # Stamped into BUILD-INFO.txt as `project_version`, so the product
           # itself says which release of this project it is, next to the upstream
           # revision it was built from.
@@ -578,6 +584,26 @@ jobs:
       # saved nothing, and on a fallback hit it merely copied yesterday's bytes
       # into today's key.  The newly compiled toolchain/downloads/objects never
       # reached the next run — the exact opposite of a build cache.
+      # Say how much room the saves have, before they run.
+      #
+      # Two `actions/cache/save` steps failed on the 2026-11-17 v1.3.0 build with
+      #
+      #   /usr/bin/tar: cache.tzst: Wrote only 4096 of 10240 bytes
+      #   ##[warning]Failed to save: "/usr/bin/tar" failed ... exit code 2
+      #
+      # which looks like a cache-action bug and is a full disk.  The restore of a
+      # 24.8 GB archive is why (see BUILD_CACHE_ARCHIVE_DISPOSABLE: the script now
+      # deletes it after unpacking).  This line is what makes the next occurrence
+      # readable at a glance instead of needing the tar error decoded.
+      - name: Report free disk before the cache saves
+        if: always()
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "== free space before the cache saves =="
+          df -BG --output=source,size,used,avail,pcent / | tail -n +1
+          du -sh .buildcache openwrt/dl openwrt/.ccache .toolchain-cache 2>/dev/null || true
+
       - name: Save download cache
         # Trusted refs only: a fork PR may read a cache but cannot seed one that
         # a later release will consume.  The revision-suffixed immutable key lets
