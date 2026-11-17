@@ -318,10 +318,14 @@ release-please-action 自己不能签名（它唯一的签名相关输入就是 
 Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish release` 步骤按
 `GITHUB_REF` 决定走哪条。两条线**都是正式版本**，没有 `--prerelease`：
 
-| 线 | 触发 | release 名 | 行为 |
-| --- | --- | --- | --- |
-| 里程碑 | Release Please 打的 tag（`v*`）→ tag 构建 | 就是那个 tag（`v1.2.0`） | 只上传产物，正文字段化（见下），正文里的变更记录来自 Release Please，**永不覆盖** |
-| 滚动版本 | 计划构建 / 手动 dispatch | `v<项目版本>-r<上游前 7 位>`，如 `v1.2.0-r554f401` | 同 tag 重编先 `gh release delete --cleanup-tag` 再重建；只保留最近 3 条，`--latest` |
+| 线 | 触发 | release 名 | 标题 | 行为 |
+| --- | --- | --- | --- | --- |
+| 里程碑 | Release Please 打的 tag（`v*`）→ tag 构建 | 就是那个 tag（`v1.3.0`） | `H5000M 1.3.0` | 只上传产物，正文字段化（见下），正文里的变更记录来自 Release Please，**永不覆盖**；标题被统一成 `H5000M <版本>`（Release Please 建的是裸 tag，和滚动条目不成一套） |
+| 滚动构建 | 计划构建 / 手动 dispatch | `v<项目版本>-r<上游前 7 位>`，如 `v1.3.0-r2a425bf` | `H5000M 1.3.0 build 2a425bf` | 同 tag 重编先 `gh release delete --cleanup-tag` 再重建；只保留最近 **1** 条，`--latest` |
+
+标题格式是刻意统一的：两种条目都以 `H5000M <版本>` 开头，滚动的那条多一个 `build <7 位>`。
+没有它，同版本的两个条目在列表里只差一个后缀，很难扫；早期那种
+`H5000M 1.2.0（openwrt 706052b）` 把英文 revision 塞进全角括号里，又宽又难认，已不再使用。
 
 ### 版本号从哪来
 
@@ -360,7 +364,7 @@ Downloads 页上没有版本号，只有一个每次都在变的名字。改成 
 到 2026-10-30 为止，一构建一条 `openwrt-<sha>` 在六周里积了 **12 条**互相取代的 release：
 没有一条是能引用的版本号，Downloads 页对"该刷哪个"的回答是一张列表。现在的形状保留了当时
 那个教训 —— 不堆积 —— 但把"可引用的版本号"加了回来：同 revision 覆盖、且滚动线只保留
-最近 3 条（超出时步骤自己 `gh release delete --cleanup-tag`），清理是结构性的，不靠人记得。
+最近 **1** 条（超出时步骤自己 `gh release delete --cleanup-tag`），清理是结构性的，不靠人记得。
 
 ### 正文的固定字段
 

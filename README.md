@@ -11,12 +11,15 @@ Hiveton H5000M（Airpi H5000M，MT7987A + MT7992）的**主线 OpenWrt** 固件�
 
 ## 下载与刷机
 
-Releases 页面上只有两种条目，**都是正式版本**（没有 pre-release）：
+Releases 页面上只有两种条目，**都是正式版本**（没有 pre-release），标题都以 `H5000M <版本>` 开头：
 
-| 条目 | 是什么 | 什么时候用 |
-| --- | --- | --- |
-| [`vX.Y.Z`](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) | **里程碑**，由 Release Please 打 tag，每个版本一份产物，永不覆盖 | 想要一个固定不动、能长期留在设备上的版本 |
-| `vX.Y.Z-r<revision>` | **滚动版本**，例如 `v1.2.0-r554f401`：项目版本 + 它所基于的上游 revision，每周构建更新，只保留最近 3 条 | 想试上游最新修复；版本号仍然明确 |
+| 条目 | 标题长这样 | 是什么 | 什么时候用 |
+| --- | --- | --- | --- |
+| [`vX.Y.Z`](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) | `H5000M 1.3.0` | **里程碑**，由 Release Please 打 tag，每个版本一份产物，永不覆盖 | 想要一个固定不动、能长期留在设备上的版本 |
+| `vX.Y.Z-r<revision>` | `H5000M 1.3.0 build 2a425bf` | **滚动构建**，同一个项目版本 + 它所基于的上游 revision；每周构建更新，**只保留最新 1 条** | 想试上游最新修复；版本号仍然明确 |
+
+带 `build <7 位>` 的是滚动构建（`<7 位>` 是上游 `openwrt/openwrt` 提交的前 7 位），不带的是里程碑，
+所以同版本的两个条目也不会看混。`/releases/latest` 指向最新可刷的那一条。
 
 滚动版本里的 `<revision>` 是上游 `openwrt/openwrt` 的提交前 7 位，所以"同一个版本号 + 同一个
 revision"重编永远是同一条 release（覆盖，不堆积）。`/releases/latest` 指向最新的那一条。

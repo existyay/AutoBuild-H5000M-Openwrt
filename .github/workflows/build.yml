@@ -1542,6 +1542,21 @@ jobs:
           #
           # 滚动线只保留最近 3 条，旧的连同 tag 一起删掉 —— 它们按定义已经被取代了。
           # 里程碑 tag 不在此列，它们永不被自动删除。
+          # 两条发布线，都发**正式版本**（没有 pre-release），而且标题统一成
+          # `H5000M <版本>` 开头 —— 列表页上一眼能按版本比较，而不是三种写法混在一起：
+          #
+          #   里程碑 tag  v1.3.0            → 标题  H5000M 1.3.0
+          #   滚动构建     v1.3.0-r2a425bf  → 标题  H5000M 1.3.0 build 2a425bf
+          #
+          # 标题里的 `build <7 位>` 就是上游 openwrt 的 revision 前缀，所以两个都是
+          # 1.3.0 的条目也能分清：没有 `build` 的是里程碑（Release Please 打的 tag，
+          # 正文是它的变更记录，永不覆盖），带 `build` 的是跟随上游 main 的滚动构建。
+          #
+          # 早期版本的标题是 `H5000M 1.2.0（openwrt 706052b）`，全角括号夹着英文
+          # revision，在列表页里既宽又难扫；现在已经没有那种写法了。
+          #
+          # 滚动线只保留最近 1 条，旧的连同 tag 一起删掉 —— 它按定义就是"当前这一份"，
+          # 留 3 条只会让列表里堆着眼看要被取代的条目。里程碑 tag 不在此列，永不自动删除。
           rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
           kver="$(sed -n 's/^kernel_version=//p' BUILD-INFO.txt)"
           abi="$(sed -n 's/^kernel_abi=//p' BUILD-INFO.txt)"
@@ -1554,11 +1569,10 @@ jobs:
           is_rolling=false
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             rel_name="${GITHUB_REF_NAME}"
-            rel_title="H5000M ${GITHUB_REF_NAME}"
+            rel_title="H5000M ${project_version}"
           else
-            rev7="${rev:0:7}"
             rel_name="v${project_version}-r${rev7}"
-            rel_title="H5000M ${project_version}（openwrt ${rev7}）"
+            rel_title="H5000M ${project_version} build ${rev7}"
             is_rolling=true
           fi
 
@@ -1655,13 +1669,13 @@ jobs:
 
           if ${is_rolling}; then
             notes="> 版本 **${project_version}**，基于 openwrt main @ ${rev7}。
-          > 这是滚动发布：同一个上游 revision 重编会更新这一条，滚动线只保留最近 3 条。
-          > 需要长期不变的里程碑版本，见 Releases 里的 \`vX.Y.Z\`。
+          > 这是滚动构建：同一个上游 revision 重编会更新这一条，滚动线只保留最近 1 条。
+          > 需要固定不动的版本，见 Releases 里不带 \`build\` 的 \`H5000M <版本>\`。
 
           ${notes}"
           fi
 
-          echo "publishing ${nfiles} files as ${rel_name}"
+          echo "publishing ${nfiles} files as ${rel_name} (${rel_title})"
           printf '  %s\n' "${files[@]}"
 
           if ${is_rolling}; then
@@ -1678,20 +1692,22 @@ jobs:
               --latest \
               --target "${GITHUB_SHA}"
 
-            # 只留最近 3 条滚动发布，旧的连 tag 一起删。`gh release list` 按创建时间
-            # 倒序，所以刚建好的这条在前面，跳过前 3 条即为要淘汰的。
-            # 里程碑 tag（v1.2.0 这种没有 -r 后缀的）永远不匹配这个模式。
+            # 只留最近 1 条滚动构建，旧的连 tag 一起删。`gh release list` 按创建时间
+            # 倒序，所以刚建好的这条在前面，跳过第 1 条即为要淘汰的。
+            # 里程碑 tag（v1.3.0 这种没有 -r 后缀的）永远不匹配这个模式。
             stale="$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-r[0-9a-f]+$' | tail -n +4 || true)"
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-r[0-9a-f]+$' | tail -n +2 || true)"
             for old in ${stale}; do
               echo "pruning superseded rolling release ${old}"
               gh release delete "${old}" --cleanup-tag --yes || true
             done
           elif gh release view "${rel_name}" >/dev/null 2>&1; then
             # 版本线的 release 由 Release Please 建好，正文是它生成的变更记录。
-            # 这里只把产物挂上去，并把"固件事实"段落补在它**前面**，形成固定格式；
-            # 幂等靠段落标题判重，重复运行不会叠两遍。
+            # 这里把产物挂上去、把标题统一成 `H5000M <版本>`（Release Please 建的
+            # 标题是裸 tag `v1.3.0`，和滚动条目的 `H5000M … build …` 不成一套），
+            # 再把"固件事实"段落补在正文**前面**；幂等靠段落标题判重。
             gh release upload "${rel_name}" "${files[@]}" --clobber
+            gh release edit "${rel_name}" --title "${rel_title}"
             if ! gh release view "${rel_name}" --json body --jq .body | grep -qF '## 上游与构建'; then
               old_notes="$(gh release view "${rel_name}" --json body --jq .body)"
               gh release edit "${rel_name}" --notes "${notes}
