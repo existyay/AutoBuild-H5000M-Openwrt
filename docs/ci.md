@@ -338,6 +338,13 @@ Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish rel
 产物文件名因此变成 `H5000M-<版本>-r<revision>-<原文件名>`；`BUILD-INFO.txt` / `profiles.json`
 / `*.manifest` 保持原名，因为文档和脚本按名字引用它们。
 
+一处必须记住的环形依赖：滚动发布的 tag 自己就是 `v<版本>-r<revision>`，所以"从 tag 解析版本"
+不能用 `git describe --tags --match 'v[0-9]*'`——它会选中上一次构建自己留下的滚动 tag，把
+它当成下一个版本号。实测滚了三轮（`v1.2.0-r706052b` → `v1.2.0-r706052b-rdd72c4c` →
+`v1.2.0-r706052b-r058da17`），2026-11-16 的 `BUILD-INFO.txt` 里 `project_version` 变成
+`1.2.0-r706052b`，不是任何人能引用的版本。现在只认里程碑 tag：`git tag --list --merged HEAD`
+后用 `^v[0-9]+\.[0-9]+\.[0-9]+$` 过滤、`sort -V | tail -1` 取最高。
+
 ### 为什么滚动线不再是叫 `snapshot` 的预发布
 
 `--prerelease` 的含义是"这还不是正式版"，但这条线恰恰是设备上真正要刷的那一个；而且它在
