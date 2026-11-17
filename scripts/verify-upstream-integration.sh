@@ -178,6 +178,21 @@ fetch_raw() {
 	curl_retry "$RAW/$REF/$1" -o "$2"
 }
 
+# api_status <API 路径> <目标文件> —— 打印 HTTP 状态码，正文写进 <目标文件>。
+#
+# 不复用 curl_retry：那里带 -f，404 会变成"curl 失败"，而这里必须把
+# "这个目录不存在"（多数包本来就没有 patches/，是常态）和"网络/配额出错"
+# （环境问题）区分开。把两者混成一种，就会出现"因为 404 而报没能验证"的噪声。
+api_status() {
+	local -a auth=()
+	local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+	if [ -n "$token" ]; then
+		auth=(-H "Authorization: Bearer ${token}")
+	fi
+	curl -sSL --connect-timeout "$CONNECT_TIMEOUT" --retry 3 --retry-delay 3 \
+		--retry-all-errors "${auth[@]}" -o "$2" -w '%{http_code}' "$API/$1" 2>/dev/null
+}
+
 # pkgvar <openwrt 树内 Makefile 路径> <变量名>
 pkgvar() {
 	curl_retry "$RAW/$REF/$1" | sed -n "s/^$2:=//p" | head -n1
@@ -211,6 +226,76 @@ verify_patches() {
 			drift "$(basename "$p") 对 ${dir##*/}：上下文对不上，patch 报 FAILED —— 上游改了它碰的文件。"
 		fi
 	done
+	return 0
+}
+
+# apply_upstream_package_patches <源码目录> <包在树内的路径>
+#
+# 上游也会往 package/<pkg>/patches/ 里放补丁，而 openwrt 是按文件名顺序把
+# 那个目录**整批**打上去的。所以"本仓库的补丁能打上"必须在**打完之后**的树上
+# 成立，在纯净源码上成立只是个假绿：上游哪天在同一个包里动了我们碰的那几行，
+# 门禁仍会报 OK，真实构建却会失败。
+#
+# 这个洞在 2026-10-29 第一次成立：上游开始往 package/kernel/mt76/patches/
+# 放 100- 与 101- 两个补丁。当时它们只碰 mt76x02/mt76x2u，与本仓库的 mt7996
+# 不冲突，但"恰好不冲突"不能当作判定依据。
+#
+# 上游补丁按 openwrt 自己的口径打（patch(1) 默认 fuzz 2）；本仓库的补丁仍然
+# 用 -F0，两把尺子不同是有意的：上游补丁的落点由上游负责，我们的必须零 fuzz。
+#
+# 返回 1 表示"这一层没法给出可信判定"，调用方应跳过本层的判定，而不是在
+# 半打好的树上验出个 drift 来。
+apply_upstream_package_patches() {
+	local dir="$1" pkgpath="$2"
+	local code json="$WORK/upstream-patches.json" tmp name url applied=0
+
+	mkdir -p "$WORK"
+	code="$(api_status "repos/openwrt/openwrt/contents/${pkgpath}/patches?ref=${REF}" "$json")"
+	if [ "$code" = "404" ]; then
+		log "上游 ${pkgpath} 没有自己的 patches/ 目录"
+		return 0
+	fi
+	if [ "$code" != "200" ]; then
+		unverified "取不到 ${pkgpath}/patches 的清单（HTTP ${code}），这一层没有可信判定"
+		return 1
+	fi
+	if ! python3 -c 'import sys' >/dev/null 2>&1; then
+		unverified "没有可用的 python3，无法解析 ${pkgpath}/patches 清单"
+		return 1
+	fi
+
+	local list
+	list="$(python3 -X utf8 -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+	data = json.load(fh)
+for e in (data if isinstance(data, list) else []):
+	if e.get("type") == "file" and e["name"].endswith(".patch"):
+		print("%s\t%s" % (e["name"], e["download_url"]))
+' "$json" | sort)"
+	if [ -z "$list" ]; then
+		log "上游 ${pkgpath}/patches/ 是空目录"
+		return 0
+	fi
+
+	while IFS="$(printf '\t')" read -r name url; do
+		[ -n "$name" ] || continue
+		tmp="$WORK/upstream-$(printf '%s' "$name" | tr '/' '_')"
+		if ! curl_retry "$url" -o "$tmp"; then
+			unverified "取不到上游补丁 ${pkgpath}/patches/${name}"
+			return 1
+		fi
+		if ! ( cd "$dir" && patch -p1 --forward --batch <"$tmp" >"$WORK/upstream-patch.log" 2>&1 ); then
+			sed 's/^/        /' "$WORK/upstream-patch.log" >&2 || true
+			unverified "上游自己的 ${pkgpath}/patches/${name} 打不进 ${dir##*/}，这一层的判定不可信"
+			return 1
+		fi
+		applied=$((applied + 1))
+	done <<EOF
+$list
+EOF
+
+	log "先打了上游自己的 ${applied} 个补丁（${pkgpath}/patches/），再验本仓库那一层"
 	return 0
 }
 
@@ -279,6 +364,7 @@ check_fullcone_userspace() {
 		log "没有补丁，跳过"
 		return 0
 	fi
+	apply_upstream_package_patches "$dir" "${mkpath%/Makefile}" || return 0
 	verify_patches "$dir" "${patches[@]}"
 	return 0
 }
@@ -310,6 +396,7 @@ check_git_packages() {
 		log "没有补丁，跳过"
 		return 0
 	fi
+	apply_upstream_package_patches "$dir" "${mkpath%/Makefile}" || return 0
 	verify_patches "$dir" "${patches[@]}"
 	return 0
 }

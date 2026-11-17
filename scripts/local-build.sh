@@ -133,13 +133,19 @@ ENABLE_PROXY_REPOS="${ENABLE_PROXY_REPOS:-true}"
 # main() so that it exists before the first clone under `set -u`.
 CLONED_PACKAGE_DIRS=()
 
-# Every CONFIG_PACKAGE_* name emit_service writes, recorded as it is written.
-# verify_config() checks each against the build system's own package list,
-# because `make defconfig` drops an unknown CONFIG_PACKAGE_x line with exit 0
-# and NO diagnostic — so an upstream rename would otherwise shrink the
+# Every CONFIG_PACKAGE_* name emit_service writes, recorded as `name=mode` as it
+# is written.  verify_config() checks each against the build system's own package
+# list, because `make defconfig` drops an unknown CONFIG_PACKAGE_x line with exit
+# 0 and NO diagnostic — so an upstream rename would otherwise shrink the
 # repository while every other gate stayed green.  Measured: three names in
 # these emit lists (shadowsocksr-libev, simple-obfs, shadowsocks-libev) were
 # bare names no package ever had, and every build dropped all three silently.
+#
+# The mode is part of the record because `=n` entries are a different claim: they
+# say "keep this out", not "build this".  With ENABLE_REPO_PACKAGES=false the
+# trees that define most of these names are not cloned at all, so asserting their
+# existence would fail every repository-less build for a name that is deliberately
+# switched off.  Only `=m` / `=y` entries are asserted.
 EMITTED_PACKAGES=()
 
 # ------------------------------------------------- first-boot product setup ---
@@ -850,9 +856,12 @@ seed_cached_build_state() {
 	# Test the compressed stream before spending minutes unpacking it into the
 	# tree.  A truncated archive fails with "premature end" part-way through,
 	# which leaves a half-populated build_dir behind and makes the real cause
-	# hard to see.  The caller (CI) now removes a cache that fails this test, but
-	# keep the check here too: this script is also run by hand.
-	if command -v zstd >/dev/null 2>&1; then
+	# hard to see.  CI has already scanned a 9–15 GB archive twice (sha256 and
+	# zstd -t); BUILD_CACHE_VERIFIED=true lets it skip this third full read.  A
+	# local caller, or a CI restore that was absent/rejected, still checks here.
+	if [ "${BUILD_CACHE_VERIFIED:-false}" = "true" ]; then
+		log "Build cache integrity was already verified by the caller; skipping duplicate zstd scan"
+	elif command -v zstd >/dev/null 2>&1; then
 		if ! zstd -t "$archive" >/dev/null 2>&1; then
 			warn "Cached build state at ${archive} is truncated or corrupt (zstd -t failed); ignoring it"
 			return 0
@@ -2199,8 +2208,12 @@ config_set_symbol() {
 	fi
 }
 
+# Both directions used to exist here.  config_disable had no caller anywhere in
+# the repository (checked: 68 shell functions, this was the only one), and the
+# only place a package is deliberately turned off writes the line directly — the
+# `CONFIG_PACKAGE_ip-tiny=n` next to the ip-full note — so the wrapper is gone
+# rather than left as an invitation to use a second way of doing it.
 config_enable() { config_set_symbol "CONFIG_PACKAGE_$1" "y"; }
-config_disable() { config_set_symbol "CONFIG_PACKAGE_$1" "n"; }
 
 append_board_stack_config() {
 	local out="$1"
@@ -2426,7 +2439,7 @@ EOF
 		is_true "$on" && mode="y"
 		for pkg in "$@"; do
 			printf 'CONFIG_PACKAGE_%s=%s\n' "$pkg" "$mode" >>"$out"
-			EMITTED_PACKAGES+=("$pkg")
+			EMITTED_PACKAGES+=("${pkg}=${mode}")
 		done
 	}
 
@@ -2956,7 +2969,7 @@ assert_repo_only() {
 }
 
 verify_config() {
-	local pkg fe missing=()
+	local pkg fe entry checked missing=()
 
 	build_required_packages
 	for pkg in "${REQUIRED_PACKAGES[@]}"; do
@@ -3030,17 +3043,25 @@ verify_config() {
 		assert_repo_only clash-rs
 	}
 
-	# Every name emit_service wrote has to be a real package.  defconfig drops
-	# an unknown CONFIG_PACKAGE_x line with exit 0 and no diagnostic, so an
-	# upstream rename would otherwise shrink the repository while every check
-	# above stayed green.  tmp/.packageinfo is the build system's own package
-	# list — the same source the emit lists were taken from.
+	# Every name emit_service wrote as `=m` or `=y` has to be a real package.
+	# defconfig drops an unknown CONFIG_PACKAGE_x line with exit 0 and no
+	# diagnostic, so an upstream rename would otherwise shrink the repository
+	# while every check above stayed green.  tmp/.packageinfo is the build
+	# system's own package list — the same source the emit lists were taken
+	# from.  `=n` entries are skipped: they are "keep this out" declarations, and
+	# when the repository is off the trees defining them are not installed.
 	if [ -s "${SRC}/tmp/.packageinfo" ]; then
-		for pkg in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
+		checked=0
+		for entry in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
+			pkg="${entry%%=*}"
+			if [ "${entry##*=}" = "n" ]; then
+				continue
+			fi
+			checked=$((checked + 1))
 			grep -qFx "Package: ${pkg}" "${SRC}/tmp/.packageinfo" ||
 				die "emit_service wrote CONFIG_PACKAGE_${pkg}, but no package by that name exists — upstream renamed or removed it; update the emit lists in scripts/local-build.sh"
 		done
-		log "Verified ${#EMITTED_PACKAGES[@]} emitted package names exist upstream"
+		log "Verified ${checked} emitted package names exist upstream"
 	else
 		warn "no ${SRC}/tmp/.packageinfo — skipping the emitted-package existence check"
 	fi
@@ -3058,7 +3079,11 @@ verify_config() {
 	#
 	# Checking here turns a three-hour discovery into a few-minute one, and
 	# names the package instead of leaving it to a downstream symptom.
-	for pkg in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
+	for entry in ${EMITTED_PACKAGES[@]+"${EMITTED_PACKAGES[@]}"}; do
+		pkg="${entry%%=*}"
+		if [ "${entry##*=}" = "n" ]; then
+			continue
+		fi
 		config_symbol_present "$pkg" ||
 			die "emitted package ${pkg} did not survive defconfig, so it would be missing from the published repository. Look for a Kconfig 'recursive dependency' involving it (kconfig resolves such a loop by dropping a symbol) or a dependency nothing satisfies."
 	done
@@ -3523,6 +3548,11 @@ PY
 
 	cat >"${dest}/BUILD-INFO.txt" <<EOF
 project=AutoBuild-H5000M-Openwrt
+# This project's own release number, next to the upstream one it was built from.
+# The two answer different questions — "which firmware build is this" and "which
+# OpenWrt tree is it based on" — and the release title, the artifact names and
+# this file all spell the first one the same way, from the same variable.
+project_version=${PROJECT_VERSION:-unknown}
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
 upstream_track=${OPENWRT_TRACK}

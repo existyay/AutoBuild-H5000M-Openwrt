@@ -139,14 +139,17 @@ Nikki-RS 的三处默认值改写都是**上下文补丁**，所以上游的一�
 `scripts/verify-upstream-integration.sh` 把这类判断变成一条自动断言：它按
 mainline **当前真正会构建的版本**取源码（nftables / libnftnl 的官方 tarball，
 并用上游 Makefile 的 `PKG_HASH` 校验 tarball 就是那一份；firewall4 / mt76 取
-`PKG_SOURCE_VERSION` 的快照），用 `patch -p1 -F0 --dry-run --forward` 逐条试，
-再把 Nikki-RS 的四处锚点与 `clash-rs` 钉住版本的五个资产哈希一起核对。
+`PKG_SOURCE_VERSION` 的快照），**先把上游自己的 `package/<pkg>/patches/` 按文件名
+顺序打进去**，再用 `patch -p1 -F0 --dry-run --forward` 逐条试本仓库的补丁，
+最后把 Nikki-RS 的四处锚点与 `clash-rs` 钉住版本的五个资产哈希一起核对。
 
 设计约定：
 
 | 约定 | 理由 |
 | --- | --- |
 | `-F0`（不允许 fuzz） | fuzz 命中意味着补丁**打进去了但落点靠猜**。这一次猜对了不代表文件形状是对的。 |
+| 先重放上游自己的包内补丁 | openwrt 是把那个目录**整批**按文件名打上去的。只在纯净源码上验本仓库的补丁是个假绿：上游动了同一个包里我们碰的那几行，门禁仍报 OK，真实构建却会红。这个洞在 2026-10-29 第一次成立（上游开始往 `package/kernel/mt76/patches/` 放 `100-`/`101-`），当时"恰好不冲突"被判成了 OK —— 靠巧合的绿不是绿。 |
+| 上游补丁用默认 fuzz，本仓库的用 `-F0` | 两把尺子不同是有意的：上游补丁的落点由上游负责；本仓库的补丁必须零 fuzz 才算对。 |
 | 退出码 `1` = 漂移，`2` = 没能验证 | 网络故障与补丁失效必须在日志里长得不一样，否则一次代理抖动会被读成"补丁坏了"。 |
 | 先跑 `--self-test` | 一条抓不到缺陷的门禁比没有门禁更坏。自检离线造出三种形态（适用 / 上下文对不上 / 已被上游应用），要求检测器如实区分。 |
 | 刻意不做成 Required Check | 它需要网络。Required Check 因抖动变红会拦住本仓库的每个 PR——那是把"少一道人工审批"换成"多一道随机拦截"。它依然是真实门禁：每周计划运行、每个 PR 都会跑，红了就出现在 PR 的检查列表里。 |
@@ -309,3 +312,312 @@ release-please-action 自己不能签名（它唯一的签名相关输入就是 
 
 除此之外没有别的路：这是 GitHub 对"机器人用 `GITHUB_TOKEN` 创建 PR"的既定行为，不是本
 仓库配置错了。
+
+## 十、发布：两条线 + 固定格式
+
+Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish release` 步骤按
+`GITHUB_REF` 决定走哪条。两条线**都是正式版本**，没有 `--prerelease`：
+
+| 线 | 触发 | release 名 | 行为 |
+| --- | --- | --- | --- |
+| 里程碑 | Release Please 打的 tag（`v*`）→ tag 构建 | 就是那个 tag（`v1.2.0`） | 只上传产物，正文字段化（见下），正文里的变更记录来自 Release Please，**永不覆盖** |
+| 滚动版本 | 计划构建 / 手动 dispatch | `v<项目版本>-r<上游前 7 位>`，如 `v1.2.0-r554f401` | 同 tag 重编先 `gh release delete --cleanup-tag` 再重建；只保留最近 3 条，`--latest` |
+
+### 版本号从哪来
+
+本仓库没有版本文件：`release-please.yml` 用 `release-type: simple`，产物是
+`CHANGELOG.md` + 一个 `vX.Y.Z` 的 tag（见 #47 的实际 diff，只动了 CHANGELOG）。所以版本号
+**只能从 tag 读**，而 `actions/checkout` 默认是浅克隆、不带 tag。
+
+因此构建 job 的 checkout 改成 `fetch-depth: 0`（历史是几百个 docs/scripts 提交，代价远小于
+一秒），然后由一个 `Resolve the project version` 步骤解析一次、写进 `GITHUB_OUTPUT`，
+再分发给三处使用：`BUILD-INFO.txt` 的 `project_version=`、产物文件名前缀、release 的 tag 与标题。
+解析顺序是 `git describe --tags --abbrev=0 --match 'v[0-9]*'` → CHANGELOG 最新条目 →
+`0.0.0`，所以在 fork（没有 tag）里也能得到一棵能自洽的字符串，而不是 `unknown`。
+
+产物文件名因此变成 `H5000M-<版本>-r<revision>-<原文件名>`；`BUILD-INFO.txt` / `profiles.json`
+/ `*.manifest` 保持原名，因为文档和脚本按名字引用它们。
+
+一处必须记住的环形依赖：滚动发布的 tag 自己就是 `v<版本>-r<revision>`，所以"从 tag 解析版本"
+不能用 `git describe --tags --match 'v[0-9]*'`——它会选中上一次构建自己留下的滚动 tag，把
+它当成下一个版本号。实测滚了三轮（`v1.2.0-r706052b` → `v1.2.0-r706052b-rdd72c4c` →
+`v1.2.0-r706052b-r058da17`），2026-11-16 的 `BUILD-INFO.txt` 里 `project_version` 变成
+`1.2.0-r706052b`，不是任何人能引用的版本。现在只认里程碑 tag：`git tag --list --merged HEAD`
+后用 `^v[0-9]+\.[0-9]+\.[0-9]+$` 过滤、`sort -V | tail -1` 取最高。
+
+### 为什么滚动线不再是叫 `snapshot` 的预发布
+
+`--prerelease` 的含义是"这还不是正式版"，但这条线恰恰是设备上真正要刷的那一个；而且它在
+Downloads 页上没有版本号，只有一个每次都在变的名字。改成 `v<版本>-r<revision>` 之后：
+
+* 每个产物都能被一个版本号引用（`v1.2.0-r554f401`）；
+* 同一个（项目版本, 上游 revision）重编落在**同一个 tag** 上，重跑是覆盖而不是堆积；
+* 它是正式版，所以 `/releases/latest` 直接指向最新可刷的固件 —— 不再依赖"GitHub 不会把
+  预发布标成 latest"这个间接保证。
+
+### 为什么砍掉了 `openwrt-<sha>`
+
+到 2026-10-30 为止，一构建一条 `openwrt-<sha>` 在六周里积了 **12 条**互相取代的 release：
+没有一条是能引用的版本号，Downloads 页对"该刷哪个"的回答是一张列表。现在的形状保留了当时
+那个教训 —— 不堆积 —— 但把"可引用的版本号"加了回来：同 revision 覆盖、且滚动线只保留
+最近 3 条（超出时步骤自己 `gh release delete --cleanup-tag`），清理是结构性的，不靠人记得。
+
+### 正文的固定字段
+
+`build.yml` 里写死，顺序与字段集合是刻意的（手里只有 release 页面、没有 BUILD-INFO 的人
+也要能回答"基于哪个上游、ABI 多少、装 kmod 要对齐什么"）：
+
+1. `## 上游与构建` —— 上游 sha、内核版本、内核 ABI、构建日期与实际 run 链接
+2. `## 产物` —— 每个文件是干什么用的（刷机 / 恢复 / chroot / 校验 / 开关清单）
+3. `## 校验` —— `sha256sum -c SHA256SUMS.txt`
+4. `## 升级` —— sysupgrade 保留配置、kmod 必须对齐 ABI、内置的三个 LuCI 应用、软件包仓库地址
+
+快照多一行引用块，说明"每次覆盖、不留历史、要长期用请取版本线"。
+
+版本线的 release 由 Release Please 先建（正文是它生成的变更记录），`build.yml` 把上面这段
+补在**前面**，用分隔线与变更记录相连。补之前会 grep `## 上游与构建` 判重，所以同一个 tag
+重建不会叠两遍。
+
+### `SHA256SUMS.txt`
+
+每个 release 都带一份，覆盖它自己的全部产物。没有它，release 等于请用户相信一个从网络下载
+的 38 MB 二进制；有了它，一条命令、离线可验。
+
+生成方式刻意是"逐文件取第一列"，不是 `sha256sum "${files[@]}" | sed`：GNU coreutils 的
+数码流有两种形状（`hash  name` 与 `hash *name`，后者是 binary 模式标记），而 `find` 给的又是
+`./name`，三层前缀叠在一起，一条 sed 很容易只吃掉一部分 —— 第一次写这行时就把 `*./name`
+原样发布了出去。
+
+### 历史清理的取舍（2026-10-30，一次性）
+
+按"发布页只放能刷的固件"清掉了：12 条 `openwrt-<sha>` 快照、`v1.0.0`、`v1.1.2`~`v1.1.7`，
+以及 `v1.1.0` / `v1.1.1` / `v1.1.9` / `v1.1.10` 这四个只有 tag、没有任何产物的孤儿
+（它们对应的构建分别死在"补丁一个都没装上"和"编译报错"上）。
+
+代价要写在这里，免得下一个人以为这是 bug：`CHANGELOG.md` 里指向这些 tag 的
+`compare/...` 链接会 **404**。保留的只有 `v1.1.8`、`v1.1.11` 和此后每个版本线。
+不手工改 CHANGELOG —— 它是 Release Please 的产物，改了下一次发布会覆盖回去。
+
+### 首发实测（2026-10-30，两条线同时落成）
+
+同一晚跑了两次构建：`v1.2.0` 的 tag 构建（`41086598052`）和一次 master 派发
+（`41086891904`），正好把两条线都验了一遍。下表是**当时**的形状（滚动线还是 `snapshot`
+预发布，2026-11-08 改成了带版本号的正式发布，见上文）：
+
+| | 里程碑 `v1.2.0` | 滚动快照 `snapshot`（旧形状） |
+| --- | --- | --- |
+| 产物 | 7 个（含 `SHA256SUMS.txt`） | 7 个（同） |
+| 正文固定字段 | 4/4 | 4/4 |
+| Release Please 变更记录 | 保留在 `---` 之后 | 不适用 |
+| `prerelease` | false | **true** |
+| `/releases/latest` | **指向它** | 不参与 |
+
+两边都把 `SHA256SUMS.txt` 下载回来，对 `BUILD-INFO.txt` 和 `profiles.json` 重算 sha256，
+与清单逐字节一致（不是"文件在不在"那种检查）。同一次上游 `116414a3`（内核 6.18.55）下，
+两个 release 的 ABI 都是 `47f4328495e6fd3d5fa53865da56bed1`。
+
+快照的"删掉再建"这条路这次没走到（`snapshot` 之前不存在，创建分支直接命中），但它的两半
+都是被证明过的：删 release 这个动作在清理里做了 21 次，`gh release create --target` 在
+`snapshot` 上成功了一次；runner 上的 `gh 2.103.2` 支持 `--cleanup-tag` 和 `--json`。
+
+### 别同时跑两个构建：342/350 分钟
+
+上面那两次并发构建暴露了唯一的真实代价：单次构建历史上是 80–315 分钟（`build.yml` 的
+job 上限 `timeout-minutes: 350`），而并发跑两个时，tag 那个用了 **342 分钟** —— 距离上限
+只剩 8 分钟。再慢一点就是"固件编完、release 没发"这种最难查的失败。
+
+所以不能只靠人记得"别同时点"。2026-11-01 的性能审阅把 concurrency 改成全仓单一的
+`h5000m-firmware-build`，且 `cancel-in-progress: false`：tag 与 master 不再并发争同一个 4 核
+runner / GHCR cache；release 可以排队，但绝不会被 snapshot 取消。GitHub 对同一组只保留一个
+pending run，所以重复手动/定时 snapshot 也不会长成无意义的队列。
+
+### 2026-11-01 性能审阅：先让缓存真的闭环
+
+对 `build.yml` 和 `local-build.sh` 逐步计时后，最确定的主因不是 `-j` 太小（GitHub-hosted
+本来就是 4 vCPU / `THREADS=4`），而是三个 `actions/cache/save` 全都写在真正的 `Build`
+**之前**：
+
+| cache | 旧的 Save 时机 | 真正产生新内容的时机 | 后果 |
+| --- | --- | --- | --- |
+| toolchain | Restore 后立刻 Save | Build 编译、随后 Pack | 冷缓存保存空目录；fallback 只复制旧归档 |
+| download | Restore 后立刻 Save | `make download` | 新源码每次重下，永远写不回 |
+| ccache | Restore 后立刻 Save | `make` 编译 | 本轮对象一个字节都进不了下轮 |
+
+现在 Restore 仍在 Build 前；download / ccache Save 移到 Build 成功后；toolchain Save 移到
+Pack 成功后。download exact key 加 upstream revision，并保留同一 feed 配置的 fallback：
+Actions cache 是不可变的，只有这样才能"恢复昨天 3 GB → 只下载新增 → 保存今天扩展后的集合"，
+而不是第一个 key 永久冻住。
+
+**证据**：2026-11-01 直接查 `/actions/caches`，这个仓库的缓存条目数是 **0**。不是"命中率低"，
+是从来没写成过：`Save toolchain` 执行时 `.toolchain-cache` 还不存在（要等 Build 之后的
+Pack 才创建），`Save download cache` 执行时 `openwrt/dl` 也不存在，`actions/cache` 对不存在的
+路径直接失败，而 `continue-on-error: true` 把这件事变成了日志里的一行 Error 注解。于是每次
+构建都在冷启动：3 GB 源码重下、工具链从零编。这解释了 80 分钟与 315 分钟之间那种毫无规律的
+波动 —— 也只有先修这一步，后面任何"加缓存/调并发"才有意义。
+
+缓存预算顺带记一笔：Actions cache 每仓库 10 GB。修好之后 download（约 3 GB，每个 upstream
+revision 一个新键）会累积几代，靠 LRU 回收；旧代无人恢复，正是最先被淘汰的，而每轮都会恢复
+的 toolchain/ccache 会保留。真要精确控制，可以用 `gh cache delete` 加 `actions: write`，但
+LRU 已经够用，这次没有加权限。
+
+#### 2026-11-05：一次网络抖动丢掉 16 GB，被记成了"上游变了"
+
+上一节修的是"缓存写不进去"。这一节是反过来的一半：**读不出来**，而且日志把它说成了一件
+正常的事。run 41358560480 的 `Build` 用了 157 分钟，看起来像"上游前进了所以要重编"，我去翻
+日志才看到真正的一行：
+
+```
+Downloaded  1d3232e1f99b build-cache.sha256
+Error: failed to copy content to .../.buildcache/build-cache.tar.zst:
+  copy failed: stream error: stream ID 1; PROTOCOL_ERROR; received from peer
+no build cache at ghcr.io/.../buildcache:767c8fa7714419f9 yet — this run will create it
+```
+
+缓存**存在**，拉到第 6 分钟时流断了。而当时的分支是 `if ! oras pull; then echo "还没有缓存"`：
+任何失败都被当成"第一轮，没有缓存"，于是 16 GB 归档被删掉、整个构建从零开始。一次网络抖动
+的代价被结算成两个半小时，而日志里的结论是错的 —— 这一条比时钟更值得修。
+
+现在分成两件事：先 `oras manifest fetch` 判断 tag 是否**真的**不存在（第一次构建的正常状态，
+代价为零），存在则最多重试 3 次（30/60/90 秒退避，每次前先清空 `.buildcache` —— 半截 blob
+不能续传，oras 会看到一个长度不对的层），全部失败才放弃并打 `::warning::`，明确说"这次从零
+构建并刷新缓存"。这样日志不会再撒谎。
+
+#### ccache 的键从来没被命中过
+
+同一批计时里发现的第二处"重复"：`Restore ccache` 的 key 是 `h5000m-ccache-${run_id}`，
+run_id 每轮都变，所以**永远只能是 restore-keys 的 fallback 命中**，而 Save 又会把整整
+0.53 GB 目录重新上传成一个新条目。日志里两行连着：
+
+```
+Cache hit for restore-key: h5000m-ccache-41337900867
+Cache saved with key: h5000m-ccache-41358560480
+```
+
+后果不只是每次多传 0.5 GB：这个仓库的 10 GB 预算里同时放着 3 GB download、1.3 GB toolchain，
+每轮再多一个 ccache 条目，被挤掉的正是真正省时间的那些。现在键改成
+`h5000m-ccache-<config+feeds 哈希>-<upstream revision>`，与 download/toolchain 同构：同树重编
+是精确命中、精确命中就不 Save。另外加了一个 `Report ccache effectiveness` 步骤，把
+`openwrt/.ccache` 的体积和 `ccache -s` 的命中率打进日志 —— 下一步该不该动 ccache，
+应该有数字可看，而不是靠猜（OpenWrt 用自己编的 ccache 和 `./.ccache`，所以要问的是
+`staging_dir/host/bin/ccache`，`/usr/bin/ccache` 报的是另一个几乎空的缓存）。
+
+同次审阅还去掉了两处纯 I/O 浪费：CI 已对 9–15 GB build cache 做过 sha256 和 `zstd -t` 时，
+`local-build.sh` 不再第三次扫描整个压缩流；firmware artifact 排除已经单独上传给 Pages 的
+`apk-repo/` 和它的 `packages/` 输入副本，不再把同一 APK 集合传两三遍。工作流契约门禁现在
+还会静态断言 Restore < Build < Save、Pack < toolchain Save，以及 download exact key/fallback，
+防止以后重排 YAML 时把这次根因重新引回来。
+
+这两项耗材是查 artifact 大小而不是凭观感判定的（修复前的两次成功构建，run 41086598052 与
+41086891904，数字完全一致）：
+
+| artifact | 修复前 | 说明 |
+| --- | --- | --- |
+| `H5000M-mainline-openwrt` | 427.1 MiB | 里面除了镜像，还塞了一份 apk 仓库和一份未签名的包副本 |
+| `apk-repo` | 260.5 MiB | 同一个仓库，为 Pages 再传一遍 |
+| 合计 | 687.7 MiB | 同一套包在两条 artifact 里各存一份 |
+
+并发那条也用实测确认过：把 `concurrency` 收成全仓一个组（`cancel-in-progress: false`）之后，
+在一个构建还在跑时派发第二个，它进入 `pending` 排队，而不是像以前那样同时抢 4 个核、把两边都
+拖成 342/350 分钟。
+
+#### 修复后的实测（2026-11-01/02，三次构建）
+
+第一次是冷启动（缓存本来就不存在），它证明的是"缓存这次真的写成了"：
+
+| 步骤 | 耗时 | 产出 |
+| --- | --- | --- |
+| Restore build cache | 5.12 分钟 | 无（本来就没有条目） |
+| Build | 196.30 分钟 | 编译完成 |
+| Save download cache | 0.95 分钟 | 3.09 GB |
+| Save ccache | 0.30 分钟 | 0.54 GB |
+| Pack + Save toolchain | 1.28 + 0.13 分钟 | 1.31 GB |
+| Save build cache（ghcr.io） | 10.95 分钟 | 9–15 GB |
+| 总计（run 41311202932） | 220.2 分钟 | `/actions/caches` 0 条 → 3 条 / 4.95 GB |
+
+同一类构建在修复前是 250.1 分钟（run 41086891904），但两次都是冷启动，这 30 分钟的差不能全算在
+这次改动上。能量化的是缓存条目（0 → 3）与 artifact 体积（427.1 → **158.2 MiB**）。
+
+第三次是命中上面全部缓存、并且只出固件的构建（run 41334310916）：
+
+| 步骤 | 耗时 | 说明 |
+| --- | --- | --- |
+| Restore toolchain | 0.18 分钟 | 精确命中 |
+| Restore download cache | 0.45 分钟 | 精确命中，3.09 GB |
+| Restore build cache | 5.57 分钟 | 从 ghcr 拉归档 |
+| Restore ccache | 0.12 分钟 | 0.54 GB |
+| Build | **22.95 分钟** | 增量编译 |
+| Save download cache | skipped | 精确命中时不再重复上传 3 GB |
+| Save toolchain | skipped | 同上 |
+| Save build cache | skipped | `build_repo=false`，不许覆盖完整构建的归档 |
+| 总计 | **35.4 分钟** | 同一台 4 vCPU runner |
+
+这是整轮审阅唯一一个数量级的数字：**250 分钟 → 35 分钟**。"验证仓库能自洽 / 上传 apk 仓库 /
+Attest / 发布 release / 部署 Pages 那几个步骤也全部按设计跳过，说明 `build_repo=false` 的守卫
+没有留下半个发布链。
+
+第四次是**正常路径**（`build_repo` 默认 `true`，含全部 apk 仓库）命中同一批缓存的构建
+（run 41337900867）：
+
+| 步骤 | 耗时 | 说明 |
+| --- | --- | --- |
+| Restore toolchain / download / ccache | 0.18 / 0.67 / 0.10 分钟 | 全部精确命中 |
+| Restore build cache | 6.95 分钟 | |
+| Build | **14.02 分钟** | 连 apk 仓库一起增量编译 |
+| Save download cache / toolchain | skipped | 精确命中不重传 3.09 GB + 1.31 GB |
+| Save ccache | 0.25 分钟 | |
+| Save build cache | 8.38 分钟 | 只有 master 的完整构建会写，正是这条在刷新共享归档 |
+| 总计 | **37.2 分钟** | 修复前同类构建 250.1 分钟 |
+
+这张表要按它的条件读：**上游 revision 与 config 都没变**，所以它是"同一棵树再编一次"的下界。
+一周一次的定时构建会拉到新的上游提交，实际增量比这个大；真正的复现要看下一次定时构建的数字。
+但它已经说明缓存闭环本身值多少：`Restore build cache` 的 7 分钟换掉了 200 多分钟的编译。
+
+顺带一个结论，和直觉相反：缓存热了以后，"只出固件"（35.4 分钟）和"连仓库一起出"（37.2 分钟）
+几乎一样快 —— 因为仓库的那些包也在缓存里，是增量编译。所以 `build_repo=false` 的价值不在日常，
+而在两个场景：缓存冷/失效时少编一半，以及改 config 导致 stamp 全失效时。
+
+### 编译量最大的那块是 apk 仓库，不是固件
+
+固件本身（内核 + 镜像里那几十个包）不是构建时间的全部。同 ABI 的 apk 软件包仓库才是最大的一块：
+PassWall / PassWall2 / Momo / NeKoBox / HiJpass / SSR+ 这些面板，以及它们要的 xray-core、
+sing-box、mihomo、v2ray-core、shadowsocks-rust、hysteria 等 Go/Rust 内核，都不进镜像，但每次
+构建都要编译出来，否则 `apk add luci-app-passwall` 无处可下。这是产品承诺，默认不动。
+
+调试固件本身的改动时不需要它。手动派发构建时把 `build_repo` 关掉，就只出固件（约省一半时间）：
+
+```bash
+gh workflow run build.yml -f build_repo=false -f publish_release=false
+```
+
+关掉时发布链整条跳过（`Publish release`、`Attest`、`Upload apk repository`、
+`发布 apk 仓库` job，以及"验证仓库能自洽"那一步）：没有对应仓库的固件如果发布出去，它会指向
+Pages 上另一套内核 ABI 的包，`apk add` 撞版本不匹配，看起来像仓库坏了。这种构建只用于验证，
+产物在 Actions artifact 里。
+
+定时构建与 tag 发布永远 `build_repo=true`，与以前完全一致。
+
+这条快速路径在 CI 里从没跑过（工作流把 `ENABLE_REPO_PACKAGES` 硬编码成 `true` 好几个月），
+第一次实测就发现它是坏的：`emit_service` 把没有仓库时并不存在的包名（`nikki-rs` 等）记进
+`EMITTED_PACKAGES`，而 `verify_config` 要求每个名字都必须是真实包，于是死在第一个上面。
+现在记录形态是 `name=mode`，`=n` 的条目跳过存在性/存活两项断言 —— 默认路径里服务包全是
+`=m`，所以对那些构建逐字未变。
+
+顺带堵上一个缓存污染口：`Save build cache` 原来的条件只有"不是 tag"，意味着任何分支派发的
+构建都会覆盖 master 复用的归档，而 build cache 的 tag 由 config/feeds 派生、两种构建模式
+算出来一样 —— 一次 firmware-only 构建就会让下一次定时构建把整个软件包仓库重编一遍。现在它
+与另外三个 Save 步骤一致：只有 master 的完整构建才写。
+
+### `run:` 块里不能写 `${{ ... }}`（CI 抓到的，本地抓不到）
+
+同一轮还踩到一个只有 CI 能暴露的坑：门禁自检要用**真实** `build.yml` 的文本做变异，模式串
+里含 GitHub 表达式。但 runner 在执行前会把 `run:` 标量里的表达式整个替换掉 —— 于是
+`permanent-key` 那个变异"什么都没改"，自检报 `pattern drifted`；zizmor 同时把这一步判为
+`template-injection`（`steps.upstream.outputs.rev may expand into attacker-controllable
+code`，exit 11）。本地把步骤抽出来单独跑是永远复现不了的，因为替换只发生在 runner 上。
+
+两个后果都记在门禁里了：`check-workflow-contracts.sh` 现在断言**所有**工作流的 `run:` 块内
+不出现表达式（`python` 用 `"$" + "{"` 拼出模式，自己也不写这个字面量），自检步骤还多了一个
+`run-expression` 变异用例要求门禁拒绝它。需要传值的正确写法是 `env:` 后脚本读 `$VAR`。
+
+
+
