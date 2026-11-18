@@ -11,20 +11,23 @@ Hiveton H5000M（Airpi H5000M，MT7987A + MT7992）的**主线 OpenWrt** 固件�
 
 ## 下载与刷机
 
-Releases 页面上只有两种条目，**都是正式版本**（没有 pre-release），标题都以 `H5000M <版本>` 开头：
+Releases 页面上每个条目就是一个版本号，**没有后缀、没有 pre-release**：
 
-| 条目 | 标题长这样 | 是什么 | 什么时候用 |
-| --- | --- | --- | --- |
-| [`vX.Y.Z`](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) | `H5000M 1.3.0` | **里程碑**，由 Release Please 打 tag，每个版本一份产物，永不覆盖 | 想要一个固定不动、能长期留在设备上的版本 |
-| `vX.Y.Z-r<revision>` | `H5000M 1.3.0 build 2a425bf` | **滚动构建**，同一个项目版本 + 它所基于的上游 revision；每周构建更新，**只保留最新 1 条** | 想试上游最新修复；版本号仍然明确 |
+| 条目 | 标题长这样 | 是什么 |
+| --- | --- | --- |
+| [`vX.Y.Z`](https://github.com/existyay/AutoBuild-H5000M-Openwrt/releases/latest) | `H5000M 1.3.0` | 一个版本一条，产物随同一版本的后续构建更新 |
 
-带 `build <7 位>` 的是滚动构建（`<7 位>` 是上游 `openwrt/openwrt` 提交的前 7 位），不带的是里程碑，
-所以同版本的两个条目也不会看混。`/releases/latest` 指向最新可刷的那一条。
+版本号由 Release Please 在合并 release PR 时推进（`1.3.0` → `1.3.1` …）。在两次版本推进之间，
+每周的定时构建和手动派发都会**更新当前版本那一条** release 的产物；`/releases/latest` 永远指向
+最新的版本号，也就是最新可刷的固件。
 
-滚动版本里的 `<revision>` 是上游 `openwrt/openwrt` 的提交前 7 位，所以"同一个版本号 + 同一个
-revision"重编永远是同一条 release（覆盖，不堆积）。`/releases/latest` 指向最新的那一条。
+"这份固件基于哪个上游、什么时候编的"写在 `BUILD-INFO.txt` 和 release 正文里
+（`openwrt_revision` / `kernel_version` / `kernel_abi` / `built_at`），不进版本号——之前试过把
+revision 拼进 tag（`v1.3.0-r2a425bf`）和文件名，结果是同一版本出现两条几乎一样的记录、
+文件名长到容易选错，所以现在不再这么做。**同一个版本的产物会被后续构建替换**，需要长期固定
+某一次构建请自己留存 `SHA256SUMS.txt` 与镜像。
 
-两者产物格式相同，文件名都带版本号（`H5000M-<版本>-r<revision>-...`）：
+文件名只带版本号（`H5000M-<版本>-...`）：
 
 | 文件 | 用途 |
 | --- | --- |

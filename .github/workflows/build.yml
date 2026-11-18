@@ -1526,37 +1526,32 @@ jobs:
           set -euo pipefail
           cd artifacts
 
-          # 两条发布线，都发**正式版本**（没有 pre-release）：
+          # ONE version per release, and it is a plain number: `v1.3.0`.
           #
-          #   * tag 构建（refs/tags/v*）→ 里程碑：release 名就是 tag（v1.2.0），
-          #     产物挂到 Release Please 建好的那条上，正文保留它的变更记录，永不覆盖。
-          #   * 计划 / 手动构建 → 滚动版本：`v<项目版本>-r<上游前 7 位>`，例如
-          #     `v1.2.0-r554f401`。tag、标题、文件名三者同源，都是版本号。
+          # There used to be two lines — `v1.3.0` (milestone) and
+          # `v1.3.0-r2a425bf` (rolling) — and the suffix was there to make the
+          # rolling build addressable without touching the milestone tag.  It
+          # cost more than it bought:
           #
-          # 为什么不再是叫 `snapshot` 的预发布：预发布带的是"这还不是正式版"的意思，
-          # 但这条线恰恰是设备上真正要刷的那一个，而且 Downloads 页面上它没有版本号，
-          # 只有一个每次都在变的名字。改成 `v<版本>-r<revision>` 之后：
-          #   - 每个产物都能被一个版本号引用；
-          #   - 同一个上游 revision 重编落在同一个 tag 上，重跑是替换而不是堆积；
-          #   - 它是正式版，所以 `/releases/latest` 指向的就是最新可刷的固件。
+          #   * two entries that look like the same version, differing by a
+          #     suffix nobody can decode from the list page;
+          #   * filenames doubled in length
+          #     (`H5000M-1.3.0-r2a425bf-openwrt-mediatek-...-sysupgrade.bin`),
+          #     which is how you pick the wrong file when flashing;
+          #   * the revision is already written in three better places:
+          #     BUILD-INFO.txt, the "## 上游与构建" table in the body, and the
+          #     run link.
           #
-          # 滚动线只保留最近 3 条，旧的连同 tag 一起删掉 —— 它们按定义已经被取代了。
-          # 里程碑 tag 不在此列，它们永不被自动删除。
-          # 两条发布线，都发**正式版本**（没有 pre-release），而且标题统一成
-          # `H5000M <版本>` 开头 —— 列表页上一眼能按版本比较，而不是三种写法混在一起：
+          # So now: the project version IS the release.  A scheduled or manual
+          # build updates the release for the current version (assets replaced,
+          # body's build section refreshed), and Release Please moves the version
+          # on when it tags the next one.  `/releases/latest` is therefore always
+          # both the newest version number and the newest firmware.
           #
-          #   里程碑 tag  v1.3.0            → 标题  H5000M 1.3.0
-          #   滚动构建     v1.3.0-r2a425bf  → 标题  H5000M 1.3.0 build 2a425bf
-          #
-          # 标题里的 `build <7 位>` 就是上游 openwrt 的 revision 前缀，所以两个都是
-          # 1.3.0 的条目也能分清：没有 `build` 的是里程碑（Release Please 打的 tag，
-          # 正文是它的变更记录，永不覆盖），带 `build` 的是跟随上游 main 的滚动构建。
-          #
-          # 早期版本的标题是 `H5000M 1.2.0（openwrt 706052b）`，全角括号夹着英文
-          # revision，在列表页里既宽又难扫；现在已经没有那种写法了。
-          #
-          # 滚动线只保留最近 1 条，旧的连同 tag 一起删掉 —— 它按定义就是"当前这一份"，
-          # 留 3 条只会让列表里堆着眼看要被取代的条目。里程碑 tag 不在此列，永不自动删除。
+          # What this costs: a version's assets are replaced by later builds of
+          # the same version, so a URL to a binary is not immutable.  Which build
+          # a file came from is in BUILD-INFO.txt (`built_at`, `openwrt_revision`)
+          # and in the body.  That is the trade for numbers a person can read.
           rev="$(sed -n 's/^openwrt_revision=//p' BUILD-INFO.txt)"
           kver="$(sed -n 's/^kernel_version=//p' BUILD-INFO.txt)"
           abi="$(sed -n 's/^kernel_abi=//p' BUILD-INFO.txt)"
@@ -1564,17 +1559,16 @@ jobs:
           case "${project_version}" in
             '' | unknown) project_version="0.0.0" ;;
           esac
-          rev7="${rev:0:7}"
 
-          is_rolling=false
+          # A tag build publishes to the tag Release Please just created; every
+          # other build publishes to the version the build itself recorded —
+          # which, for a build that follows main, is the newest milestone.
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             rel_name="${GITHUB_REF_NAME}"
-            rel_title="H5000M ${project_version}"
           else
-            rel_name="v${project_version}-r${rev7}"
-            rel_title="H5000M ${project_version} build ${rev7}"
-            is_rolling=true
+            rel_name="v${project_version}"
           fi
+          rel_title="H5000M ${project_version}"
 
           # Every firmware image this build produces, not just the sysupgrade
           # one: the initramfs is the recovery image, and the rootfs tarball is
@@ -1582,11 +1576,11 @@ jobs:
           # them means fetching the Actions artifact — which expires — for the
           # others.
           #
-          # The three images get a `H5000M-<project version>-r<revision>-` prefix
-          # so a file sitting in someone's download directory says which build it
-          # is without opening it.  The metadata files keep their names: docs and
-          # scripts refer to `BUILD-INFO.txt` / `profiles.json` by those names.
-          image_prefix="H5000M-${project_version}-r${rev7}-"
+          # The three images get a `H5000M-<version>-` prefix so a file sitting in
+          # someone's download directory says which release it is.  The metadata
+          # files keep their names: docs and scripts refer to `BUILD-INFO.txt` /
+          # `profiles.json` by those names.
+          image_prefix="H5000M-${project_version}-"
           files=()
           while IFS= read -r -d '' f; do
             base="${f#./}"
@@ -1667,60 +1661,63 @@ jobs:
           EOF
           )"
 
-          if ${is_rolling}; then
-            notes="> 版本 **${project_version}**，基于 openwrt main @ ${rev7}。
-          > 这是滚动构建：同一个上游 revision 重编会更新这一条，滚动线只保留最近 1 条。
-          > 需要固定不动的版本，见 Releases 里不带 \`build\` 的 \`H5000M <版本>\`。
+          notes="> 版本 **${project_version}**，基于 openwrt main @ ${rev}（内核 ${kver}，ABI ${abi}）。
+          > 这一条的产物会被同一版本的后续构建替换；具体来自哪次构建，看下面的 run 链接与
+          > \`BUILD-INFO.txt\` 里的 \`built_at\` / \`openwrt_revision\`。
 
           ${notes}"
-          fi
 
           echo "publishing ${nfiles} files as ${rel_name} (${rel_title})"
           printf '  %s\n' "${files[@]}"
 
-          if ${is_rolling}; then
-            # 替换而不是堆积：同一个 (项目版本, 上游 revision) 只会有一条 release，
-            # 重编就是覆盖它，所以 tag 永远指向产物所属的那次提交。这里既不
-            # force-push（构建 job 用 `persist-credentials: false` 检出，推不动，
-            # 也不该推），也不需要 --latest 之外的额外标记 —— 它本来就是正式版。
-            if gh release view "${rel_name}" >/dev/null 2>&1; then
-              gh release delete "${rel_name}" --cleanup-tag --yes
-            fi
+          # Replace the build section of the body, not prepend a second one.
+          #
+          # The body is: our generated block, then a `---`, then whatever else was
+          # there (Release Please's changelog on a milestone release).  A rebuild
+          # of the same version must refresh the block and keep the rest, so the
+          # old block is dropped from its first line (`> 版本 **…`) through the
+          # first `---`.  Matching on `## 上游与构建` alone was not enough: the
+          # version quote sits ABOVE that heading, so it would have survived and
+          # a new quote would have been added on every rebuild.
+          strip_build_block() {
+            awk 'p && /^---$/ { p = 0; next }
+                 p { next }
+                 /^> 版本 \*\*|^## 上游与构建/ { p = 1; next }
+                 { print }'
+          }
+
+          if gh release view "${rel_name}" >/dev/null 2>&1; then
+            gh release upload "${rel_name}" "${files[@]}" --clobber
+            old_body="$(gh release view "${rel_name}" --json body --jq .body)"
+            old_tail="$(printf '%s\n' "${old_body}" | strip_build_block)"
+            gh release edit "${rel_name}" --title "${rel_title}" \
+              --notes "${notes}
+
+          ---
+
+          ${old_tail}"
+
+            # Drop assets that are not part of this build.  Without this a
+            # version's release accumulates every filename any earlier build used
+            # (that is where the `-r<revision>` names came from), and the list of
+            # assets becomes the very thing this change is removing.
+            keep=" $(printf '%s\n' "${files[@]}" | sed 's#^\./##' | tr '\n' ' ') "
+            while IFS= read -r old_asset; do
+              [ -n "${old_asset}" ] || continue
+              case "${keep}" in
+                *" ${old_asset} "*) ;;
+                *)
+                  echo "removing stale asset ${old_asset}"
+                  gh release delete-asset "${rel_name}" "${old_asset}" --yes || true
+                  ;;
+              esac
+            done < <(gh release view "${rel_name}" --json assets --jq '.assets[].name')
+          else
             gh release create "${rel_name}" "${files[@]}" \
               --title "${rel_title}" \
               --notes "${notes}" \
               --latest \
               --target "${GITHUB_SHA}"
-
-            # 只留最近 1 条滚动构建，旧的连 tag 一起删。`gh release list` 按创建时间
-            # 倒序，所以刚建好的这条在前面，跳过第 1 条即为要淘汰的。
-            # 里程碑 tag（v1.3.0 这种没有 -r 后缀的）永远不匹配这个模式。
-            stale="$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-r[0-9a-f]+$' | tail -n +2 || true)"
-            for old in ${stale}; do
-              echo "pruning superseded rolling release ${old}"
-              gh release delete "${old}" --cleanup-tag --yes || true
-            done
-          elif gh release view "${rel_name}" >/dev/null 2>&1; then
-            # 版本线的 release 由 Release Please 建好，正文是它生成的变更记录。
-            # 这里把产物挂上去、把标题统一成 `H5000M <版本>`（Release Please 建的
-            # 标题是裸 tag `v1.3.0`，和滚动条目的 `H5000M … build …` 不成一套），
-            # 再把"固件事实"段落补在正文**前面**；幂等靠段落标题判重。
-            gh release upload "${rel_name}" "${files[@]}" --clobber
-            gh release edit "${rel_name}" --title "${rel_title}"
-            if ! gh release view "${rel_name}" --json body --jq .body | grep -qF '## 上游与构建'; then
-              old_notes="$(gh release view "${rel_name}" --json body --jq .body)"
-              gh release edit "${rel_name}" --notes "${notes}
-
-          ---
-
-          ${old_notes}"
-            fi
-          else
-            gh release create "${rel_name}" "${files[@]}" \
-              --title "${rel_title}" \
-              --notes "${notes}" \
-              --latest
           fi
 
   # Publishes artifacts/apk-repo/ to GitHub Pages, which is what makes the

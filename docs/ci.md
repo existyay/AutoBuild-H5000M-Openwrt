@@ -313,19 +313,36 @@ release-please-action 自己不能签名（它唯一的签名相关输入就是 
 除此之外没有别的路：这是 GitHub 对"机器人用 `GITHUB_TOKEN` 创建 PR"的既定行为，不是本
 仓库配置错了。
 
-## 十、发布：两条线 + 固定格式
+## 十、发布：一个版本一条，正文固定格式
 
-Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish release` 步骤按
-`GITHUB_REF` 决定走哪条。两条线**都是正式版本**，没有 `--prerelease`：
+Releases 页面上**一个版本号一条**，没有后缀、没有 `--prerelease`。`build.yml` 的
+`Publish release` 步骤这样决定发布到哪：
 
-| 线 | 触发 | release 名 | 标题 | 行为 |
-| --- | --- | --- | --- | --- |
-| 里程碑 | Release Please 打的 tag（`v*`）→ tag 构建 | 就是那个 tag（`v1.3.0`） | `H5000M 1.3.0` | 只上传产物，正文字段化（见下），正文里的变更记录来自 Release Please，**永不覆盖**；标题被统一成 `H5000M <版本>`（Release Please 建的是裸 tag，和滚动条目不成一套） |
-| 滚动构建 | 计划构建 / 手动 dispatch | `v<项目版本>-r<上游前 7 位>`，如 `v1.3.0-r2a425bf` | `H5000M 1.3.0 build 2a425bf` | 同 tag 重编先 `gh release delete --cleanup-tag` 再重建；只保留最近 **1** 条，`--latest` |
+| 触发 | release（tag 与标题） | 行为 |
+| --- | --- | --- |
+| tag 构建（Release Please 打的 `v*`） | 就是那个 tag，标题 `H5000M <版本>` | 产物挂上去，首次创建时 `--latest` |
+| 计划构建 / 手动 dispatch | `v<项目版本>`，标题 `H5000M <版本>` | 同上：**更新当前版本那一条**，不新建条目 |
 
-标题格式是刻意统一的：两种条目都以 `H5000M <版本>` 开头，滚动的那条多一个 `build <7 位>`。
-没有它，同版本的两个条目在列表里只差一个后缀，很难扫；早期那种
-`H5000M 1.2.0（openwrt 706052b）` 把英文 revision 塞进全角括号里，又宽又难认，已不再使用。
+`/releases/latest` 因此永远既是"最新的版本号"，也是"最新可刷的固件"。
+
+### 为什么曾经有 `-r<revision>` 后缀，为什么又删掉了
+
+2026-11-08 引入两条线时，滚动构建用 `v<版本>-r<上游前 7 位>`（例如 `v1.3.0-r2a425bf`）当 tag，
+理由是"同一个上游 revision 重编落在同一个 tag 上，覆盖而不堆积"。后缀还进了文件名
+（`H5000M-1.3.0-r2a425bf-openwrt-mediatek-filogic-hiveton_h5000m-squashfs-sysupgrade.bin`）。
+
+代价在 11-17 数清楚了：Releases 页出现两个都叫 1.3.0 的条目（`v1.3.0` 与 `v1.3.0-r2a425bf`），
+只能靠一个没人能解释的后缀区分；文件名长到刷机时容易选错；而 revision 本来就已经写在三个
+更好的地方——`BUILD-INFO.txt` 的 `openwrt_revision`、release 正文的「上游与构建」表格、
+以及 run 链接。
+
+所以现在版本号就是版本号：一个版本一条 release，同版本的后续构建**更新**它（产物覆盖、
+正文的构建段按 `> 版本 **…` 起点到 `---` 结束替换掉再写新的），不再产生新 tag。
+Release Please 每次合入 release PR 才推进版本号。被替换掉的旧资产会被
+`gh release delete-asset` 清掉，避免 release 里堆着历史文件名。
+
+代价写在明处：**同一版本的产物不是不可变的**，链接指向的文件会被后续构建替换。需要钉住某一次
+构建，就自己保存镜像与 `SHA256SUMS.txt`——`built_at` 与 `openwrt_revision` 在 `BUILD-INFO.txt` 里。
 
 ### 版本号从哪来
 
@@ -336,28 +353,26 @@ Releases 页面上只允许出现**两种**条目，`build.yml` 的 `Publish rel
 因此构建 job 的 checkout 改成 `fetch-depth: 0`（历史是几百个 docs/scripts 提交，代价远小于
 一秒），然后由一个 `Resolve the project version` 步骤解析一次、写进 `GITHUB_OUTPUT`，
 再分发给三处使用：`BUILD-INFO.txt` 的 `project_version=`、产物文件名前缀、release 的 tag 与标题。
-解析顺序是 `git describe --tags --abbrev=0 --match 'v[0-9]*'` → CHANGELOG 最新条目 →
-`0.0.0`，所以在 fork（没有 tag）里也能得到一棵能自洽的字符串，而不是 `unknown`。
+解析用的是里程碑 tag 列表（`git tag --list --merged HEAD` 后 `^v[0-9]+\.[0-9]+\.[0-9]+$` 过滤、
+`sort -V | tail -1`），拿不到再退回 CHANGELOG 最新条目、最后 `0.0.0`，所以在 fork（没有 tag）
+里也能得到自洽的值，而不是 `unknown`。
 
-产物文件名因此变成 `H5000M-<版本>-r<revision>-<原文件名>`；`BUILD-INFO.txt` / `profiles.json`
-/ `*.manifest` 保持原名，因为文档和脚本按名字引用它们。
+产物文件名因此是 `H5000M-<版本>-<原文件名>`；`BUILD-INFO.txt` / `profiles.json` / `*.manifest`
+保持原名，因为文档和脚本按名字引用它们。
 
-一处必须记住的环形依赖：滚动发布的 tag 自己就是 `v<版本>-r<revision>`，所以"从 tag 解析版本"
-不能用 `git describe --tags --match 'v[0-9]*'`——它会选中上一次构建自己留下的滚动 tag，把
-它当成下一个版本号。实测滚了三轮（`v1.2.0-r706052b` → `v1.2.0-r706052b-rdd72c4c` →
+一处必须记住的环形依赖（曾经真的踩过）：版本号只能从 tag 读，而如果构建自己也在打
+`v<版本>-r<revision>` 这种 tag，`git describe --tags --match 'v[0-9]*'` 会选中上一次构建留下的
+tag，把它当成下一个版本号。实测滚了三轮（`v1.2.0-r706052b` → `v1.2.0-r706052b-rdd72c4c` →
 `v1.2.0-r706052b-r058da17`），2026-11-16 的 `BUILD-INFO.txt` 里 `project_version` 变成
-`1.2.0-r706052b`，不是任何人能引用的版本。现在只认里程碑 tag：`git tag --list --merged HEAD`
-后用 `^v[0-9]+\.[0-9]+\.[0-9]+$` 过滤、`sort -V | tail -1` 取最高。
+`1.2.0-r706052b`，不是任何人能引用的版本。现在只认纯 `vX.Y.Z` 形式的里程碑 tag，而且构建
+本身不再创建新 tag（它只更新已有版本那一条 release），这条回路就被彻底断掉了。
 
 ### 为什么滚动线不再是叫 `snapshot` 的预发布
 
 `--prerelease` 的含义是"这还不是正式版"，但这条线恰恰是设备上真正要刷的那一个；而且它在
-Downloads 页上没有版本号，只有一个每次都在变的名字。改成 `v<版本>-r<revision>` 之后：
-
-* 每个产物都能被一个版本号引用（`v1.2.0-r554f401`）；
-* 同一个（项目版本, 上游 revision）重编落在**同一个 tag** 上，重跑是覆盖而不是堆积；
-* 它是正式版，所以 `/releases/latest` 直接指向最新可刷的固件 —— 不再依赖"GitHub 不会把
-  预发布标成 latest"这个间接保证。
+Downloads 页上没有版本号，只有一个每次都在变的名字。现在它是**正式版本**，且直接挂在项目的
+版本号上（`v1.3.0`），所以 `/releases/latest` 直接指向最新可刷的固件 —— 不再依赖"GitHub 不会把
+预发布标成 latest"这个间接保证。
 
 ### 为什么砍掉了 `openwrt-<sha>`
 
