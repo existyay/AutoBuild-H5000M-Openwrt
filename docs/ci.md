@@ -631,6 +631,27 @@ downloaded 24G from ...
 attempt 的提示也从 `::warning::` 降成 `::notice::`：重试成功是预期行为，只有三次都失败才
 值得一个警告。
 
+#### 2026-11-21：缓存拉取偶发 HTTP/2 断流，代价是 3 小时
+
+run 44338800986（11-18）三次 `oras pull` 全部这样死掉：
+
+```
+pulling ghcr.io/...:767c8fa7714419f9 (attempt 1/3)
+Error: failed to copy content to .../.buildcache/build-cache.tar.zst:
+  copy failed: stream error: stream ID 1; PROTOCOL_ERROR
+pulling ... (attempt 2/3)  → stream ID 3; PROTOCOL_ERROR
+pulling ... (attempt 3/3)  → stream ID 3; PROTOCOL_ERROR
+##[warning]build cache unavailable after retries; this run builds from scratch
+```
+
+重试逻辑按设计工作（三次、退避、日志说清楚），但结果仍是从零编译：**Build 236 分钟，总 295 分钟**，
+而 job 上限是 350 分钟。同一份归档在 11-21 的 run 44837087643 里一次就拉完了（16 分钟），所以这是
+**偶发**，不是稳定复现的缺陷。
+
+`stream error: stream ID` 是 Go 的 HTTP/2 客户端报的，而 oras 是 Go 程序，所以两个 oras 步骤
+（`Restore build cache` 与 `Save build cache`）都加了 `GODEBUG: http2client=0` 强制 HTTP/1.1。
+这是**缓解**而不是根治：三次重试保留原样，重新出现时先试着去掉这一行，确认是不是 HTTP/2 的问题。
+
 ### 编译量最大的那块是 apk 仓库，不是固件
 
 固件本身（内核 + 镜像里那几十个包）不是构建时间的全部。同 ABI 的 apk 软件包仓库才是最大的一块：
