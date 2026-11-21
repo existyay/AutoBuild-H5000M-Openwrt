@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.3.0...v1.3.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **ci:** oras 走 HTTP/1.1，规避 9-16 GB blob 的 HTTP/2 断流 ([#75](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/75)) ([f2088d1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/f2088d1ff709339efb78ca9e5764d2d5ce6de06b))
+* **ci:** 解包后删掉 24.8 GB 的 build cache 归档，缓存保存不再因磁盘满失败 ([#72](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/72)) ([545ae71](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/545ae7114d93cbf0f895340ed258d0ff559a77b6))
+* **ci:** 让提交信息门禁接受 dependabot 的 deps-dev scope ([#70](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/70)) ([8903d9e](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/8903d9eb10dfe0496497d4f5fe6082bc4a55d0d5))
+* **release:** 版本号去掉 -r&lt;revision&gt; 后缀，一个版本一条 release ([#74](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/74)) ([932cdd1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/932cdd1a4f285965e6f82755bd111427c2883580))
+
 ## [1.3.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.2.0...v1.3.0) (2026-11-17)
 
 
