@@ -3437,6 +3437,12 @@ audit_own_warnings() {
 		die "${ours} Makefile(s) of ours declare dependencies this tree cannot satisfy — see prune_dangling_depends() and the emit lists in this script"
 	fi
 
+	# The comment above says an arithmetic error means the normalisation did
+	# nothing; that is only true if the audit refuses to continue.  It used to be
+	# reported and then ignored, which is exactly how a silent no-op survives.
+	[ "$arith" -eq 0 ] ||
+		die "${arith} 'arithmetic expression: expecting EOF' error(s) in ${LOG_FILE} — the mtime normalisation is silently doing nothing"
+
 	log "Warning audit: ${ours} of ours, ${baseline} baseline OpenWrt (unselected optional deps), ${upstream} upstream feed, ${arith} arithmetic error(s)"
 	return 0
 }
