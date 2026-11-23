@@ -30,12 +30,30 @@ command -v python3 >/dev/null 2>&1 || {
 	echo "需要 python3" >&2
 	exit 2
 }
+
+# 交给 python 的 bash 必须是**真正在跑这个脚本的那一个**。Windows 上 `bash`
+# 这个名字会先被 System32 的 WSL 启动器抢到：它退出码 1，把 UTF-16 的
+# "没有已安装的分发版" 写到 stdout，stderr 是空的 —— 于是每个 run 块看起来都
+# "语法错误"，而真正的问题是被换了个 shell 去解析。cygpath 把 MSYS 路径转成
+# Windows 路径，Windows 的 python 才 spawn 得动同一个 bash。
+if command -v cygpath >/dev/null 2>&1; then
+	H5000M_BASH="$(cygpath -w "$(command -v bash)")"
+else
+	H5000M_BASH="$(command -v bash)"
+fi
+export H5000M_BASH
+
 python3 - "$ROOT_DIR" <<'PY'
+import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 
 import yaml
+
+bash_bin = os.environ.get("H5000M_BASH") or "bash"
 
 root = pathlib.Path(sys.argv[1])
 wf_dir = root / ".github" / "workflows"
@@ -372,6 +390,71 @@ if "h5000m-dl-" not in dl_fallback:
     )
 
 # ---------------------------------------------------------------------------
+# run 块的 shell 语法。
+#
+# 2026-11-23 的 PR #77 上，checks.yml 里少写了一个引号：
+#
+#     code="$(curl … "https://api.github.com/repos/${repo}") || {
+#
+# 外层引号没有闭合，bash 于是把紧随其后的几行注释也当成字符串的一部分，直到下
+# 一个 `"` 才结束，最后 `(curl failed)` 落在命令位置 —— CI 报的是
+#
+#     line 49: syntax error near unexpected token `('
+#
+# 而 actionlint（只做 YAML 与表达式）与 shellcheck（只检查已提取出来的脚本）
+# 都看不见它，于是这个引号一路走到了 master 方向的 CI。这里对每个 bash 的 run
+# 块跑一次 `bash -n`，把这一类错误挡在本地。
+#
+# 只检查 bash：`shell:` 明确写成 pwsh/python 的块用 bash -n 解析没有意义。
+shell_checked = 0
+shell_bad = 0
+scratch = root / ".workflow-shell-scratch"
+if scratch.exists():
+    import shutil
+
+    shutil.rmtree(scratch)
+scratch.mkdir()
+try:
+    for wf in sorted((root / ".github/workflows").glob("*.yml")):
+        wf_doc = load(wf) or {}
+        for job_name, job in (wf_doc.get("jobs") or {}).items():
+            for idx, step in enumerate((job or {}).get("steps") or []):
+                if not isinstance(step, dict):
+                    continue
+                body = step.get("run")
+                if not isinstance(body, str) or not body.strip():
+                    continue
+                if not str(step.get("shell") or "bash").startswith("bash"):
+                    continue
+                shell_checked += 1
+                # 写进仓库内的相对路径再交给 bash：Windows 的 python 给出的
+                # `C:\Users\…\Temp\x.sh` 到 MSYS 的 bash 手里会把反斜杠当成
+                # 转义吃掉，变成不存在的路径，于是每个块都“语法错误”。
+                rel = scratch.name + "/" + f"step{idx}.sh"
+                (root / rel).write_text(body, encoding="utf-8", newline="\n")
+                result = subprocess.run(
+                    [bash_bin, "-n", rel],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                if result.returncode != 0:
+                    shell_bad += 1
+                    lines = (result.stderr or "").strip().splitlines()
+                    reason = lines[0] if lines else f"bash -n 返回 {result.returncode}"
+                    step_name = str(step.get("name") or f"step #{idx + 1}")
+                    problems.append(
+                        f"{wf.relative_to(root)}: 步骤 `{step_name}` 的 run 块不是合法的"
+                        f"shell —— {reason}"
+                    )
+finally:
+    import shutil as _shutil
+
+    _shutil.rmtree(scratch, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
 if problems:
     print(f"\033[31m✗ 发现 {len(problems)} 处复用工作流契约问题：\033[0m\n")
     for p in problems:
@@ -382,6 +465,7 @@ if problems:
 print(
     f"\033[32m✓ 复用工作流契约正常\033[0m"
     f"（检查了 {checked_calls} 处 uses: ./ 调用、表达式中的连字符点号访问，"
-    f"runs-on 的浮动标签、run 块里的表达式替换，以及固件缓存的恢复/保存顺序）"
+    f"runs-on 的浮动标签、run 块里的表达式替换、固件缓存的恢复/保存顺序，"
+    f"以及 {shell_checked} 个 bash run 块的 shell 语法）"
 )
 PY
