@@ -2335,12 +2335,44 @@ config_set_symbol() {
 	fi
 }
 
-# Both directions used to exist here.  config_disable had no caller anywhere in
-# the repository (checked: 68 shell functions, this was the only one), and the
-# only place a package is deliberately turned off writes the line directly — the
-# `CONFIG_PACKAGE_ip-tiny=n` next to the ip-full note — so the wrapper is gone
-# rather than left as an invitation to use a second way of doing it.
+# Both directions are needed after all, but they are not symmetric edits.
+#
+# Every caller that turns a package ON is `config_enable`; the only place a
+# package is deliberately turned OFF writes its line directly (the
+# `CONFIG_PACKAGE_ip-tiny=n` next to the ip-full note), so that wrapper stays
+# unwrapped.  A *bool Kconfig symbol* is a different story — see
+# config_disable_symbol below.
 config_enable() { config_set_symbol "CONFIG_PACKAGE_$1" "y"; }
+
+# Turn a Kconfig symbol off the way kconfig itself would.
+#
+# kconfig renders an unset bool as `# CONFIG_FOO is not set`.  Writing
+# `CONFIG_FOO=n` instead makes the two disagree about the file's content, and
+# that disagreement is not cosmetic: include/toplevel.mk:262-281 re-runs
+# `conf --defconfig` on every `make` and compares the result against .config;
+# on a difference it refuses to create the tmp/.config-check stamp, so every
+# single invocation pays that kconfig pass and prints
+#
+#   WARNING: your configuration is out of sync. Please run make menuconfig, ...
+#
+# Measured 2026-11-23 on a full tree with the old `=n` spelling:
+# `./scripts/kconfig.pl '>' .config tmp/.config` printed exactly one line —
+# `# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set` — so this symbol alone kept
+# the whole build permanently out of sync and made its own warning noise.
+#
+# The canonical form hands off to the kernel just as well: kernel-defaults.mk:119
+# is `awk '/^(#[[:space:]]+)?CONFIG_KERNEL/{...}'`, which copies
+# `# CONFIG_KERNEL_*` lines into the kernel .config.target too.
+config_disable_symbol() {
+	local symbol="$1"
+
+	if grep -q "^${symbol}=" "$SRC/.config" 2>/dev/null; then
+		sed -i "/^${symbol}=/d" "$SRC/.config"
+	fi
+	if ! grep -q "^# ${symbol} is not set$" "$SRC/.config" 2>/dev/null; then
+		printf '# %s is not set\n' "$symbol" >>"$SRC/.config"
+	fi
+}
 
 append_board_stack_config() {
 	local out="$1"
@@ -2500,7 +2532,13 @@ CONFIG_KERNEL_CGROUP_BPF=y
 # the same trade this project already accepts for the libbpf package.
 #
 # `select DWARVES` builds the pahole host tool automatically once BTF is on.
-CONFIG_KERNEL_DEBUG_INFO_REDUCED=n
+#
+# Written in kconfig's own spelling — `# … is not set`, not `…=n`.  The `=n`
+# form is what made every `make` print "your configuration is out of sync"
+# (include/toplevel.mk:262-281 compares `conf --defconfig` output against
+# .config), and kernel-defaults.mk:119 copies `# CONFIG_KERNEL_*` lines as well.
+# config_disable_symbol() writes it this way after the final defconfig.
+# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
 CONFIG_KERNEL_DEBUG_INFO_BTF=y
 EOF
 	fi
@@ -3028,7 +3066,7 @@ configure_build() {
 		# kernel ships without type information.  Order matters, and both are
 		# re-asserted here for the same reason as the cgroup pair above.
 		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO" "y"
-		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO_REDUCED" "n"
+		config_disable_symbol "CONFIG_KERNEL_DEBUG_INFO_REDUCED"
 		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO_BTF" "y"
 	fi
 
@@ -3133,7 +3171,11 @@ verify_config() {
 		# would drop BTF without any other symptom, so all three are asserted.
 		grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' "$SRC/.config" ||
 			die "CONFIG_KERNEL_DEBUG_INFO was dropped — CONFIG_DEBUG_INFO_BTF cannot be generated without full debug info"
-		grep -q '^CONFIG_KERNEL_DEBUG_INFO_REDUCED=n$' "$SRC/.config" ||
+		# The off symbol is asserted in kconfig's own spelling.  A `=n` line
+		# would still be "off" for rules.mk, but it is not what kconfig
+		# writes, so include/toplevel.mk would report the tree out of sync on
+		# every make invocation — see config_disable_symbol().
+		grep -q '^# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set$' "$SRC/.config" ||
 			die "CONFIG_KERNEL_DEBUG_INFO_REDUCED is not explicitly off — it defaults to y and silently disables CONFIG_DEBUG_INFO_BTF"
 		grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' "$SRC/.config" ||
 			die "CONFIG_KERNEL_DEBUG_INFO_BTF was dropped — the kernel would ship no BTF type information"

@@ -622,11 +622,14 @@ jobs:
           want scripts/local-build.sh 'kmod-sched-bpf' \
             "local-build.sh carries the TC BPF modules"
           # BTF is required, and it has two prerequisites that are easy to lose:
-          # DEBUG_INFO_REDUCED defaults to y and silently disables it.
+          # DEBUG_INFO_REDUCED defaults to y and silently disables it.  The
+          # assertion is on kconfig's own spelling — `# … is not set` — because
+          # an `…=n` line makes include/toplevel.mk report the tree out of sync
+          # on every make invocation.
           want scripts/local-build.sh 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' \
             "local-build.sh requests CONFIG_KERNEL_DEBUG_INFO_BTF"
-          want scripts/local-build.sh 'CONFIG_KERNEL_DEBUG_INFO_REDUCED' \
-            "local-build.sh explicitly disables CONFIG_KERNEL_DEBUG_INFO_REDUCED"
+          want scripts/local-build.sh '# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set' \
+            "local-build.sh disables CONFIG_KERNEL_DEBUG_INFO_REDUCED in kconfig spelling"
           want .github/workflows/build.yml 'CONFIG_KERNEL_DEBUG_INFO_BTF' \
             "build.yml asserts BTF survived into the kernel config"
           want scripts/local-build.sh 'kmod-veth' \
