@@ -76,6 +76,15 @@ if [ "$PROFILE_SET" = "full" ]; then
 	run_profile no-ebpf-kernel env ENABLE_EBPF_PROXY_KERNEL=false
 	run_profile no-dialer env ENABLE_WWAND=false ENABLE_MT5700M=false
 	run_profile no-argon env ENABLE_THEME_ARGON=false
+	# `ENABLE_REPO_PACKAGES=false` was never exercised, although it is the switch
+	# that keeps the three proxy trees out of package/ — a config that only works
+	# with them present would not be noticed until a user turned them off.
+	run_profile no-repo-packages env ENABLE_REPO_PACKAGES=false
+	# Same for the easymesh feed (IPTV block in the config) and the optional
+	# passwall/nikki/hijpass trees: both are off in the `minimal` profile but
+	# that profile also drops upnp/adblock/fancontrol, so the off-path of the
+	# easymesh stack on its own was untested.
+	run_profile no-easymesh env ENABLE_EASYMESH=false
 fi
 
 printf '\n\033[1m== coverage summary ==\033[0m\n'
