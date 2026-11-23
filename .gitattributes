@@ -1,5 +1,12 @@
 # Auto detect text files and perform LF normalization
-* text=auto
+* text=auto eol=lf
+# eol=lf on the catch-all is load-bearing, not tidiness.  With plain
+# `* text=auto`, a machine with core.autocrlf=true checks every text file out
+# with CRLF, and anything built from the WORKING TREE (a tarball, `git ls-files
+# | tar`, a docker copy) then ships CRLF: the rootfs carried `#!/bin/sh` in
+# nine device scripts, sh reported "`: not found`" and first boot silently did
+# nothing.  Measured on the built rootfs before this line existed.  Attributes
+# beat core.autocrlf, so this keeps the working tree LF on every platform.
 *.sh text eol=lf
 *.patch text eol=lf
 *.config text eol=lf
