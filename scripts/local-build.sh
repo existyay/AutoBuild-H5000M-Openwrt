@@ -2079,6 +2079,10 @@ prune_dangling_depends() {
 
 	[ -f "$mk" ] || return 0
 
+	# One package today, a list on purpose: the next dangling dependency gets
+	# appended here rather than a new block of near-identical code.  shellcheck
+	# only sees the current single element and calls it a mistake.
+	# shellcheck disable=SC2043
 	for pkg in kcptun-client; do
 		grep -q ":${pkg}\b" "$mk" 2>/dev/null || continue
 		# A real package definition anywhere in the tree means the dependency
