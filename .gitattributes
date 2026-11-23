@@ -4,3 +4,11 @@
 *.patch text eol=lf
 *.config text eol=lf
 *.env text eol=lf
+# Device-side scripts have no extension (uci-defaults, hotplug.d, usr/sbin), so
+# `* text=auto` alone left them at the mercy of core.autocrlf: on a Windows
+# checkout they came out CRLF, and `#!/bin/sh\r` is an interpreter path that does
+# not exist — first-boot defaults and the USB/ieee80211 hotplug hooks would
+# silently never run while the filenames still looked right in the tree.
+# They are shipped into the rootfs by local-packages/*/Makefile, so LF is
+# mandatory here, not a style preference.
+local-packages/**/files/** text eol=lf
