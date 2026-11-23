@@ -2125,6 +2125,54 @@ Makefile，并且 `kmod-ip6tables`、`kmod-ip6tables-extra`、`kmod-ipt-nat6`、
    符号原来是别的包顺带打开的，而模块源码三处都用它（见 4.2.1）—— 属于"能编过纯属
    运气"，一旦依赖链变了，报错会指向 fullcone 而不是缺失的符号。
 
+#### 4.2.2 整条配置链在容器里实测，以及 `feeds install` 的一个静默降级
+
+上面 4.2.1 只跑了 `make defconfig`。为了让"流程本身"也过一次，2026-11-23 在
+`debian:bookworm-slim` 里把仓库脚本整条跑通：
+
+```
+docker run --rm -v "$PWD":/src:ro -v h5000m-e2e:/work debian:bookworm-slim bash -s
+  # 装 git python3 python3-setuptools gawk gettext unzip wget curl rsync zstd
+  #   patch bison flex gperf build-essential pkg-config libncurses-dev
+  #   libssl-dev libelf-dev libgmp-dev
+  # 以非 root 用户 builder 复制工作树，然后：
+  THREADS=4 bash scripts/local-build.sh --config-only
+```
+
+结果 `SCRIPT-EXIT=0`：`Source at 14a07b7`，`Verified 123 emitted package names
+ exist upstream`、`Verified all emitted packages survived defconfig`、
+`Verified 32 required packages and target profile hiveton_h5000m`、
+`Warning audit: 0 of ours`，`artifacts/enabled-packages.txt` 375 个符号。
+产出的 `.config`（8752 行）逐项断言通过：`CCACHE=y`、`KERNEL_CGROUPS=y`、
+`KERNEL_CGROUP_BPF=y`、`KERNEL_DEBUG_INFO_BTF=y`、`DEBUG_INFO_REDUCED=n`、
+`LUCI_LANG_zh_Hans=y`、`FEED_wwand=m`、`luci-app-ssr-plus=m`、
+`kmod-nft-fullcone=y`、`h5000m-integration=y`、`luci-app-h5000m-accel=y`、
+`dnsmasq-full=y`、`firewall4=y`、`TARGET_…_DEVICE_hiveton_h5000m=y`。
+
+这一跑挖出一个**静默降级**，是这轮最有价值的一个发现：
+
+- `./scripts/feeds install -a` 内部会调用 `make prepare-tmpinfo`，而这一步依赖
+  host prereq 门（`include/toplevel.mk:106`）。门没过时 —— 这次是缺少
+  `python3-distutils`（`include/prereq-build.mk:209` 只对 Python < 3.12 要求）——
+  feeds install **不退出**：`Cannot open './tmp/.packageinfo'` 之后它照样安装
+  每个包，每遇到一个依赖打一行 `WARNING: No feed for package 'libc' found`
+  （实测 16 691 行），最后 **退出码 0**。
+- 后果不是报错，而是同一份 `configs/h5000m.config` 生成一份**依赖信息全丢**的包
+  索引，`defconfig` 出来的镜像和预期的不是同一份，而脚本里
+  `|| die "feeds install failed"` 永远不会触发。
+- 于是 `prepare_feeds()` 现在做两件事：开头先调 `prepare_config_stage`（该函数自带
+  `CONFIG_ONLY`/`PREPARE_ONLY` 守卫，轻量主机不必为了查包名装整套编译器；真构建
+  仍走真门），装完之后调新的 `verify_package_index` —— `tmp/.packageinfo` 不存在或
+  少于 100 个包就 `die` 并指向 `make prereq`。
+- `scripts/check-deps.sh` 补上同一条探针（照上游写法真跑 `from distutils import util`），
+  缺了同时算进 `full` 与 `config` 两档。`command -v` 看不见这种缺，CI 的
+  `ubuntu-24.04` 是 Python 3.12 也不会报 —— 只有真正跑过 bookworm 才会遇到。
+
+顺带确认：`feeds install` 那 1.6 万行警告之外，只有 2 条 `WARNING: Makefile` 属于
+上游 wwand feed 自己的包（`rmnet-nss` 依赖 `kmod-qca-nss-drv`、`wwand-ims` 依赖
+`strongswan-mod-eap-aka`/`-p-cscf`/`libsimaka`），与 `ENABLE_WWAND` 默认集合无关，
+`audit_own_warnings` 把它们正确归到"上游 feed"而不是"我们的"。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh
