@@ -144,6 +144,21 @@ UNVERIFIED_REASONS=()
 drift() { DRIFT_REASONS+=("$*"); }
 unverified() { UNVERIFIED_REASONS+=("$*"); }
 
+# 在 Windows（Git Bash / MSYS）上解包 upstream 快照时最常见的一句话是 tar 建不了
+# 符号链接，而 firewall4 与 mt76 两份快照里恰恰有 fw3 -> fw4、mt7662.bin -> … 这样的
+# 链接。少几个链接，后面的 git apply --check 会因为**文件不存在**而报补丁打不上 ——
+# 看起来像漂移，其实是宿主能力问题。2026-11-23 那次就是如此：同一份补丁在
+# debian:bookworm-slim 与 gcc:15 两个容器里全部 OK（退出码 0）。
+# 所以这里给出一条能直接粘走的命令，而不是让人对着原因猜。
+symlink_hint() {
+	[ "${SYMLINK_HINTED:-0}" = 1 ] && return 0
+	SYMLINK_HINTED=1
+	warn "这一层在本机判不了：宿主建不了符号链接，解出来的树缺文件。"
+	warn "把它放进 Linux 容器里跑，判定与 CI 一致（在仓库根目录执行，<rev> 换成要比对的 revision）："
+	warn "  docker run --rm -v \"\$PWD\":/repo -w /repo debian:bookworm-slim bash -c 'apt-get update -qq && apt-get install -y -qq git python3 curl xz-utils patch build-essential pkg-config libmnl-dev libjansson-dev && bash scripts/verify-upstream-integration.sh --ref <rev> --compile .'"
+	return 0
+}
+
 need() {
 	command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1"
 }
@@ -320,6 +335,9 @@ download_and_extract() {
 		why="$(head -n1 "$WORK/tar.err" 2>/dev/null || true)"
 		[ -n "$why" ] || why="tar 退出码非 0，但没有输出原因"
 		unverified "解包失败：$(basename "$tgz") —— $why"
+		case "$why" in
+			*[Ss]ymlink* | *符号链接*) symlink_hint ;;
+		esac
 		return 1
 	fi
 	return 0
