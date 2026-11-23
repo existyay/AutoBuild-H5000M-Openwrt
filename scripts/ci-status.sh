@@ -12,13 +12,17 @@
 #
 set -Eeuo pipefail
 
+# Checked before REPO is resolved: `$(gh repo view …)` was evaluated first, so a
+# missing CLI produced "无法确定仓库；请设置 REPO=owner/name" instead of saying
+# what was actually wrong.
+command -v gh >/dev/null 2>&1 || {
+	echo "需要 gh CLI" >&2
+	exit 2
+}
+
 REPO="${REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
 [ -n "$REPO" ] || {
 	echo "无法确定仓库；请设置 REPO=owner/name" >&2
-	exit 2
-}
-command -v gh >/dev/null 2>&1 || {
-	echo "需要 gh CLI" >&2
 	exit 2
 }
 
@@ -49,7 +53,19 @@ if [ $# -ge 1 ]; then
 	echo
 	bold "-- 失败诊断（若已产出）--"
 	ylw "运行摘要里已有自动诊断；也可: gh run view ${run_id} --log-failed | tail -100"
-	exit 0
+	# The exit status has to reflect the run: this branch used to end with
+	# `exit 0` unconditionally, so `scripts/ci-status.sh <id> && …` treated a red
+	# run as green.
+	n_failed="$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" \
+		--jq '[.jobs[] | select(.conclusion == "failure")] | length' 2>/dev/null || echo 0)"
+	case "$n_failed" in
+		'' | 0) exit 0 ;;
+		*)
+			echo
+			red "  ${n_failed} 个 job 失败"
+			exit 1
+			;;
+	esac
 fi
 
 bold "== 最近 10 次运行（${REPO}）=="
