@@ -103,6 +103,21 @@ if [ -z "$TARGET" ]; then
 	fi
 fi
 
+# A directory argument is the obvious thing to type ("check what the build put
+# in artifacts/apk-repo"), and apk-tools 3.x does NOT append packages.adb to a
+# bare directory line in /etc/apk/repositories: it falls back to the legacy
+# <dir>/<arch>/APKINDEX.tar.gz and finds nothing, so every single check then
+# fails with "unable to select packages" and the run looks like a broken
+# repository instead of a wrong argument.  Measured: 74 bogus failures.
+if [ -d "$TARGET" ]; then
+	if [ -s "$TARGET/packages.adb" ]; then
+		TARGET="$(cd "$TARGET" && pwd)/packages.adb"
+	else
+		echo "error: $TARGET has no packages.adb; build once or point at the .adb" >&2
+		exit 1
+	fi
+fi
+
 # ------------------------------------------------ what has to be installable ---
 #
 # Front-ends a user may `apk add`.  The LuCI app AND its Chinese translation,
@@ -208,8 +223,15 @@ TOOLS_SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH" "$TOOLS_SCRATCH"' EXIT
 mkdir -p "$SCRATCH/cache"
 
-# --usermode: this runs as an ordinary user, not root.
-if ! "$APK" --root "$SCRATCH" --arch "$ARCH" --allow-untrusted --initdb --usermode add >/dev/null 2>&1; then
+# --usermode keeps apk from chowning/chrooting as an ordinary user, but
+# apk-tools 3.0.5 refuses the flag outright when the caller IS root
+# ("ERROR: --usermode not allowed as root", exit 99).  This script ran only as
+# a non-root user before, so the first initdb command died with
+# "could not create a scratch apk database" in every container or root shell.
+# The database is identical either way.
+if [ "$(id -u)" -eq 0 ]; then USERMODE=(); else USERMODE=(--usermode); fi
+
+if ! "$APK" --root "$SCRATCH" --arch "$ARCH" --allow-untrusted --initdb "${USERMODE[@]}" add >/dev/null 2>&1; then
 	echo "error: could not create a scratch apk database in $SCRATCH" >&2
 	exit 1
 fi
@@ -310,7 +332,7 @@ echo
 # which files the packages install, and that is answered without running them.
 echo "=== adblock-fast's recommended tools land where it probes ==="
 mkdir -p "$TOOLS_SCRATCH/cache"
-if ! "$APK" --root "$TOOLS_SCRATCH" --arch "$ARCH" --allow-untrusted --initdb --usermode add >/dev/null 2>&1; then
+if ! "$APK" --root "$TOOLS_SCRATCH" --arch "$ARCH" --allow-untrusted --initdb "${USERMODE[@]}" add >/dev/null 2>&1; then
 	bad "could not create a scratch apk database for the install check"
 else
 	printf '%s\n' "$TARGET" >"$TOOLS_SCRATCH/etc/apk/repositories"
