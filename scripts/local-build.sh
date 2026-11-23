@@ -2107,8 +2107,23 @@ prune_dangling_depends() {
 		# still contained the pruned clause when the audit ran at 19:05, which
 		# made the audit fail on a dependency that had already been removed.
 		# Dropping the stale scan result is what makes the prune authoritative.
-		rm -f "${SRC}/tmp/info/.packageinfo-$(basename "$(dirname "$mk")")" \
-			"${SRC}/tmp/.config-package.in" 2>/dev/null || true
+		# The chunk is named after the directory RELATIVE to package/ with
+		# every slash turned into an underscore — include/scan.mk builds the
+		# merged index with
+		#
+		#   cat $(FILELIST) | awk '{gsub(/\//,"_",$0);print "…/.packageinfo-" $0}'
+		#
+		# so `package/feeds/packages/net/kcptun-client` is
+		# `.packageinfo-feeds_packages_net_kcptun-client`.  Using
+		# $(basename $(dirname)) here — as this line used to — computed
+		# `.packageinfo-kcptun-client`, a file that never exists, so the
+		# invalidation was a no-op and the stale clause survived in the
+		# index exactly as the comment above complains.
+		local rel chunk
+		rel="${mk#"${SRC}/package/"}"
+		rel="${rel%/Makefile}"
+		chunk="${SRC}/tmp/info/.packageinfo-${rel//\//_}"
+		rm -f "$chunk" "${SRC}/tmp/.packageinfo" "${SRC}/tmp/.config-package.in" 2>/dev/null || true
 		log "  pruned the dangling dependency on ${pkg} (no feed in this tree provides it)"
 		pruned=$((pruned + 1))
 	done
@@ -3238,6 +3253,31 @@ prepare_config_stage() {
 	touch "$stamp"
 
 	log "Configuration stage: host prerequisite gate satisfied directly (nothing is compiled)"
+
+	# Drop the package scan cache.
+	#
+	# include/scan.mk decides staleness from MTIMES and from a stamp that covers
+	# only the FILELIST of package directories, while normalize_source_mtimes()
+	# deliberately rewrites every source mtime to a content-derived value.  A
+	# re-cloned or re-installed package can therefore sit behind a cached
+	# tmp/.packageinfo that predates it, and the merge that builds it is
+	#
+	#   -cat $(FILELIST) | ... | xargs cat > $@ 2>/dev/null
+	#
+	# — a MISSING or empty chunk silently subtracts a whole directory without a
+	# single log line.  defconfig then rewrites .config without those packages
+	# and still exits 0, which is exactly how the `minimal` and `all-optional`
+	# profiles lost luci-theme-argon, mosdns, easymesh and chinadns-ng while the
+	# two profiles before them passed.  The configuration stage compiles
+	# nothing, so paying for one honest rescan here is the cheap side of the
+	# trade: correctness over a cache that cannot be trusted across a re-clone.
+	local cache
+	for cache in "${SRC}"/tmp/info/.packageinfo-* "${SRC}"/tmp/info/.files-packageinfo-* \
+		"${SRC}/tmp/.packageinfo" "${SRC}/tmp/.config-package.in"; do
+		[ -e "$cache" ] || continue
+		rm -f "$cache"
+	done
+	log "Dropped the package scan cache — tmp/.packageinfo is rebuilt from the current package/ tree"
 }
 
 config_symbol_is_set() {
@@ -3265,6 +3305,44 @@ assert_repo_only() {
 	return 0
 }
 
+# Say WHICH layer lost a package.  The bare "did not survive defconfig" line
+# only describes the last of three, and the middle one is silent: a package can
+# be missing from the merged scan output (tmp/.packageinfo), missing from the
+# Kconfig that output produces (tmp/.config-package.in), or present in the
+# Kconfig and still switched off by defconfig.  include/scan.mk merges chunks
+# with `xargs cat > $@ 2>/dev/null`, so a missing chunk subtracts a whole
+# directory without logging anything — without this the next reader is left to
+# guess, which is how a config regression gets re-diagnosed from scratch.
+diagnose_missing_package() {
+	local pkg="$1" dirs found="" dir
+
+	# A package's Makefile lives in a directory named after it: either a real
+	# clone under package/<pkg> or a feed symlink under package/feeds/*/<pkg>.
+	dirs="$(cd "$SRC" 2>/dev/null && find package -maxdepth 3 -type d -name "$pkg" 2>/dev/null | head -n 3)"
+
+	if grep -q "^config PACKAGE_${pkg}\$" "${SRC}/tmp/.config-package.in" 2>/dev/null; then
+		warn "  ${pkg}: it IS in the Kconfig (tmp/.config-package.in) and defconfig still turned it off — look for a select/dependency conflict"
+		return 0
+	fi
+
+	while IFS= read -r dir; do
+		[ -n "$dir" ] || continue
+		if grep -q "^Source-Makefile: ${dir}/Makefile\$" "${SRC}/tmp/.packageinfo" 2>/dev/null; then
+			found="$dir"
+			break
+		fi
+	done <<< "$dirs"
+
+	if [ -n "$found" ]; then
+		warn "  ${pkg}: in tmp/.packageinfo as ${found} but missing from tmp/.config-package.in — package-metadata dropped it"
+	elif [ -n "$dirs" ]; then
+		warn "  ${pkg}: on disk at $(printf '%s' "$dirs" | head -n 1) but ABSENT from tmp/.packageinfo — the package scan missed it (see logs/package/<dir>/dump.txt)"
+	else
+		warn "  ${pkg}: not on disk anywhere under package/ — nothing cloned or installed it"
+	fi
+	return 0
+}
+
 verify_config() {
 	local pkg fe entry checked missing=()
 
@@ -3280,6 +3358,7 @@ verify_config() {
 		printf '\n' >&2
 		for pkg in "${missing[@]}"; do
 			warn "required package did not survive defconfig: ${pkg}"
+			diagnose_missing_package "$pkg"
 		done
 		die "Configuration is missing required packages — refusing to build a firmware without ${missing[*]}"
 	fi
