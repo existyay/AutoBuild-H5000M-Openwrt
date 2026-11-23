@@ -20,9 +20,10 @@ export default {
 	//     Please PR.
 	//   * `chore(master): release X` — Release Please derives the scope from the
 	//     BRANCH NAME, so the scope changes with the default branch and cannot
-	//     be part of a fixed enum.  release-please.yml overrides the pattern to
-	//     use `chore(release):` instead; this pattern is kept as defence for a
-	//     repo whose Release Please config has not been updated yet.
+	//     be part of a fixed enum.  The pattern is added to `ignores` below,
+	//     which is the only mechanism that works: release-please.yml records
+	//     that setting `pull-request-title-pattern` on the action does nothing
+	//     (the action's input list is fixed and does not include it).
 	ignores: [
 		(msg) => /^Merge (branch|remote-tracking|pull request)\b/.test(msg),
 		(msg) => /^chore\([^)]*\): release\b/.test(msg),

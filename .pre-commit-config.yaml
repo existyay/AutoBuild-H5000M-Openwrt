@@ -1,9 +1,21 @@
 # pre-commit — the local half of the gate.
 #
-# Every hook here mirrors a CI check, so a contributor finds out in one second
+# Most hooks here mirror a CI check, so a contributor finds out in one second
 # what the pipeline would have told them in ten minutes.  The rule for this
-# file: a hook is only added if CI also enforces it.  A hook that CI does not
-# run trains people to bypass CI.
+# file: a hook is only added if CI also enforces it *or* the hook is
+# local-only on purpose and says so.
+#
+# Enforced by CI as well (must stay in lockstep with checks.yml):
+#   shellcheck (-S error), actionlint, zizmor, commitlint.
+# Local-only, deliberately:
+#   shfmt            — this codebase is tab-indented in a style that predates
+#                      shfmt, so the hook reports a diff instead of rewriting;
+#                      making it a CI gate would fail on files nobody touched.
+#   check-yaml/json, end-of-file-fixer, trailing-whitespace, mixed-line-ending
+#                    — the hygiene set.  Trailing whitespace inside *.patch is
+#                      meaningful diff context, so a CI gate would have to carry
+#                      an exclude list; .gitattributes enforces the part that
+#                      broke real builds (CRLF on the device scripts).
 #
 # Install:  pipx install pre-commit && pre-commit install --install-hooks
 #           pre-commit install --hook-type commit-msg
