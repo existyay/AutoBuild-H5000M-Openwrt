@@ -558,7 +558,7 @@ jobs:
               -o /dev/null -w '%{http_code}' \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H 'Accept: application/vnd.github+json' \
-              "https://api.github.com/repos/${repo}") || {
+              "https://api.github.com/repos/${repo}")" || {
               # curl itself failed (DNS, timeout, connection reset).  Under
               # `set -e` a failing assignment used to abort the whole step with
               # curl's own message, so the ::error:: line below never printed
