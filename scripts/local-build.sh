@@ -341,6 +341,27 @@ run_with_timeout() {
 	fi
 }
 
+# Copy the files selected by a find expression into one directory.
+#
+# Written as `find ... -exec cp -f {} "$dir/" \;` this forks one cp per file.
+# The apk repository and the artifact directory are both flat copies of a few
+# thousand small files, so that is a few thousand forks for no reason.  With a
+# cp that understands --target-directory, find batches them into a handful of
+# invocations instead.  The per-file form stays as the fallback for busybox cp,
+# where -t does not exist.
+copy_files_into() {
+	local dir="$1"
+	shift
+
+	[ -d "$dir" ] || return 0
+	if cp --help 2>/dev/null | grep -q -- '--target-directory'; then
+		"$@" -exec cp -f -t "$dir" {} + 2>/dev/null || true
+	else
+		"$@" -exec cp -f {} "$dir/" \; 2>/dev/null || true
+	fi
+	return 0
+}
+
 # --------------------------------------------------------------- network -----
 github_url_candidates() {
 	local url="$1" prefix
@@ -751,37 +772,76 @@ normalize_source_mtimes() {
 		-not -path "${SRC}/dl/*"
 	)
 
-	local count
-	count="$(find "$SRC" -type f "${scope[@]}" 2>/dev/null | wc -l)"
-	[ "$count" -gt 0 ] || return 0
+	local list count
+
+	# One tree walk, not two: the list is written once and both the count and
+	# the hashing pass read it back.  The old form walked the whole tree for
+	# `wc -l` and then again for the hashing pass.
+	list="$(mktemp "${TMPDIR:-/tmp}/h5000m-mtimes.XXXXXX" 2>/dev/null)" || return 0
+	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null >"$list"
+	count="$(tr -cd '\000' <"$list" | wc -c)"
+	if [ "$count" -eq 0 ]; then
+		rm -f "$list"
+		return 0
+	fi
 
 	log "Normalizing mtimes of ${count} source files (content-derived, for cache reuse)"
-	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null |
-		xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 bash -c '
-			for f do
-				h=$(sha1sum "$f" 2>/dev/null | cut -c1-8) || continue
-				[ -n "$h" ] || continue
-				# 8 hex digits as an unsigned value: 16# is bash-only, so fold
-				# the nibbles explicitly.
-				n=0
-				i=0
-				while [ "$i" -lt 8 ]; do
-					c=${h:$i:1}
-					case "$c" in
-						[0-9]) d=$c ;;
-						a|A) d=10 ;; b|B) d=11 ;; c|C) d=12 ;; d|D) d=13 ;;
-						e|E) d=14 ;; f|F) d=15 ;;
-						*) n=""; break ;;
-					esac
-					n=$(( n * 16 + d ))
-					i=$(( i + 1 ))
-				done
-				[ -n "$n" ] || continue
-				# 2000-01-01 + (hash mod 20 years), always in the past.
-				touch -d "@$(( 946684800 + n % 630720000 ))" "$f" 2>/dev/null || true
-			done
-		' _ || warn "Some source mtimes could not be normalized"
+	# sha1sum once per 64 files, not once per file.  A full tree is ~10^5
+	# files, so the old per-file call was ~10^5 process spawns — minutes of
+	# pure fork overhead on a CI runner, every single build.  `sha1sum f1 ..
+	# f64` prints one line per file, and the line count tells us whether the
+	# output is parseable; a filename with a newline or a backslash makes
+	# sha1sum escape or wrap it, and that batch falls back to one file per
+	# call rather than touching the wrong path.
+	xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 bash -c '
+		apply_mtime() {
+			local h="$1" f="$2" n=0 i=0 c d
 
+			# 8 hex digits as an unsigned value: 16# is bash-only, so fold
+			# the nibbles explicitly.
+			while [ "$i" -lt 8 ]; do
+				c=${h:$i:1}
+				case "$c" in
+					[0-9]) d=$c ;;
+					a|A) d=10 ;; b|B) d=11 ;; c|C) d=12 ;; d|D) d=13 ;;
+					e|E) d=14 ;; f|F) d=15 ;;
+					*) return 0 ;;
+				esac
+				n=$(( n * 16 + d ))
+				i=$(( i + 1 ))
+			done
+			# 2000-01-01 + (hash mod 20 years), always in the past.
+			touch -d "@$(( 946684800 + n % 630720000 ))" "$f" 2>/dev/null || true
+		}
+
+		out=$(sha1sum -- "$@" 2>/dev/null) || exit 0
+		lines=$(printf "%s\n" "$out" | wc -l)
+		if [ "$lines" -eq "$#" ]; then
+			# sha1sum keeps the argument order, so line i belongs to argument
+			# i — the path is taken from "$@", not from the output line.
+			# Parsing the path back out of the line is what made this silently
+			# do nothing on MSYS: there sha1sum marks binary input as
+			# `hash *file` instead of `hash  file`, so a "strip the first two
+			# spaces" split produced a path that does not exist and every
+			# touch failed while the loop reported success.
+			args=("$@")
+			i=0
+			while IFS= read -r line; do
+				h=${line%% *}
+				h=${h#\\}
+				apply_mtime "$h" "${args[$i]}"
+				i=$(( i + 1 ))
+			done <<<"$out"
+			exit 0
+		fi
+
+		for f do
+			h=$(sha1sum -- "$f" 2>/dev/null | cut -c1-8)
+			[ -n "$h" ] && apply_mtime "$h" "$f"
+		done
+	' _ <"$list" || warn "Some source mtimes could not be normalized"
+
+	rm -f "$list"
 	return 0
 }
 
@@ -3413,15 +3473,17 @@ build_apk_repository() {
 	local repo="${dest}/apk-repo"
 	local apk_tool=""
 	local count
+	local sign_args=()
 
 	mkdir -p "$repo"
 
 	# Collect from both locations.  cp -a on the tree would keep the per-feed
-	# directories; this flattens deliberately.
-	find "${SRC}/bin/packages/${TARGET_ARCH}" -mindepth 2 -maxdepth 2 -name '*.apk' \
-		-exec cp -f {} "$repo/" \; 2>/dev/null || true
-	find "${SRC}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}/packages" -maxdepth 1 -name '*.apk' \
-		-exec cp -f {} "$repo/" \; 2>/dev/null || true
+	# directories; this flattens deliberately.  Batched, because this directory
+	# holds a few thousand .apk files.
+	copy_files_into "$repo" find "${SRC}/bin/packages/${TARGET_ARCH}" \
+		-mindepth 2 -maxdepth 2 -name '*.apk'
+	copy_files_into "$repo" find "${SRC}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}/packages" \
+		-maxdepth 1 -name '*.apk'
 
 	count="$(find "$repo" -maxdepth 1 -name '*.apk' | wc -l)"
 	if [ "$count" -eq 0 ]; then
@@ -3454,7 +3516,6 @@ build_apk_repository() {
 	#
 	# --allow-untrusted still applies to the .apk files themselves, which carry
 	# no signature this host trusts; the index is what the target verifies.
-	sign_args=()
 	if [ -f "${SRC}/private-key.pem" ]; then
 		sign_args=(--sign-key "${SRC}/private-key.pem")
 	else
@@ -3503,15 +3564,14 @@ collect_artifacts() {
 	# The rootfs tarballs are included because this config builds them
 	# (CONFIG_TARGET_ROOTFS_TARGZ) and they are the artifact used for a
 	# container/chroot or a manual sysupgrade.
-	find "$bin_dir" -maxdepth 1 -type f \
+	copy_files_into "$dest" find "$bin_dir" -maxdepth 1 -type f \
 		\( -name '*.bin' -o -name '*.itb' -o -name '*.tar.gz' -o -name '*.img.gz' \
 		-o -name '*.manifest' -o -name 'profiles.json' -o -name 'sha256sums' \
-		-o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \) \
-		-exec cp -f {} "$dest/" \;
+		-o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \)
 
 	if [ -d "${bin_dir}/packages" ]; then
 		mkdir -p "${dest}/packages"
-		find "${bin_dir}/packages" -maxdepth 1 -type f -name '*.apk' -exec cp -f {} "${dest}/packages/" \;
+		copy_files_into "${dest}/packages" find "${bin_dir}/packages" -maxdepth 1 -type f -name '*.apk'
 	fi
 
 	build_apk_repository "$dest"
