@@ -12,3 +12,13 @@
 # They are shipped into the rootfs by local-packages/*/Makefile, so LF is
 # mandatory here, not a style preference.
 local-packages/**/files/** text eol=lf
+# Workflows and the files every job parses.  CRLF in YAML is legal but makes a
+# one-line edit look like a whole-file rewrite in `git diff`, and it is the same
+# class of accident as the device scripts above: invisible until something
+# greps for an anchor.
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.js   text eol=lf
+*.uc   text eol=lf
+*.mjs  text eol=lf
