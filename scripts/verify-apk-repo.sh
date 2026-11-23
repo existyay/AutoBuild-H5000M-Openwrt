@@ -52,14 +52,38 @@ for arg in "$@"; do
 			sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 			exit 0
 			;;
-		*) TARGET="$arg" ;;
+		-*)
+			# A typo used to land in the *) branch and become TARGET, so the
+			# script went on to "verify" a repository named "--self-test" and
+			# reported a missing apk instead of an unknown option.
+			echo "error: unknown option: ${arg} (try --help)" >&2
+			exit 2
+			;;
+		*)
+			if [ -n "$TARGET" ]; then
+				echo "error: more than one target given: '${TARGET}' and '${arg}'" >&2
+				exit 2
+			fi
+			TARGET="$arg"
+			;;
 	esac
 done
+
+# APK_OVERRIDE is what .github/actions/verify-repo sets from its `apk:` input.
+# It was never read here, so the input silently did nothing.
+APK_OVERRIDE="${APK_OVERRIDE:-}"
 
 # The apk this tree built speaks the same index format the firmware does, so it
 # is the only tool that answers the question exactly.  A system apk of a
 # different major version reads a different format and would give a false answer.
-if [ -x "${SRC}/staging_dir/host/bin/apk" ]; then
+if [ -n "$APK_OVERRIDE" ]; then
+	if [ -x "$APK_OVERRIDE" ]; then
+		APK="$APK_OVERRIDE"
+	else
+		echo "error: APK_OVERRIDE='${APK_OVERRIDE}' is not an executable file" >&2
+		exit 1
+	fi
+elif [ -x "${SRC}/staging_dir/host/bin/apk" ]; then
 	APK="${SRC}/staging_dir/host/bin/apk"
 elif command -v apk >/dev/null 2>&1; then
 	APK="$(command -v apk)"

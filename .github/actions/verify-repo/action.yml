@@ -28,7 +28,10 @@ inputs:
   working_directory:
     description: Directory the paths are relative to.
     required: false
-    default: /o
+    # /o only exists in build.yml, which bind-mounts the workspace there to keep
+    # TMPDIR socket paths short.  Any other caller has the repository at
+    # ${{ github.workspace }}, so that is the sane default.
+    default: ${{ github.workspace }}
 
 outputs:
   result:
@@ -51,11 +54,22 @@ runs:
         args=()
         [ "$WITH_FEEDS" = "true" ] && args+=(--with-official-feeds)
         [ -n "$APK_TARGET" ] && args+=("$APK_TARGET")
-        # The script prefers openwrt/staging_dir/host/bin/apk itself; APK_BIN
-        # is accepted so a caller can point at a different build.
+        # The script prefers openwrt/staging_dir/host/bin/apk itself and falls
+        # back to APK_OVERRIDE (this input), so a caller can point at a
+        # different build.
+        #
+        # The exit status has to be propagated: this script runs with
+        # `set -uo pipefail` and no `-e`, so a failing verification used to fall
+        # through to `echo result=pass`, report success, and leave the step
+        # green — a gate that never fails.
+        rc=0
         if [ -n "$APK_BIN" ] && [ -x "$APK_BIN" ]; then
-          APK_OVERRIDE="$APK_BIN" ./scripts/verify-apk-repo.sh "${args[@]}"
+          APK_OVERRIDE="$APK_BIN" ./scripts/verify-apk-repo.sh "${args[@]}" || rc=$?
         else
-          ./scripts/verify-apk-repo.sh "${args[@]}"
+          ./scripts/verify-apk-repo.sh "${args[@]}" || rc=$?
+        fi
+        if [ "$rc" -ne 0 ]; then
+          echo "result=fail" >> "$GITHUB_OUTPUT"
+          exit "$rc"
         fi
         echo "result=pass" >> "$GITHUB_OUTPUT"
