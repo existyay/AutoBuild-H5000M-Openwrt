@@ -2018,6 +2018,113 @@ main 的 head）重新走了一遍全量：nftables 1.1.7 与 libnftnl 1.3.2 两
 同样通过，Nikki-RS 四处锚点都在，`clash-rs` 五个资产哈希逐条一致。也就是说补丁
 内容一直是对的 —— `v1.1.9` 缺的只是"没被装上"这一步。
 
+### 4.2 2026-11-23 例行核对：`058da17` → main `14a07b7`（108 个上游提交）
+
+这轮只做了核对，**没有把 pin 往前推**：patch 那一半有证据，全量构建那一半没有。
+
+| 关注点 | `058da17` | 这次核对的 main `14a07b7` | 结论 |
+| --- | --- | --- | --- |
+| nftables / libnftnl | `1.1.7` / `1.3.2` | 同 | **没变**，两层用户态补丁逐字节照旧 |
+| firewall4 | 源码 `3722ead` | 同 | **没变**，`firewall4-patches/100-fullcone-support.patch` 不用重生成 |
+| kernel | 6.18.60 | 6.18.64（`f7d14dc28` → `a5383abb3` → `75fde714f`） | 变了，**ABI 会跟着变** |
+| 工具链 | gcc 14 默认 | gcc 15 默认（`fd3b9d467`） | 变了；用户态四层与内核模块已在容器里用 gcc 15 真编过（见 4.2.1） |
+| `netfilter.mk` | — | 新增 `kmod-nf-xtables`、`*_LEGACY` 符号，`kmod-ipt-*` / `kmod-nft-compat` 改为依赖它 | 加法式改动，kconfig 自己会带上新依赖 |
+| mediatek 目标 | — | 只动 `mt7981` / `mt7986` 的 DTS 与 base-files | `mt7987a-hiveton-h5000m.dts` 与 `patches/` 两个 hunk 未被触碰 |
+
+机器判据（`scripts/verify-upstream-integration.sh --ref 14a07b7`）：nftables、libnftnl、
+firewall4、mt76 四层补丁全部 `git apply --check` 通过，`patches/0001`、`0002` 通过，
+Nikki-RS 四处锚点与 `clash-rs` 五个资产哈希全部一致。也就是说**真到了要推 pin 的那一天，
+补丁这一层已经就绪**；缺的只是整条发布链真的跑一次，而补丁与工具链的适配已在 4.2.1 里核过。
+
+#### 4.2.1 同一 revision 在 Linux 容器里的"真打了 + 真编过"
+
+Git Bash 里 firewall4 与 mt76 这两层只能给退出码 2：两份快照里有 `fw3 -> fw4`、
+`mt7662.bin -> mt7662_firmware_e3_v2.3.bin` 这样的符号链接，Windows 的 `tar` 建不了
+链接，解出来的树缺文件 —— 而缺文件会让 `git apply --check` 报"补丁打不上"，看着像漂移。
+所以同一套检查在 Linux 容器里又跑了一遍，并把 `--compile` 打开（它会真的打补丁并编译）：
+
+```sh
+docker run --rm -v "$PWD":/repo -w /repo debian:bookworm-slim bash -c \
+  'apt-get update -qq && apt-get install -y -qq git python3 curl xz-utils patch \
+     build-essential pkg-config libmnl-dev libjansson-dev && \
+   bash scripts/verify-upstream-integration.sh --ref 14a07b78e9ac9d604547533550e6aa41955ac588 --compile .'
+```
+
+| 容器 | 结果 |
+| --- | --- |
+| `debian:bookworm-slim`（gcc 12） | 四层补丁全部 `git apply --check` 通过，`patches/0001`、`0002` 通过，Nikki-RS / `clash-rs` 全绿，退出码 **0**；`libnftnl 1.3.2` 与 `nftables 1.1.7` 真打了补丁并编译通过 |
+| `gcc:15`（GCC 15.3.0） | 同上，退出码 **0** —— gcc 15 的默认切换不影响这四层 |
+
+也就是说"firewall4 / mt76 两层判不了"只是宿主能力问题，不是补丁问题；上面那张表里
+"gcc 15 是唯一 dry-run 挡不住的改动"这一格，用户态那一半已经被堵上。
+
+内核模块那一半（`local-packages/nft-fullcone`，仓库里唯一的 C 代码）单独核了一遍：
+`src/Makefile` 带着 `ccflags-y += -Werror -Wall`，gcc 15 只要多一条警告就是硬失败。
+
+```sh
+# 一棵 6.18.64 的树就够，modules_prepare 不需要整编内核
+./scripts/config -e NF_CONNTRACK -e NF_CONNTRACK_EVENTS -e NF_NAT -e NF_TABLES -e IPV6
+make olddefconfig && make -j"$(nproc)" modules_prepare
+make M=<nft-fullcone/src> CONFIG_NFT_FULLCONE=m modules
+```
+
+`nf_nat_fullcone.o`、`nft_ext_fullcone.o`、`nft_fullcone.o` 在 **gcc 15.3.0 + 6.18.64** 下
+全部干净编译；最后 `modpost` 会报一串 `ERROR: modpost: "nft_register_expr" … undefined!`，
+那是 `modules_prepare` 没有 `Module.symvers` 的必然结果，不是代码问题（要消掉得整编内核）。
+
+这一步顺手暴露了一个**隐式依赖**，已经修掉：`include/net/netfilter/nf_conntrack_ecache.h`
+把 `struct nf_ct_event_notifier` 与 `nf_conntrack_register_notifier()` /
+`nf_conntrack_unregister_notifier()` 全放在 `#ifdef CONFIG_NF_CONNTRACK_EVENTS` 里
+（`#else` 分支是空实现），而 `nft_ext_fullcone.c` 三样都用。少了这个符号报的是：
+
+```
+nft_ext_fullcone.c:153:34: error: invalid use of undefined type 'struct nf_ct_event_notifier'
+nft_ext_fullcone.c:161:25: error: implicit declaration of function 'nf_conntrack_register_notifier'
+cc1: all warnings being treated as errors
+```
+
+它今天是**被别的包顺带打开的**（`kmod-nf-conntrack-netlink` 的
+`KCONFIG:=CONFIG_NF_CT_NETLINK CONFIG_NF_CONNTRACK_EVENTS=y …`），离"某次配置瘦身就不编"
+只差一步，而症状会指着 fullcone。所以 `local-packages/nft-fullcone/Makefile` 的 `KCONFIG`
+现在写成 `CONFIG_NFT_FULLCONE CONFIG_NF_CONNTRACK_EVENTS=y`（与上游同一写法），元数据里能
+看到 `Kernel-Config: CONFIG_NFT_FULLCONE CONFIG_NF_CONNTRACK_EVENTS=y`。
+
+配置这一层也在 `14a07b7` 上跑了一次（裸树 + 基础 feeds + 本仓库 `local-packages/`，
+不是完整 15 步流程）：`make defconfig` 退出码 0，没有任何
+`WARNING: Makefile '…' has a dependency on … which does not exist` 指向本仓库自己的
+Makefile，并且 `kmod-ip6tables`、`kmod-ip6tables-extra`、`kmod-ipt-nat6`、`kmod-nf-nat6`、
+`kmod-ip6-tunnel`、`kmod-ipt-ipset`、`kmod-nf-xtables`、`kmod-nft-fullcone`、`firewall4`、
+`nftables-json`、`ip6tables-nft`、`ip6tables-mod-nat`、`ipset`、`dnsmasq-full` 全在
+`tmp/.packageinfo` 里 —— `netfilter.mk` 的那次重写没有弄丢我们任何一个 kmod 名字。
+
+最后把"6.18.60 → 6.18.64 会不会脏了构建缓存"也查清了：**不会**，缓存的 tag 只按配置
+哈希命名，不需要带上内核小版本，因为上游自己的产物路径就是版本化的：
+
+- `include/kernel.mk:47` `LINUX_DIR ?= $(KERNEL_BUILD_DIR)/linux-$(LINUX_VERSION)` —— 内核目录名带版本
+- `include/kernel.mk:206` `$(STAMP_BUILT): $(LINUX_DIR)/.config` —— 内核 stamp 依赖树内 `.config`
+- `package/kernel/linux/Makefile:30` `STAMP_BUILT:=$(STAMP_BUILT)_$(shell $(SCRIPT_DIR)/kconfig.pl $(LINUX_DIR)/.config | $(MKHASH) md5)` —— kmod stamp 名字里带内核配置哈希
+
+版本一变，`linux-6.18.60` 这个目录不再被引用、kmod 的 stamp 名字跟着 `.config` 变，
+内核与 kmod 会自己重编；缓存里留下来的只是"确实没变"的那些包。
+
+所以 `OPENWRT_PINNED_REVISION` 仍是 `058da17`，`latest` 那条线本来就在编 `14a07b7`，
+固件内容没有落后。推 pin 需要的只有一条：下一次定时构建（或手动 `pinned=true`）
+在 `14a07b78e9ac9d604547533550e6aa41955ac588` 上跑过镜像 + apk 仓库 + 发布三段门禁。
+
+这轮顺手修的三处**自身缺陷**（前两处在 `scripts/local-build.sh`，第三处在
+`local-packages/nft-fullcone/Makefile`）：
+
+1. `normalize_source_mtimes` 原来对每个文件各起一次 `sha1sum` + `cut`（约 10^5 次
+   fork，Windows 上实测 1500 个文件 12.9 s），改成每 64 个文件一次 `sha1sum`，
+   并按参数顺序取路径（不再从输出行里反解路径 —— MSYS 的 `sha1sum` 打的是
+   `hash *file`，反解会悄悄 `touch` 到不存在的路径）；同一批实测 3.6 s。
+2. `build_apk_repository` / `collect_artifacts` 原来是 `find -exec cp -f {} dir/ \;`，
+   几千个小文件就是几千次 fork，改为 `cp -f -t dir` 批量（busybox 不支持 `-t`
+   时回落到逐文件）。
+3. `nft-fullcone` 的 `KCONFIG` 现在显式写着 `CONFIG_NF_CONNTRACK_EVENTS=y`。这个
+   符号原来是别的包顺带打开的，而模块源码三处都用它（见 4.2.1）—— 属于"能编过纯属
+   运气"，一旦依赖链变了，报错会指向 fullcone 而不是缺失的符号。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh
