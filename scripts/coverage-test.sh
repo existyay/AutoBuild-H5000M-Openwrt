@@ -10,11 +10,18 @@
 # Usage:
 #   scripts/coverage-test.sh quick     # default + the two modem stacks
 #   scripts/coverage-test.sh full      # everything below
+#   scripts/coverage-test.sh quick minimal   # only one profile, when debugging it
+#
+# The third argument exists because a single failing profile otherwise costs a
+# full four-profile run to look at: `minimal` and `all-optional` are the ones
+# that regress, and re-running `default` and `mt5700m` in front of them just to
+# reach it is dead time.
 #
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE_SET="${1:-quick}"
+ONLY_PROFILE="${2:-}"
 SOURCE_DIR="${SOURCE_DIR:-openwrt}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts-coverage}"
 
@@ -28,6 +35,10 @@ run_profile() {
 	local name="$1"
 	shift
 	local log="${ROOT_DIR}/coverage-${name}.log"
+
+	if [ -n "$ONLY_PROFILE" ] && [ "$name" != "$ONLY_PROFILE" ]; then
+		return 0
+	fi
 
 	printf '\n\033[1;36m== profile: %s ==\033[0m\n' "$name"
 
