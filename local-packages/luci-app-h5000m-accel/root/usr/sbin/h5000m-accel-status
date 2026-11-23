@@ -80,7 +80,8 @@ echo "ppe_signal=${ppe_signal:-none}"
 # Offloaded connections.  NF_FLOW_TABLE_PROCFS is not set in this kernel, so
 # there is no /proc/net/stat/nf_flowtable to read; conntrack marks offloaded
 # entries with OFFLOAD instead.
-entries="$(grep -c 'OFFLOAD' /proc/net/nf_conntrack 2>/dev/null || echo 0)"
+entries="$(grep -c 'OFFLOAD' /proc/net/nf_conntrack 2>/dev/null || true)"
+entries="${entries:-0}"
 echo "flow_entries=${entries}"
 
 # Full-cone NAT.  This firmware ships all four layers (kernel module, libnftnl,
