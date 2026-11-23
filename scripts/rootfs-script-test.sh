@@ -119,7 +119,7 @@ for f in "$WORK"/root/usr/sbin/h5000m-* "$WORK"/root/etc/h5000m-*.conf \
 done
 if [ -n "$crlf_hits" ]; then
 	printf '  \033[1;31mFAIL\033[0m the image ships CRLF line endings:%s\n' "$crlf_hits" >&2
-	echo "       a shell script with \\r in it cannot run; rebuild from an LF working tree" >&2
+	printf '       a shell script with \r in it cannot run; rebuild from an LF working tree\n' >&2
 	exit 1
 fi
 

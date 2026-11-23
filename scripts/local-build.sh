@@ -211,8 +211,6 @@ CONFIG_ONLY="${CONFIG_ONLY:-false}"
 SKIP_TOOLCHAIN="${SKIP_TOOLCHAIN:-false}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-false}"
 SKIP_FEEDS_UPDATE="${SKIP_FEEDS_UPDATE:-false}"
-FORCE_PINNED=false
-
 SRC="${ROOT_DIR}/${SOURCE_DIR}"
 ART="${ROOT_DIR}/${ARTIFACTS_DIR}"
 LOG_FILE="${ROOT_DIR}/build.log"
@@ -297,7 +295,6 @@ while [ "$#" -gt 0 ]; do
 		--prepare-only) PREPARE_ONLY=true ;;
 		--config-only) CONFIG_ONLY=true ;;
 		--pinned)
-			FORCE_PINNED=true
 			OPENWRT_TRACK=pinned
 			;;
 		--skip-toolchain) SKIP_TOOLCHAIN=true ;;
@@ -547,6 +544,23 @@ resolve_modem_stack() {
 }
 
 # ---------------------------------------------------------------- source -----
+# A build tree written by another user makes every later step fail with
+# something that looks unrelated.  Concretely: `cp: cannot create regular file
+# 'tmp/.config': Permission denied` is swallowed by the toplevel sync check, the
+# host build tools cannot write staging_dir, and the first message that names a
+# package is "ERROR: package/utils/lua [host] failed to build." — measured in
+# the 14a07b7 rebuild, where an inspection shell had left root-owned files in
+# tmp/.  Say it once, with the path, before anything else runs.
+assert_tree_writable() {
+	local path
+	[ -d "$SRC" ] || return 0
+	for path in "$SRC" "$SRC/tmp" "$SRC/staging_dir" "$SRC/build_dir" "$SRC/package"; do
+		[ -e "$path" ] || continue
+		[ -w "$path" ] && continue
+		die "$path is not writable by $(id -un) — another user wrote the build tree (a root shell inside a container is the usual cause); chown it back before building"
+	done
+}
+
 prepare_source() {
 	local rev staging
 
@@ -1736,7 +1750,7 @@ clone_and_prune() {
 
 	for drop in "$@"; do
 		if [ -e "${dest}/${drop}" ]; then
-			rm -rf "${dest}/${drop}"
+			rm -rf "${dest}/${drop:?}"
 			log "  pruned ${name}/${drop} (official feeds already provide it)"
 		fi
 	done
@@ -3769,6 +3783,23 @@ collect_artifacts() {
 		-o -name '*.manifest' -o -name 'profiles.json' -o -name 'sha256sums' \
 		-o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \)
 
+	# IMAGE_PREFIX comes from configs/upstream.env: it is the image name the whole
+	# release pipeline looks for.  It was parsed and then never used, so an
+	# upstream renaming of the target/profile would have published a directory of
+	# differently-named images with no complaint — the sysupgrade file simply
+	# would not be there under the name the download page advertises.
+	local missing_names=""
+	local suffix
+	for suffix in -squashfs-sysupgrade.bin -targz-rootfs.tar.gz; do
+		[ -f "${dest}/${IMAGE_PREFIX}${suffix}" ] || missing_names="${missing_names} ${IMAGE_PREFIX}${suffix}"
+	done
+	[ -z "$missing_names" ] ||
+		die "collected artifacts are missing the expected image name(s):${missing_names} — check IMAGE_PREFIX in configs/upstream.env against the profile name and CONFIG_TARGET_ROOTFS_TARGZ"
+	for suffix in -initramfs-kernel.bin -rootfs.tar.gz; do
+		[ -f "${dest}/${IMAGE_PREFIX}${suffix}" ] ||
+			warn "optional artifact ${IMAGE_PREFIX}${suffix} was not produced"
+	done
+
 	if [ -d "${bin_dir}/packages" ]; then
 		mkdir -p "${dest}/packages"
 		copy_files_into "${dest}/packages" find "${bin_dir}/packages" -maxdepth 1 -type f -name '*.apk'
@@ -3916,6 +3947,7 @@ main() {
 	show_features
 
 	prepare_source
+	assert_tree_writable
 	install_signing_key
 	seed_cached_toolchain
 	seed_cached_build_state
