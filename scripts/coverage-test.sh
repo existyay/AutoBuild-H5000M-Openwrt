@@ -31,6 +31,8 @@ run_profile() {
 
 	printf '\n\033[1;36m== profile: %s ==\033[0m\n' "$name"
 
+	prune_clones
+
 	# Feeds are identical across profiles — only the first run pays for them.
 	if PREPARE_ONLY=false SKIP_FEEDS_UPDATE="${SKIP_FEEDS_UPDATE:-false}" \
 		THREADS="${THREADS:-$(nproc)}" "$@" \
@@ -46,6 +48,29 @@ run_profile() {
 
 	# Every later profile reuses the feed checkout.
 	export SKIP_FEEDS_UPDATE=true
+}
+
+# Every profile runs against the same openwrt/ checkout, and prepare_source does a
+# `git reset --hard` but deliberately no `git clean` — so a tree that an earlier
+# profile cloned into package/ is still there when a later profile turns its
+# ENABLE_* switch off.  The `no-repo-packages` and `no-easymesh` profiles would
+# then verify the "switch off" path in a tree that still contains what the switch
+# is supposed to leave out: its config symbols still exist, so verify_config's
+# "emitted package survived defconfig" check passes, and a configuration that
+# only works WITH those trees present is never noticed.  Removing them first is
+# what makes those two profiles mean anything.
+#
+# Safe to be this blunt: a clone is the only thing under package/ that carries
+# its own .git (upstream's own packages are tracked by the OpenWrt repo), and
+# install_local_packages/stage_directory strip .git from the local-packages
+# copies, so those are never matched.  The next profile re-clones what it needs.
+prune_clones() {
+	local gitdir
+	[ -d "${ROOT_DIR}/${SOURCE_DIR}/package" ] || return 0
+	while IFS= read -r -d '' gitdir; do
+		rm -rf "$(dirname "$gitdir")"
+	done < <(find "${ROOT_DIR}/${SOURCE_DIR}/package" -mindepth 2 -maxdepth 2 -name .git -type d -print0 2>/dev/null)
+	return 0
 }
 
 # quick: the three board-stack permutations the README documents, plus a profile
