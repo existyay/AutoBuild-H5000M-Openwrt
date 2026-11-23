@@ -2374,6 +2374,115 @@ config_disable_symbol() {
 	fi
 }
 
+# OpenWrt decides whether .config is "in sync" by running `conf --defconfig` on
+# a copy and diffing the result against .config (include/toplevel.mk:272-283).
+# A single line the second pass produces and .config does not carry costs a
+# `conf` run plus a red "your configuration is out of sync" line on **every**
+# make invocation until the next `make defconfig`; crucially it also means
+# tmp/.config-check is never created, so the cheap stamp-based skip never
+# applies again for the rest of the build.
+#
+# Measured on 6.18.64, our own writes produced exactly that in two ways, neither
+# of which changes a value:
+#
+#   * the same symbol ends up on both spellings — kconfig's
+#     `# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set` and a plain
+#     `CONFIG_KERNEL_DEBUG_INFO_REDUCED=n` that a later defconfig pass appended
+#     after reading our canonical line.  kconfig.pl compares by value, so `n`
+#     and `#undef` count as different even though they mean the same thing;
+#   * a symbol whose value is probed from the host — `CONFIG_MOLD` is
+#     `def_bool $(shell, ./config/check-hostcxx.sh 10 2 12)` — disagrees because
+#     .config was produced on a machine (or in a container image) whose
+#     staging_dir/host/bin/g++ answered differently.
+#
+# The repair is deliberately narrow so it cannot paper over a real disagreement:
+# a duplicate `SYM=n` is dropped only when the canonical spelling is present, a
+# diff line is appended only when it concerns a symbol this script never wrote,
+# and a host-probed symbol adopts the freshly computed value.  Anything else —
+# defconfig wanting a different *value* than the emitted lists ask for — is
+# reported and fatal.
+canonicalise_config() {
+	local tmp delta line sym conflicts=0
+
+	# One spelling per symbol: `SYM=n` next to `# SYM is not set` is the same
+	# value twice, and only the canonical line matches kconfig's own output.
+	awk 'NR == FNR {
+		     if ($0 ~ /^# CONFIG_[A-Za-z0-9_]+ is not set$/) off[$2] = 1
+		     next
+	     }
+	     /^CONFIG_[A-Za-z0-9_]+=n$/ { split($0, kv, "="); if (kv[1] in off) next }
+	     { print }' "$SRC/.config" "$SRC/.config" >"$SRC/.config.canonical" ||
+		die "could not canonicalise .config"
+	mv "$SRC/.config.canonical" "$SRC/.config"
+
+	# Fold in what kconfig adds on its own: symbols this config never mentions.
+	tmp="$(mktemp -d)"
+	cp "$SRC/.config" "$tmp/.config"
+	# shellcheck disable=SC2016 # the redirection is kconfig.pl's own selector
+	if ! ( cd "$SRC" && ./scripts/config/conf --defconfig="$tmp/.config" -w "$tmp/.config" Config.in >/dev/null 2>&1 ); then
+		rm -rf "$tmp"
+		die "conf --defconfig failed while checking .config for consistency"
+	fi
+	delta="$(cd "$SRC" && ./scripts/kconfig.pl '>' .config "$tmp/.config")"
+	rm -rf "$tmp"
+
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		case "$line" in
+		"# CONFIG_"*" is not set")
+			sym="${line#\# }"
+			sym="${sym% is not set}"
+			;;
+		CONFIG_*=*) sym="${line%%=*}" ;;
+		*) sym="" ;;
+		esac
+
+		# A symbol whose value comes from probing the host cannot be "wrong"
+		# in .config: it describes the machine that ran defconfig, and a
+		# .config restored from the CI tree cache may describe a different
+		# one.  The value kconfig just computed matches the machine about to
+		# build, so adopt it.  `CONFIG_MOLD` is the only such symbol in
+		# config/Config-build.in (`def_bool $(shell, ./config/check-hostcxx.sh
+		# 10 2 12)`, which compiles a C++20 snippet with
+		# $STAGING_DIR_HOST/bin/g++); everything else must agree.
+		if [ -n "$sym" ] && [ "$sym" = CONFIG_MOLD ]; then
+			sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set$/d" "$SRC/.config"
+			printf '%s\n' "$line" >>"$SRC/.config"
+			warn "adopted the host-probed ${sym} value from defconfig: ${line}"
+			continue
+		fi
+
+		case "$line" in
+		"# CONFIG_"*" is not set")
+			if ! grep -q "^${sym}=" "$SRC/.config"; then
+				printf '%s\n' "$line" >>"$SRC/.config"
+				continue
+			fi
+			;;
+		esac
+		warn ".config and defconfig disagree about: ${line}"
+		conflicts=$((conflicts + 1))
+	done <<<"$delta"
+
+	[ "$conflicts" -eq 0 ] ||
+		die "${conflicts} .config value(s) disagree with defconfig — set them in configs/ (or in the emit lists) rather than editing .config by hand"
+
+	# Finally the exact diff OpenWrt runs before every make, so a regression
+	# here fails the build instead of printing a warning for the next two hours.
+	tmp="$(mktemp -d)"
+	cp "$SRC/.config" "$tmp/.config"
+	if ! ( cd "$SRC" && ./scripts/config/conf --defconfig="$tmp/.config" -w "$tmp/.config" Config.in >/dev/null 2>&1 ); then
+		rm -rf "$tmp"
+		die "conf --defconfig failed while re-checking .config"
+	fi
+	delta="$(cd "$SRC" && ./scripts/kconfig.pl '>' .config "$tmp/.config")"
+	rm -rf "$tmp"
+	[ -z "$delta" ] ||
+		die ".config is still out of sync after canonicalisation: $(printf '%s' "$delta" | tr '\n' ' ')"
+
+	log ".config canonicalised — the make-time sync check now passes"
+}
+
 append_board_stack_config() {
 	local out="$1"
 
@@ -3086,6 +3195,11 @@ configure_build() {
 	# helps nobody.  Forced back to =m after the final defconfig, the same way
 	# the feed and ccache symbols above are.
 	config_set_symbol "CONFIG_PACKAGE_luci-app-ssr-plus" "m"
+
+	# Last write wins nowhere: everything below only removes a duplicate
+	# spelling or adds symbols this config never mentioned, so the values set
+	# above survive byte for byte.
+	canonicalise_config
 }
 
 # OpenWrt gates .config on $(STAGING_DIR_HOST)/.prereq-build, whose recipe runs
@@ -3668,9 +3782,36 @@ collect_artifacts() {
 	ls -la "$dest"
 }
 
+# `BUILD-INFO.txt` used to read `project_version=unknown` for every local build,
+# because only CI exported PROJECT_VERSION.  The artifact was then impossible to
+# compare with a release even though it carries the same name, so derive the same
+# value build.yml's `id: version` step does — newest reachable milestone tag,
+# else the newest CHANGELOG entry, else 0.0.0.  The tag filter is explicit for
+# the reason recorded in that workflow: the rolling `vX.Y.Z-r<sha>` tags this
+# project publishes also match `v*`, and matching those fed a previous build's
+# own name back into the next one.
+derive_project_version() {
+	local latest
+
+	latest="$(git -C "$ROOT_DIR" tag --list --merged HEAD 2>/dev/null |
+		grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+	if [ -z "$latest" ]; then
+		latest="$(sed -n 's/^## \[\([0-9][0-9.]*\)\].*/v\1/p' "${ROOT_DIR}/CHANGELOG.md" 2>/dev/null |
+			head -n 1 || true)"
+	fi
+	if [ -n "$latest" ]; then
+		printf '%s' "${latest#v}"
+	else
+		printf '0.0.0'
+	fi
+}
+
 write_build_info() {
 	local dest="$1" rev desc ver code kver abi
+	local project_version="${PROJECT_VERSION:-}"
 	local profiles="${dest}/profiles.json"
+
+	[ -n "$project_version" ] || project_version="$(derive_project_version)"
 
 	rev="$(cat "${ROOT_DIR}/.upstream-revision" 2>/dev/null || echo unknown)"
 	desc="$(cat "${ROOT_DIR}/.upstream-describe" 2>/dev/null || echo unknown)"
@@ -3721,7 +3862,7 @@ project=AutoBuild-H5000M-Openwrt
 # The two answer different questions — "which firmware build is this" and "which
 # OpenWrt tree is it based on" — and the release title, the artifact names and
 # this file all spell the first one the same way, from the same variable.
-project_version=${PROJECT_VERSION:-unknown}
+project_version=${project_version}
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
 upstream_track=${OPENWRT_TRACK}
