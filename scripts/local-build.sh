@@ -667,6 +667,13 @@ feed_tree_is_complete() {
 prepare_feeds() {
 	cd "$SRC"
 
+	# `feeds install -a` calls `make prepare-tmpinfo` internally, and that make
+	# target needs the host prerequisite gate — a stage that compiles nothing.
+	# Satisfy it here when the caller only asked for configuration, so a
+	# lightweight host does not have to install a full compiler just to learn
+	# which packages exist.  A real build still goes through the real gate.
+	prepare_config_stage
+
 	write_feeds_conf
 	prune_stale_feeds
 
@@ -686,7 +693,43 @@ prepare_feeds() {
 	run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds install -a ||
 		die "feeds install failed"
 
+	verify_package_index
 	verify_wwand_feed
+}
+
+# Fail loudly when `feeds install` ran without a package database.
+#
+# `./scripts/feeds install -a` shells out to `make prepare-tmpinfo`, and when
+# that fails it does NOT stop.  Measured on a host missing one prerequisite
+# (python3-distutils, 2026-11-23): the log carried
+#
+#   gmake: *** [.../include/toplevel.mk:106: prepare-tmpinfo] Error 2
+#   Cannot open './tmp/.packageinfo': No such file or directory
+#
+# then sixteen thousand
+#
+#   Installing package 'acl' from packages
+#   WARNING: No feed for package 'libc' found
+#
+# lines — one per dependency it could not resolve — and finished with exit 0.
+# The tree looked installed while every package had lost its dependency
+# information, so defconfig afterwards silently produced a different image.  The
+# index is the thing install depends on, so assert it exists and looks like a
+# whole tree rather than a fragment.
+verify_package_index() {
+	local info="${SRC}/tmp/.packageinfo" count
+
+	if [ ! -s "$info" ]; then
+		die "${info} was not generated: 'make prereq' failed in ${SRC} (look for 'Prerequisite check failed' above), or a configured feed is broken. Fix the host dependency, then re-run — installing feeds without a package database drops every dependency without an error."
+	fi
+
+	count="$(grep -c '^Package: ' "$info" 2>/dev/null || true)"
+	case "$count" in '' | *[!0-9]*) count=0 ;; esac
+	[ "$count" -gt 100 ] ||
+		die "${info} lists only ${count} packages; the feed index is a fragment, which happens when 'make prepare-tmpinfo' failed but 'feeds install' carried on. Check 'make prereq' in ${SRC}."
+
+	log "Package index: ${count} packages"
+	return 0
 }
 
 # The ddimension feed is not one directory per package: `wwand/Makefile` alone
@@ -949,6 +992,7 @@ seed_cached_build_state() {
 		# Opt-in, because a LOCAL caller may be reusing a hand-made archive and
 		# deleting someone's file is not this script's business.
 		if is_true "${BUILD_CACHE_ARCHIVE_DISPOSABLE:-false}"; then
+			local freed
 			freed="$(du -h "$archive" 2>/dev/null | cut -f1)"
 			rm -f "$archive"
 			log "Removed the restored build cache archive (${freed}) to leave room for the save steps"
