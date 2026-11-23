@@ -58,6 +58,26 @@ missing_config=()
 for cmd in "${CONFIG_ONLY_REQUIRED[@]}"; do
 	command -v "$cmd" >/dev/null 2>&1 || missing_config+=("$cmd")
 done
+
+# OpenWrt's own prerequisite list has a `python3-distutils` entry, and it is
+# version-aware: the module only has to exist below Python 3.12.  It matters
+# here because `./scripts/feeds install -a` runs `make prepare-tmpinfo`
+# internally, and when that precondition fails feeds install does not stop — it
+# reinstalls every package with no package database, prints one
+# "WARNING: No feed for package 'libc' found" per unresolved dependency (16k
+# lines, measured) and exits 0, leaving a tree whose packages have no depends.
+# No `command -v` can see this, so probe the module the way OpenWrt does.
+if command -v python3 >/dev/null 2>&1; then
+	if ! python3 - >/dev/null 2>&1 <<'PY'
+from sys import version_info
+if version_info < (3, 12):
+    from distutils import util
+PY
+	then
+		missing_full+=("python3-distutils")
+		missing_config+=("python3-distutils")
+	fi
+fi
 if [ "${#missing_config[@]}" -eq 0 ]; then
 	echo "  ready — 'local-build.sh --config-only' can run"
 else
