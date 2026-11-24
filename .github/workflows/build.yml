@@ -1875,10 +1875,28 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: apk-repo
+          # 名字带上 run_attempt，因为 artifact 在同一个 run 里不能重名。
+          #
+          # 「Re-run failed jobs」只会重跑失败的那个 job，而这个 job 的第一件事
+          # 就是再上传一份 Pages artifact —— 同名，于是那个 run 里就有了两份
+          # `github-pages`，deploy-pages 直接失败：
+          #
+          #   Multiple artifacts named "github-pages" were unexpectedly found
+          #   for this workflow run. Artifact count is 2.
+          #
+          # 实测：2026-11-24 的 run 45389737814 第一次因 artifact 元数据取不到
+          # 失败（GitHub 侧的抖动），重跑就撞上了上面这句。带上 attempt 之后，
+          # 重跑只会多出一个新名字，两次都能部署。
+          name: github-pages-${{ github.run_attempt }}
 
       - name: Deploy to Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        with:
+          # 与上面 Upload 的那份同名。这两个值必须一起改：deploy-pages 默认只
+          # 找 `github-pages`，名字对不上时报的是「No artifacts named …」，而
+          # 真实原因是名字改了却只改了一半。
+          artifact_name: github-pages-${{ github.run_attempt }}
 
   # ---------------------------------------------------------------------------
   # Reusable Workflow call: run the firmware's own first-boot scripts against
