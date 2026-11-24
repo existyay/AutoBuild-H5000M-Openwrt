@@ -1794,7 +1794,8 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      # 第一次就成功时用它的 URL；第一次失败、重试成功时用重试的。
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     steps:
       - name: Download the apk repository
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1897,6 +1898,42 @@ jobs:
           # 找 `github-pages`，名字对不上时报的是「No artifacts named …」，而
           # 真实原因是名字改了却只改了一半。
           artifact_name: github-pages-${{ github.run_attempt }}
+
+      # 再试一次。
+      #
+      # deploy-pages 会在 artifact 上传完的**下一秒**去读它的元数据，而这一步
+      # 会概率性地失败（GitHub 侧的索引延迟）：
+      #
+      #   Fetching artifact metadata failed. Is githubstatus.com reporting
+      #   issues with API requests, Pages, or Actions?
+      #   ##[error]Error: No artifacts named "github-pages-1" were found for
+      #   this workflow run.
+      #
+      # 实测 2026-11-24：run 45398909792 上传成功、artifact 在
+      # `GET /actions/runs/<id>/artifacts` 里看得见，部署却报「找不到」；同一
+      # 天 12:46 的那次部署则成功了。也就是说 artifact 是好的，只是读不到 ——
+      # 隔几秒重读一次就能读到。
+      #
+      # 这个 job 是 continue-on-error 的（托管问题不能拖挂一次好构建），所以
+      # 部署失败**不会让 run 变红**，只会让站点悄悄停在上一版。重试是这个
+      # 前提下唯一能做到的补救。
+      - name: Deploy to Pages (retry)
+        id: deployment_retry
+        # 用步骤的 outcome 而不是 `failure()`：这个 job 是 continue-on-error 的，
+        # 判断依据直说“刚才那次部署失败了”比依赖失败传播语义稳。
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      # 两次都失败时至少留下证据：这个 job 不会让 run 变红，而“站点比固件旧”
+      # 是最难从界面上看出来的事，所以把日志尾部收进 step summary。
+      - name: 失败诊断
+        if: steps.deployment.outcome == 'failure' || steps.deployment_retry.outcome == 'failure'
+        uses: ./.github/actions/diagnose
+        with:
+          title: 发布 apk 仓库失败（站点可能仍是上一版）
+          log_files: ''
 
   # ---------------------------------------------------------------------------
   # Reusable Workflow call: run the firmware's own first-boot scripts against
