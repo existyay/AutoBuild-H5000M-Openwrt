@@ -5,6 +5,13 @@
 # /usr/sbin/h5000m-wwan-provision).  Exits 0 so uci-defaults discards it after
 # the first run; the USB hotplug hook covers the case where the MT5700M
 # enumerates later than first boot.
+#
+# No `ifup`/`ubus call network reload` here on purpose: uci-defaults run from
+# /etc/init.d/boot (S10boot), while netifd starts later at S20network, so the
+# committed MT5700M section is read by netifd itself and comes up unattended.
+# A reload at this point could only fail because there is no netifd yet.  The
+# runtime path, where netifd IS already running, applies the change in the USB
+# hook.
 
 [ -x /usr/sbin/h5000m-wwan-provision ] || exit 0
 

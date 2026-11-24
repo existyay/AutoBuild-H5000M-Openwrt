@@ -3,5 +3,12 @@
 # `/sbin/wifi config`.  Without this ordering the defaults script would run
 # before any radio section exists and silently configure nothing.
 [ "$ACTION" = "add" ] || exit 0
+
+# No `wifi reload` after this call, deliberately.  This hook runs inside the
+# wifi start path: 10-wifi-detect generates /etc/config/wireless from
+# `wifi config` and wpad is starting right now, so a reload would restart wpad,
+# replay this same `add` event and loop.  The uci-defaults caller is not the
+# problem to solve either - it runs at S10boot while wpad only starts at
+# S19wpad, so the committed config is what wpad reads on its own start.
 [ -x /usr/sbin/h5000m-firstboot ] && /usr/sbin/h5000m-firstboot
 exit 0
