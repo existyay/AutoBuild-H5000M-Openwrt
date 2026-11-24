@@ -24,9 +24,29 @@ esac
 
 # netifd may still be enumerating the netdev; one short retry is enough and
 # keeps the hotplug path asynchronous.
+#
+# The provisioner writes network.MT5700M and then disables wwand's zero-config
+# autosetup, so on this path nothing else would ever bring the interface up:
+# netifd does not watch `uci commit`, and the first-boot caller
+# (/etc/uci-defaults/91-h5000m-wwan) runs at S10, long before netifd starts at
+# S20, where the interface comes up on its own. That is why the apply step
+# lives here and not inside the provisioner, and why it only runs when THIS
+# invocation created the section - a modem that re-enumerates must not reload
+# the network over and over.
 (
 	sleep 2
+	had_iface=0
+	uci -q get network.MT5700M >/dev/null 2>&1 && had_iface=1
+
 	/usr/sbin/h5000m-wwan-provision
+
+	if [ "$had_iface" = 0 ] && uci -q get network.MT5700M >/dev/null 2>&1 \
+		&& command -v ubus >/dev/null 2>&1; then
+		# `network reload` is the documented way to make netifd pick up a new
+		# config section; MT5700M is created with auto='1', so the reload is
+		# also what brings it up.
+		ubus call network reload >/dev/null 2>&1 || true
+	fi
 ) >/dev/null 2>&1 &
 
 exit 0

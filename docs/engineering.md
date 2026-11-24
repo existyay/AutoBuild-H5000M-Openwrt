@@ -141,18 +141,30 @@ config interface 'MT5700M'
 	option modem 'm0'
 	option pdp_type 'ipv4v6'
 	option metric '50'
+	option defaultroute '1'
+	option auto '1'
 	option managed_by 'wwand'
 	option modem_config 'wwand'   # netmode hotplug 守卫标记
-
-config interface 'MT5700Mv6'
-	option proto 'dhcpv6'
-	option device '@MT5700M'
-	option extendprefix '1'
 ```
 
 结果：wwand 掌管数据面，netmode 看到一个一等公民的 modem 接口，两个上游包都可以原样跟进。
 脚本幂等——`network.MT5700M` 一旦存在就完全不动它。若模组尚未枚举，脚本什么都不做，
 交给 wwand 自己的 autosetup 建默认 `wwan0`。
+
+#### 谁负责让配置生效（首启 vs 运行期）
+
+这两个脚本各有两条调用路径，**只有运行期那条需要主动生效**：
+
+| 调用路径 | 时机 | 生效方式 |
+| --- | --- | --- |
+| `/etc/uci-defaults/91-h5000m-wwan` | S10boot，netifd 尚未启动 | netifd 在 S20network 自己读配置，`auto '1'` 的接口自动起，**不需要** reload |
+| `/etc/hotplug.d/usb/50-h5000m-wwan` | 运行期，模组后枚举 | netifd 已在跑，`uci commit` 不会通知它；脚本创建后补一次 `ubus call network reload` |
+
+运行期那条曾经是个真 bug：provisioner 写完 `network.MT5700M` 就把 wwand 的
+`autosetup` 关掉，而 hotplug 更本不通知 netifd，于是后枚举的模组永远不会起接口，
+直到重启或手动 `ifup`。现在由 hook 判断"本次是否新建了 section"，只在新建时
+reload一次（模组反复重枚举不会反复重载网络）。首启那条故意不加 reload：S10boot 时
+连 netifd 进程都没有，只会白报错。
 
 ### wwand 与 luci-app-mt5700m 互斥
 
@@ -581,6 +593,12 @@ uci-defaults 有可能在任何 radio 段存在之前就运行、什么都没配
 `lib/upgrade/keep.d/h5000m-defaults` 让 sysupgrade 保留该标记，所以后续刷机
 **不会重置用户改过的设置**。判断条件也很保守：只要任一 AP 的 SSID 已不是默认值，
 就完全不碰。
+
+**为什么两个入口都不调 `wifi reload`**：uci-defaults 那条跑在 S10boot，而 wpad 到
+S19wpad 才启动，`uci commit` 写下的配置就是 wpad 启动时读到的内容，reload 无从谈起；
+hotplug 那条更危险——它本身就在 wifi 启动路径里（`10-wifi-detect` 生成
+`/etc/config/wireless` 时 wpad 正在起），`wifi reload` 会重启 wpad、重放同一个 `add`
+事件，形成自我循环。所以生效靠的是"时机对"，不是靠 reload。
 
 默认值（构建时可覆盖，见下表）：
 
