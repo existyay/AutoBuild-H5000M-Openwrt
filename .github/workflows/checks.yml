@@ -60,6 +60,37 @@ jobs:
       - name: Check build host
         run: ./scripts/check-deps.sh
 
+      - name: The pinned upstream revision and its label agree
+        run: |
+          set -euo pipefail
+          # configs/upstream.env pairs a 40-hex revision with the human label of
+          # that same tree (r0-<first 7>).  The only guard on that pair lives in
+          # scripts/local-build.sh:4049, and it WARNS — on a build that already
+          # got that far.  So a pin bump that updates one of the two lines and
+          # not the other passes every check, then stamps the products with a
+          # tree-derived version instead of the pinned one, and the log line
+          # saying why scrolls past in a 40-minute build job.  Asserting it here
+          # costs a shell conditional.
+          . configs/upstream.env
+          rev="${OPENWRT_PINNED_REVISION:-}"
+          label="${OPENWRT_PINNED_SNAPSHOT:-}"
+          case "$rev" in
+            '' | *[!0-9a-f]*)
+              echo "::error::OPENWRT_PINNED_REVISION is empty or not a lowercase hex sha: '${rev}'"
+              exit 1 ;;
+          esac
+          if [ "${#rev}" -ne 40 ]; then
+            echo "::error::OPENWRT_PINNED_REVISION must be 40 hex characters, got ${#rev}: '${rev}'"
+            exit 1
+          fi
+          case "$label" in
+            *"${rev:0:7}"*)
+              echo "pin label '${label}' describes ${rev:0:7}…" ;;
+            *)
+              echo "::error::OPENWRT_PINNED_SNAPSHOT='${label}' does not contain the first 7 characters of OPENWRT_PINNED_REVISION='${rev}' — one of the two lines was edited without the other"
+              exit 1 ;;
+          esac
+
       - name: Workflow contracts (reusable workflows)
         run: |
           # A silent failure mode, made loud.  When build.yml calls a reusable
