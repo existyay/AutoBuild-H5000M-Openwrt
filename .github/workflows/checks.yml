@@ -158,10 +158,42 @@ jobs:
                     old-name: 'true'
           YAML
 
+          # Second fixture, separate root: a reusable-workflow call whose `with:`
+          # key the callee never declared in `on.workflow_call.inputs`.  Sharing
+          # one tree with the fixture above would defeat the point — the
+          # deprecated-input defect alone makes the gate exit nonzero, so the
+          # self-test would pass while the reusable-workflow branch did nothing.
+          reusable_fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture" "$reusable_fixture"' EXIT
+          mkdir -p "$reusable_fixture/.github/workflows"
+          cat > "$reusable_fixture/.github/workflows/callee.yml" <<'YAML'
+          name: callee
+          on:
+            workflow_call:
+              inputs:
+                known_input:
+                  type: string
+                  required: false
+          jobs:
+            noop:
+              runs-on: ubuntu-24.04
+              steps:
+                - run: echo callee
+          YAML
+          cat > "$reusable_fixture/.github/workflows/caller.yml" <<'YAML'
+          name: caller
+          on: [push]
+          jobs:
+            call:
+              uses: ./.github/workflows/callee.yml
+              with:
+                unknown_input: 'x'
+          YAML
+
           fail=0
           expect_detect() {
-            local name="$1" script="$2"
-            if "$script" "$fixture" >/dev/null 2>&1; then
+            local name="$1" script="$2" root="${3:-$fixture}"
+            if "$script" "$root" >/dev/null 2>&1; then
               echo "::error::${name} did NOT fail on the fixture — it has gone deaf"
               fail=1
             else
@@ -169,6 +201,8 @@ jobs:
             fi
           }
           expect_detect check-action-inputs.sh ./scripts/check-action-inputs.sh
+          expect_detect check-action-inputs.sh（可复用工作流）\
+            ./scripts/check-action-inputs.sh "$reusable_fixture"
           expect_detect check-workflow-contracts.sh ./scripts/check-workflow-contracts.sh
 
           # The cache-ordering assertions added on 2026-11-01 guard a measured
@@ -178,7 +212,7 @@ jobs:
           # defect at a time — a hand-written fixture would not track the file it
           # protects, and its mutation strings would go stale silently.
           cache_fixture="$(mktemp -d)"
-          trap 'rm -rf "$fixture" "$cache_fixture"' EXIT
+          trap 'rm -rf "$fixture" "$reusable_fixture" "$cache_fixture"' EXIT
           mkdir -p "$cache_fixture/.github/workflows"
           cp .github/workflows/reusable-script-test.yml "$cache_fixture/.github/workflows/"
 

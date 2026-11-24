@@ -290,8 +290,12 @@ if [ "$WITH_FEEDS" = true ]; then
 			ok "installed ${PINNED_PACKAGE} ${PINNED_VERSION} survives apk add (as on a flashed device)"
 		fi
 	else
-		echo "  note: cannot fetch ${PINNED_PACKAGE} ${PINNED_VERSION} here, so the"
-		echo "        install-and-survive check was skipped"
+		# A skip here used to be silent, and this branch is the only place the
+		# "installing a front-end cannot replace the pin" claim is tested: the run
+		# still printed "All checks passed" while the one assertion the firmware
+		# depends on never ran.  Report it as a failure that names the untested
+		# claim, because a pin that cannot even be installed is a defect.
+		bad "cannot install ${PINNED_PACKAGE} ${PINNED_VERSION} from this repository — the pin could not be exercised"
 	fi
 elif [ "$offered" = "${PINNED_PACKAGE}-${PINNED_VERSION}" ]; then
 	ok "${PINNED_PACKAGE} is pinned to ${PINNED_VERSION}"

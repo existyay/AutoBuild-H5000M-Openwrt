@@ -26,8 +26,10 @@
 #
 # 覆盖范围：
 #   * 工作流与本地复合 action 里的所有 `with:`；
+#   * 可复用工作流的调用（`jobs.<id>.uses:` 及其 `with:` / `secrets:`）——被调方
+#     在 `on.workflow_call` 下没声明的键同样是「一条 warning 注释 + 照常变绿」；
 #   * 本地 action（`./...`）从工作树里读 action.yml；
-#   * 远程 action 按**已钉住的 SHA** 取 action.yml —— SHA 不可变，所以答案稳定；
+#   * 远程 action 与远程可复用工作流按**已钉住的 SHA** 取，SHA 不可变，答案稳定；
 #   * `docker://` 与 `./` 之外的无法解析者一律报错，不静默放过。
 #
 # 网络不可用时**失败**而不是跳过：这个脚本存在的意义就是不产生假通过。
@@ -109,7 +111,31 @@ for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml")
         for k, v in (step.get("with") or {}).items():
             entry["keys"].add(k)
             entry["values"].setdefault(k, set()).add(str(v))
-        entry["where"].add(f"{path.relative_to(root)}: {step.get('name', '<未命名>')}")
+        entry["where"].add(f"{path.relative_to(root).as_posix()}: {step.get('name', '<未命名>')}")
+
+
+# ------------------------------------------------ 可复用工作流的调用 ---
+# `jobs.<id>.uses:` 是第二种复用。它传的 `with:` 键若不是被调工作流在
+# `on.workflow_call.inputs` 里声明的，GitHub 同样只留一条 warning 注释、检查照常
+# 变绿，而被调方拿到的是空值 —— 与本脚本开头描述的「死配置」是同一个故障形状，
+# 之前这里完全没有覆盖。`secrets:` 同属一类（`secrets: inherit` 例外，它是字符串）。
+reusable: dict[str, dict] = {}
+for path in sorted(wf_dir.glob("*.yml")):
+    data = load(path)
+    for job_id, job in (data.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        uses = job.get("uses")
+        if not isinstance(uses, str):
+            continue
+        entry = reusable.setdefault(uses, {"keys": set(), "secrets": set(), "where": set()})
+        with_ = job.get("with")
+        if isinstance(with_, dict):
+            entry["keys"].update(with_)
+        secrets_ = job.get("secrets")
+        if isinstance(secrets_, dict):
+            entry["secrets"].update(secrets_)
+        entry["where"].add(f"{path.relative_to(root).as_posix()}: job {job_id}")
 
 
 # ------------------------------------------------------------ 声明的输入 ---
@@ -223,6 +249,63 @@ def declared_for(uses: str) -> tuple[set | None, dict, str | None]:
     return None, {}, saw or "该 ref 下没有 action.yml"
 
 
+def declared_for_workflow(uses: str) -> tuple[set | None, set | None, str | None]:
+    """被调可复用工作流在 `on.workflow_call` 下声明的 (输入名, secret 名)。"""
+    if uses.startswith("./"):
+        path = root / uses[2:]
+        if not path.exists():
+            return None, None, f"本地 {uses} 不存在"
+        return workflow_call_specs(load(path))
+
+    m = RE_USES.match(uses)
+    if not m:
+        return None, None, "无法解析 uses（缺少 owner/repo/path@ref）"
+    repo, sub, ref = m.group(1), (m.group(2) or "").strip("/"), m.group(3)
+    if not sub:
+        # `owner/repo@ref` 指向仓库而不是工作流文件。
+        return None, None, "可复用工作流的 uses 必须指向一个 .yml 文件"
+    data, err = fetch(f"https://raw.githubusercontent.com/{repo}/{ref}/{sub}")
+    if data is None:
+        return None, None, err or "取不到被调用的工作流"
+    return workflow_call_specs(data)
+
+
+def workflow_call_specs(data: dict) -> tuple[set | None, set | None, str | None]:
+    on = data.get("on")
+    wc = (on or {}).get("workflow_call") if isinstance(on, dict) else None
+    if not isinstance(wc, dict):
+        return None, None, "没有 on.workflow_call —— 它不可被 jobs.<id>.uses 调用"
+    return set((wc.get("inputs") or {})), set((wc.get("secrets") or {})), None
+
+
+# ---- 可复用工作流：with: / secrets: 也必须是被调方声明过的（与 action 同等对待）----
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    futures = {pool.submit(declared_for_workflow, u): u for u in reusable}
+    for fut in concurrent.futures.as_completed(futures):
+        uses = futures[fut]
+        inputs, secrets, err = fut.result()
+        entry = reusable[uses]
+        where = ", ".join(sorted(entry["where"]))
+        if inputs is None:
+            could_not_verify.append(
+                f"{uses} —— 无法确认其 on.workflow_call 声明（{err}）；出现在 {where}"
+            )
+            continue
+        extra = entry["keys"] - inputs
+        if extra:
+            problems.append(
+                f"{sorted(extra)} 不是可复用工作流 {uses} 在 on.workflow_call.inputs 中声明的输入。"
+                f"这只会留一条 warning 注释，而被调方拿到的是空值，工作流照常变绿。"
+                f"出现在 {where}；它声明了 {sorted(inputs) or '（无）'}"
+            )
+        extra_secrets = entry["secrets"] - (secrets or set())
+        if extra_secrets:
+            problems.append(
+                f"{sorted(extra_secrets)} 不是可复用工作流 {uses} 在 on.workflow_call.secrets "
+                f"中声明的 secret。传未声明的 secret 同样只是一条 warning 注释，"
+                f"被调方拿到空值。出现在 {where}"
+            )
+
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     futures = {pool.submit(declared_for, u): u for u in calls}
     for fut in concurrent.futures.as_completed(futures):
@@ -294,6 +377,6 @@ if problems:
 
 print(
     f"\033[32m✓ action 输入全部声明正确、且没有已弃用的调用\033[0m"
-    f"（核对了 {len(calls)} 个不同的 action 调用）"
+    f"（核对了 {len(calls)} 个 action 调用、{len(reusable)} 个可复用工作流调用）"
 )
 PY

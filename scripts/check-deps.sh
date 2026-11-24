@@ -20,6 +20,7 @@ CONFIG_ONLY_REQUIRED=(git make gcc g++ python3 patch gawk find tar zstd)
 REQUIRED_PC=(ncurses:libncurses-dev openssl:libssl-dev libelf:libelf-dev gmp:libgmp-dev)
 REQUIRED_TOOLS_FULL=(bison flex pkg-config)
 RECOMMENDED=(rsync ccache timeout flock dtc fastjar gperf swig)
+# Two different hints: swap is often small on CI and that is fine, disk is not.
 SWAP_HINT_GB=8
 DISK_HINT_GB=30
 
@@ -108,9 +109,9 @@ fi
 
 echo
 echo "== host resources =="
-awk -v hint="$DISK_HINT_GB" '
+awk -v swaphint="$SWAP_HINT_GB" '
 	/^MemTotal:/  { printf "  RAM : %.1f GiB\n", $2/1048576 }
-	/^SwapTotal:/ { printf "  swap: %.1f GiB%s\n", $2/1048576, ($2/1048576 < hint ? "  (a small swap is normal on CI)" : "") }
+	/^SwapTotal:/ { printf "  swap: %.1f GiB%s\n", $2/1048576, ($2/1048576 < swaphint ? "  (a small swap is normal on CI)" : "") }
 ' /proc/meminfo 2>/dev/null || true
 
 avail_kb="$(df -Pk . 2>/dev/null | awk 'NR==2 { print $4 }')"

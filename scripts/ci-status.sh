@@ -31,7 +31,7 @@ red() { printf '\033[31m%s\033[0m\n' "$*"; }
 grn() { printf '\033[32m%s\033[0m\n' "$*"; }
 ylw() { printf '\033[33m%s\033[0m\n' "$*"; }
 
-if [ $# -ge 1 ]; then
+if [ "$#" -ge 1 ]; then
 	run_id="$1"
 	bold "== run ${run_id} =="
 	gh api "repos/${REPO}/actions/runs/${run_id}" \
@@ -56,8 +56,16 @@ if [ $# -ge 1 ]; then
 	# The exit status has to reflect the run: this branch used to end with
 	# `exit 0` unconditionally, so `scripts/ci-status.sh <id> && …` treated a red
 	# run as green.
-	n_failed="$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" \
-		--jq '[.jobs[] | select(.conclusion == "failure")] | length' 2>/dev/null || echo 0)"
+	if ! n_failed="$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" \
+		--jq '[.jobs[] | select(.conclusion == "failure")] | length' 2>/dev/null)"; then
+		# Do not fold a failed query into "0 failures": that would report a run
+		# whose state could not be read as green, which is the one wrong answer
+		# a status tool must never give.
+		echo
+		red "  无法读取该 run 的 job 状态（gh 认证或权限问题）"
+		exit 2
+	fi
+	n_failed="${n_failed:-0}"
 	case "$n_failed" in
 		'' | 0) exit 0 ;;
 		*)
@@ -72,7 +80,7 @@ bold "== 最近 10 次运行（${REPO}）=="
 gh run list --limit 10 \
 	--json databaseId,workflowName,status,conclusion,headSha,event \
 	--jq '.[] | "\(.databaseId)\t\(.workflowName)\t\(.status)/\(.conclusion // "-")\t\(.headSha[0:7])\t\(.event)"' |
-	while IFS=$'\t' read -r id name st sha ev; do
+	while IFS=$'\t' read -r _id name st sha ev; do
 		case "$st" in
 			*/success) printf '  \033[32m%-10s\033[0m %-34s %s  %s\n' "$st" "$name" "$sha" "$ev" ;;
 			*/failure) printf '  \033[31m%-10s\033[0m %-34s %s  %s\n' "$st" "$name" "$sha" "$ev" ;;
