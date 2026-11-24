@@ -294,8 +294,52 @@ jobs:
           check_cache_fixture reject permanent-key
           check_cache_fixture reject run-expression
 
+          # The permission-subset rule is the one whose failure mode is a whole
+          # workflow that never starts, so prove the gate can still bite: empty
+          # the calling job's permissions and require a rejection.  Until this
+          # fixture existed the script used `as_set(x) or caller_top`, and an
+          # empty map is falsy, so it silently fell back to the workflow-level
+          # permissions and passed the very case it was written to catch.
+          check_perm_fixture() {
+            python3 - "$cache_fixture" <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          src = pathlib.Path(".github/workflows/build.yml").read_text(encoding="utf-8")
+          lines = src.split(chr(10))
+          uses = next(i for i, l in enumerate(lines)
+                      if l.strip() == "uses: ./.github/workflows/reusable-script-test.yml")
+          start = next(i for i in range(uses - 1, -1, -1) if lines[i].strip() == "permissions:")
+          end = start + 1
+          while end < uses and lines[end].strip() and lines[end].startswith("      "):
+              end += 1
+          indent = lines[start][: len(lines[start]) - len(lines[start].lstrip())]
+          lines[start:end] = [indent + "permissions: {}"]
+          # The point of the case is "the workflow grants more than the job does",
+          # so widen the workflow-level block too: with the job granting nothing,
+          # a checker that falls back to the workflow level sees a satisfied
+          # subset and stays silent while GitHub refuses to start the workflow.
+          top = lines.index("permissions:")
+          if lines[top + 1].strip() == "contents: read":
+              lines.insert(top + 1, "  actions: read")
+          out = chr(10).join(lines)
+          if out == src or "permissions: {}" not in out or out.count("actions: read") < 2:
+              raise SystemExit("permission fixture did not apply; the caller job drifted")
+          (root / ".github" / "workflows" / "build.yml").write_text(out, encoding="utf-8")
+          PY
+            if ./scripts/check-workflow-contracts.sh "$cache_fixture" >/dev/null 2>&1; then
+              echo "::error::permission gate accepted a caller job that grants nothing — it has gone deaf"
+              fail=1
+            else
+              echo "  OK    permission gate rejects a caller job whose permissions are empty"
+            fi
+          }
+
+          check_perm_fixture
+
           [ "$fail" -eq 0 ] || exit 1
-          echo "both gates still detect the defects they exist to catch"
+          echo "all three gates still detect the defects they exist to catch"
 
       - name: Shell syntax check
         run: |
