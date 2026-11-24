@@ -205,9 +205,35 @@ apply_ebpf_bypass_ips() {
 	return 0
 }
 
+# BBR is a runtime sysctl: `sysctl -w` alone is gone at the next boot, while the
+# page reads the switch back out of /etc/config — so a device that had BBR on
+# kept reporting it as in force while the kernel was back on cubic.  A drop-in
+# under /etc/sysctl.d is what survives: base-files' /etc/init.d/sysctl (START=11)
+# runs `sysctl -e -p /etc/sysctl.d/*.conf` on every boot, and /etc/uci-defaults
+# (which calls this applier) runs from /etc/init.d/boot, i.e. before it, so the
+# first boot after flashing picks the file up as well.
+#
+# tcp_bbr is loaded from /etc/modules.d/tcp_bbr, shipped by this package: the
+# module has to be available before START=11 applies the sysctl, and the boot
+# stage that reads /etc/modules.d runs earlier than any S* script.
+BBR_DROPIN=/etc/sysctl.d/90-h5000m-accel.conf
+
+bbr_dropin_write() {
+	mkdir -p "${BBR_DROPIN%/*}" 2>/dev/null
+	if printf '%s\n' 'net.ipv4.tcp_congestion_control=bbr' >"$BBR_DROPIN" 2>/dev/null; then
+		return 0
+	fi
+	log "could not write ${BBR_DROPIN}; bbr is back on cubic after a reboot"
+	return 1
+}
+
+bbr_dropin_remove() {
+	rm -f "$BBR_DROPIN" 2>/dev/null || true
+	return 0
+}
+
 apply_settings() {
 	local offload hw bbr
-
 	# The profile decides the three switches unless it is 'custom'.  A preset is
 	# what makes this page usable — getting offload right means knowing that
 	# hardware offload without software offload does nothing, and that BBR needs
@@ -264,11 +290,13 @@ apply_settings() {
 		if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
 			sysctl -qw net.ipv4.tcp_congestion_control=bbr 2>/dev/null ||
 				log "could not switch to bbr"
+			bbr_dropin_write
 		else
 			log "bbr is not available (kmod-tcp-bbr missing?); staying on $(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)"
 		fi
 	else
 		sysctl -qw net.ipv4.tcp_congestion_control=cubic 2>/dev/null
+		bbr_dropin_remove
 	fi
 
 	# The eBPF proxy's kernel side.  Independent of the profile: it is a
