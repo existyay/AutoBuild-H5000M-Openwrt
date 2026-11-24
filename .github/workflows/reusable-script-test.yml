@@ -46,7 +46,11 @@ on:
         default: ubuntu-24.04
     outputs:
       status:
-        description: pass or fail
+        # 只有 `pass` 能真的传到调用方：另一条分支写下 `status=fail` 后立即
+        # `exit 1`，而失败的 job 不会发布 outputs。这里是描述，不是协议 ——
+        # 目前也没有任何调用方读它（`grep -rn outputs.status .github/` 为空），
+        # 调用方只看 job 的成败。
+        description: pass（失败时这个 job 直接失败，outputs 不会发布）
         value: ${{ jobs.script_test.outputs.status }}
     # No `secrets:` block on purpose.  `secrets: none: required: false` is NOT
     # valid — it declares a secret literally named "none" whose value is the
@@ -107,6 +111,8 @@ jobs:
           tarball="$(find artifacts -type f -name "${TARBALL_GLOB}" -print -quit)"
           if [ -z "$tarball" ]; then
             echo "::error::no rootfs tarball in the artifact (looked for '${TARBALL_GLOB}')"
+            # 写下 `fail` 只是把意图留在 $GITHUB_OUTPUT 里；job 随后就失败，
+            # GitHub 不会转发失败 job 的 outputs，所以调用方永远看不到这个值。
             echo "status=fail" >> "$GITHUB_OUTPUT"
             exit 1
           fi

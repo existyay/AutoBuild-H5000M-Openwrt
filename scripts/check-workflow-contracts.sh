@@ -414,41 +414,52 @@ if scratch.exists():
 
     shutil.rmtree(scratch)
 scratch.mkdir()
+
+# 每个单元是「一份文档 + 它的 step 列表」：工作流的每个 job 各算一份，复合
+# action 的 `runs.steps` 也算一份 —— 复合 action 的 run 块同样是 bash（`diagnose`
+# 那一百多行取证逻辑就在其中），而此前它一个都没被 `bash -n` 看过。
+shell_units = []
+for wf in sorted((root / ".github/workflows").glob("*.yml")):
+    wf_doc = load(wf) or {}
+    for job_name, job in (wf_doc.get("jobs") or {}).items():
+        shell_units.append((wf, list((job or {}).get("steps") or [])))
+for act in sorted(act_dir.rglob("action.yml")):
+    act_doc = load(act) or {}
+    shell_units.append((act, list((act_doc.get("runs") or {}).get("steps") or [])))
+
 try:
-    for wf in sorted((root / ".github/workflows").glob("*.yml")):
-        wf_doc = load(wf) or {}
-        for job_name, job in (wf_doc.get("jobs") or {}).items():
-            for idx, step in enumerate((job or {}).get("steps") or []):
-                if not isinstance(step, dict):
-                    continue
-                body = step.get("run")
-                if not isinstance(body, str) or not body.strip():
-                    continue
-                if not str(step.get("shell") or "bash").startswith("bash"):
-                    continue
-                shell_checked += 1
-                # 写进仓库内的相对路径再交给 bash：Windows 的 python 给出的
-                # `C:\Users\…\Temp\x.sh` 到 MSYS 的 bash 手里会把反斜杠当成
-                # 转义吃掉，变成不存在的路径，于是每个块都“语法错误”。
-                rel = scratch.name + "/" + f"step{idx}.sh"
-                (root / rel).write_text(body, encoding="utf-8", newline="\n")
-                result = subprocess.run(
-                    [bash_bin, "-n", rel],
-                    cwd=str(root),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+    for doc, steps in shell_units:
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            body = step.get("run")
+            if not isinstance(body, str) or not body.strip():
+                continue
+            if not str(step.get("shell") or "bash").startswith("bash"):
+                continue
+            shell_checked += 1
+            # 写进仓库内的相对路径再交给 bash：Windows 的 python 给出的
+            # `C:\Users\…\Temp\x.sh` 到 MSYS 的 bash 手里会把反斜杠当成
+            # 转义吃掉，变成不存在的路径，于是每个块都“语法错误”。
+            rel = scratch.name + "/" + f"block{shell_checked}.sh"
+            (root / rel).write_text(body, encoding="utf-8", newline="\n")
+            result = subprocess.run(
+                [bash_bin, "-n", rel],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode != 0:
+                shell_bad += 1
+                lines = (result.stderr or "").strip().splitlines()
+                reason = lines[0] if lines else f"bash -n 返回 {result.returncode}"
+                step_name = str(step.get("name") or f"step #{idx + 1}")
+                problems.append(
+                    f"{doc.relative_to(root)}: 步骤 `{step_name}` 的 run 块不是合法的"
+                    f"shell —— {reason}"
                 )
-                if result.returncode != 0:
-                    shell_bad += 1
-                    lines = (result.stderr or "").strip().splitlines()
-                    reason = lines[0] if lines else f"bash -n 返回 {result.returncode}"
-                    step_name = str(step.get("name") or f"step #{idx + 1}")
-                    problems.append(
-                        f"{wf.relative_to(root)}: 步骤 `{step_name}` 的 run 块不是合法的"
-                        f"shell —— {reason}"
-                    )
 finally:
     import shutil as _shutil
 
@@ -466,6 +477,6 @@ print(
     f"\033[32m✓ 复用工作流契约正常\033[0m"
     f"（检查了 {checked_calls} 处 uses: ./ 调用、表达式中的连字符点号访问，"
     f"runs-on 的浮动标签、run 块里的表达式替换、固件缓存的恢复/保存顺序，"
-    f"以及 {shell_checked} 个 bash run 块的 shell 语法）"
+    f"以及 {shell_checked} 个 bash run 块的 shell 语法（含复合 action））"
 )
 PY
