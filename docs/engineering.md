@@ -2309,6 +2309,12 @@ project_version=1.3.0
 
 于是 `configs/upstream.env` 两行同时改：revision → `727d8d2f8e5b…`，标签 → `r0-727d8d2`。
 
+这一对的一致性以前只有一个**运行期且只 warn** 的守卫（`scripts/local-build.sh:4049`），
+所以只改一行会被静默放过，产物盖的是从树里推出来的版本号，而那行 warn 埋在 40 分钟的
+构建日志里。现在由 `checks.yml::check` 的
+`The pinned upstream revision and its label agree` 步骤静态断言：revision 必须是 40 位小写
+十六进制，标签必须含其前 7 位；在 `仓库与主机检查` 里分钟级失败。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh
