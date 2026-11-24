@@ -49,7 +49,29 @@ define KernelPackage/nft-fullcone
   # "has a dependency on 'kmod-nf-conntrack6', which does not exist".
   DEPENDS:=@IPV6 +kmod-nft-core +kmod-nf-conntrack
   FILES:=$(PKG_BUILD_DIR)/nft_fullcone.$(LINUX_KMOD_SUFFIX)
-  KCONFIG:=CONFIG_NFT_FULLCONE
+  # CONFIG_NF_CONNTRACK_EVENTS=y is a hard requirement of the sources, not a
+  # coincidence of whatever else the image selects.  include/net/netfilter/
+  # nf_conntrack_ecache.h puts BOTH `struct nf_ct_event_notifier` and
+  # nf_conntrack_register_notifier()/nf_conntrack_unregister_notifier() behind
+  # `#ifdef CONFIG_NF_CONNTRACK_EVENTS` (the #else branch is stub no-ops), and
+  # nft_ext_fullcone.c uses all three unconditionally:
+  #
+  #   nft_ext_fullcone.c: error: invalid use of undefined type
+  #                     'struct nf_ct_event_notifier'
+  #   nft_ext_fullcone.c:161: implicit declaration of function
+  #                     'nf_conntrack_register_notifier'
+  #   cc1: all warnings being treated as errors      (src/Makefile: -Werror)
+  #
+  # Today it happens to be on because kmod-nf-conntrack-netlink declares
+  # `KCONFIG:=CONFIG_NF_CT_NETLINK CONFIG_NF_CONNTRACK_EVENTS=y …`
+  # (package/kernel/linux/modules/netfilter.mk) and something in the image pulls
+  # it in — but that is one config trim away from breaking this module, and the
+  # symptom would point at fullcone rather than at the missing symbol.  Declaring
+  # it here makes the requirement explicit; upstream uses the same spelling a few
+  # dozen lines above in that file.  Verified on 6.18.64 + gcc 15: with the symbol
+  # set, nf_nat_fullcone.o / nft_ext_fullcone.o / nft_fullcone.o all compile clean
+  # under -Werror -Wall.
+  KCONFIG:=CONFIG_NFT_FULLCONE CONFIG_NF_CONNTRACK_EVENTS=y
   AUTOLOAD:=$(call AutoProbe,nft_fullcone)
 endef
 

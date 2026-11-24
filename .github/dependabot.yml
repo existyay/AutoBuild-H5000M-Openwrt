@@ -28,3 +28,23 @@ updates:
     labels: [dependencies, ci]
     # Grouping is only safe because CI runs the same gates on the PR.
     rebase-strategy: auto
+
+  # The commitlint toolchain in package.json / package-lock.json is a real
+  # dependency of the `commit-message` job, and nothing was watching it: a
+  # transitive advisory in it would never be raised.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      npm:
+        patterns: ['*']
+    commit-message:
+      prefix: 'chore'
+      include: scope
+    labels: [dependencies, ci]
+
+  # NOTE: the `rev:` pins in .pre-commit-config.yaml are NOT covered — Dependabot
+  # has no pre-commit ecosystem (Renovate does).  They are bumped by hand when a
+  # hook release is worth taking, which is recorded in docs/engineering.md.

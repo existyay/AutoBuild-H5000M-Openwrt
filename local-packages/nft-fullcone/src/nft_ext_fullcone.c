@@ -139,6 +139,15 @@ static int nft_fullcone_init(const struct nft_ctx *ctx, const struct nft_expr *e
 	int register_ct_notifier_ret = 0;
 
 	err = nf_ct_netns_get(ctx->net, ctx->family);
+	if (err)
+		/* nftables calls ->destroy() even when ->init() fails, so the reference
+		 * counter is still moved and the put in ->destroy() stays balanced —
+		 * but a conntrack notifier must not be installed for a namespace whose
+		 * conntrack reference we failed to obtain: it would keep firing (or be
+		 * left registered) for a module that is about to be unloaded.
+		 */
+		pr_warn("fullcone: nf_ct_netns_get failed (%d), not registering the conntrack notifier\n",
+			err);
 
 	mutex_lock(&nf_ct_net_event_lock);
 
@@ -146,7 +155,7 @@ static int nft_fullcone_init(const struct nft_ctx *ctx, const struct nft_expr *e
 
 	pr_debug("nft_fullcone_init(): module_refer_count is now %d\n", module_refer_count);
 
-	if (module_refer_count == 1) {
+	if (module_refer_count == 1 && !err) {
 #ifdef CONFIG_NF_CONNTRACK_CHAIN_EVENTS
 		ct_event_notifier.notifier_call = ct_event_cb;
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
@@ -427,10 +436,19 @@ static int __init nft_fullcone_module_init(void)
 
 	wq = create_singlethread_workqueue(NF_FULLCONE_WORKQUEUE_NAME);
 	if (wq == NULL) {
+		/* h5000m: the worker is what drains dying_tuple_list.  Loading
+		 * anyway (returning 0) shipped a module whose fullcone mappings were
+		 * never reclaimed by the GC pass — the list only empties at module
+		 * exit.  Fail the load instead, and undo what was already registered.
+		 */
 		pr_err("failed to create workqueue %s\n", NF_FULLCONE_WORKQUEUE_NAME);
+		nft_unregister_expr(&nft_fullcone_ipv4_type);
+		nft_fullcone_module_exit_inet();
+		nft_fullcone_module_exit_ipv6();
+		return -ENOMEM;
 	}
 
-	return ret;
+	return 0;
 }
 
 static void __exit nft_fullcone_module_exit(void)

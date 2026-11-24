@@ -10,11 +10,18 @@
 # Usage:
 #   scripts/coverage-test.sh quick     # default + the two modem stacks
 #   scripts/coverage-test.sh full      # everything below
+#   scripts/coverage-test.sh quick minimal   # only one profile, when debugging it
+#
+# The third argument exists because a single failing profile otherwise costs a
+# full four-profile run to look at: `minimal` and `all-optional` are the ones
+# that regress, and re-running `default` and `mt5700m` in front of them just to
+# reach it is dead time.
 #
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE_SET="${1:-quick}"
+ONLY_PROFILE="${2:-}"
 SOURCE_DIR="${SOURCE_DIR:-openwrt}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts-coverage}"
 
@@ -29,7 +36,13 @@ run_profile() {
 	shift
 	local log="${ROOT_DIR}/coverage-${name}.log"
 
+	if [ -n "$ONLY_PROFILE" ] && [ "$name" != "$ONLY_PROFILE" ]; then
+		return 0
+	fi
+
 	printf '\n\033[1;36m== profile: %s ==\033[0m\n' "$name"
+
+	prune_clones
 
 	# Feeds are identical across profiles — only the first run pays for them.
 	if PREPARE_ONLY=false SKIP_FEEDS_UPDATE="${SKIP_FEEDS_UPDATE:-false}" \
@@ -46,6 +59,29 @@ run_profile() {
 
 	# Every later profile reuses the feed checkout.
 	export SKIP_FEEDS_UPDATE=true
+}
+
+# Every profile runs against the same openwrt/ checkout, and prepare_source does a
+# `git reset --hard` but deliberately no `git clean` — so a tree that an earlier
+# profile cloned into package/ is still there when a later profile turns its
+# ENABLE_* switch off.  The `no-repo-packages` and `no-easymesh` profiles would
+# then verify the "switch off" path in a tree that still contains what the switch
+# is supposed to leave out: its config symbols still exist, so verify_config's
+# "emitted package survived defconfig" check passes, and a configuration that
+# only works WITH those trees present is never noticed.  Removing them first is
+# what makes those two profiles mean anything.
+#
+# Safe to be this blunt: a clone is the only thing under package/ that carries
+# its own .git (upstream's own packages are tracked by the OpenWrt repo), and
+# install_local_packages/stage_directory strip .git from the local-packages
+# copies, so those are never matched.  The next profile re-clones what it needs.
+prune_clones() {
+	local gitdir
+	[ -d "${ROOT_DIR}/${SOURCE_DIR}/package" ] || return 0
+	while IFS= read -r -d '' gitdir; do
+		rm -rf "$(dirname "$gitdir")"
+	done < <(find "${ROOT_DIR}/${SOURCE_DIR}/package" -mindepth 2 -maxdepth 2 -name .git -type d -print0 2>/dev/null)
+	return 0
 }
 
 # quick: the three board-stack permutations the README documents, plus a profile
@@ -76,6 +112,15 @@ if [ "$PROFILE_SET" = "full" ]; then
 	run_profile no-ebpf-kernel env ENABLE_EBPF_PROXY_KERNEL=false
 	run_profile no-dialer env ENABLE_WWAND=false ENABLE_MT5700M=false
 	run_profile no-argon env ENABLE_THEME_ARGON=false
+	# `ENABLE_REPO_PACKAGES=false` was never exercised, although it is the switch
+	# that keeps the three proxy trees out of package/ — a config that only works
+	# with them present would not be noticed until a user turned them off.
+	run_profile no-repo-packages env ENABLE_REPO_PACKAGES=false
+	# Same for the easymesh feed (IPTV block in the config) and the optional
+	# passwall/nikki/hijpass trees: both are off in the `minimal` profile but
+	# that profile also drops upnp/adblock/fancontrol, so the off-path of the
+	# easymesh stack on its own was untested.
+	run_profile no-easymesh env ENABLE_EASYMESH=false
 fi
 
 printf '\n\033[1m== coverage summary ==\033[0m\n'

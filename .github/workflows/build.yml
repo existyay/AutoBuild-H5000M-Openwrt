@@ -1087,8 +1087,11 @@ jobs:
             # to drop BTF with no other symptom.
             check "CONFIG_KERNEL_DEBUG_INFO=y" \
               "grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' openwrt/.config"
-            check "CONFIG_KERNEL_DEBUG_INFO_REDUCED=n" \
-              "grep -q '^CONFIG_KERNEL_DEBUG_INFO_REDUCED=n$' openwrt/.config"
+            # Asserted in kconfig's own spelling: `# … is not set`, not `…=n`.
+            # A `=n` line leaves include/toplevel.mk "out of sync" on every
+            # make invocation (see config_disable_symbol in local-build.sh).
+            check "CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set" \
+              "grep -q '^# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set$' openwrt/.config"
             check "CONFIG_KERNEL_DEBUG_INFO_BTF=y" \
               "grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' openwrt/.config"
             # The kernel .config is $(LINUX_DIR)/.config, i.e.

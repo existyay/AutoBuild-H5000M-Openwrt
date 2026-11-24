@@ -211,8 +211,6 @@ CONFIG_ONLY="${CONFIG_ONLY:-false}"
 SKIP_TOOLCHAIN="${SKIP_TOOLCHAIN:-false}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-false}"
 SKIP_FEEDS_UPDATE="${SKIP_FEEDS_UPDATE:-false}"
-FORCE_PINNED=false
-
 SRC="${ROOT_DIR}/${SOURCE_DIR}"
 ART="${ROOT_DIR}/${ARTIFACTS_DIR}"
 LOG_FILE="${ROOT_DIR}/build.log"
@@ -297,7 +295,6 @@ while [ "$#" -gt 0 ]; do
 		--prepare-only) PREPARE_ONLY=true ;;
 		--config-only) CONFIG_ONLY=true ;;
 		--pinned)
-			FORCE_PINNED=true
 			OPENWRT_TRACK=pinned
 			;;
 		--skip-toolchain) SKIP_TOOLCHAIN=true ;;
@@ -339,6 +336,27 @@ run_with_timeout() {
 	else
 		"$@"
 	fi
+}
+
+# Copy the files selected by a find expression into one directory.
+#
+# Written as `find ... -exec cp -f {} "$dir/" \;` this forks one cp per file.
+# The apk repository and the artifact directory are both flat copies of a few
+# thousand small files, so that is a few thousand forks for no reason.  With a
+# cp that understands --target-directory, find batches them into a handful of
+# invocations instead.  The per-file form stays as the fallback for busybox cp,
+# where -t does not exist.
+copy_files_into() {
+	local dir="$1"
+	shift
+
+	[ -d "$dir" ] || return 0
+	if cp --help 2>/dev/null | grep -q -- '--target-directory'; then
+		"$@" -exec cp -f -t "$dir" {} + 2>/dev/null || true
+	else
+		"$@" -exec cp -f {} "$dir/" \; 2>/dev/null || true
+	fi
+	return 0
 }
 
 # --------------------------------------------------------------- network -----
@@ -526,6 +544,23 @@ resolve_modem_stack() {
 }
 
 # ---------------------------------------------------------------- source -----
+# A build tree written by another user makes every later step fail with
+# something that looks unrelated.  Concretely: `cp: cannot create regular file
+# 'tmp/.config': Permission denied` is swallowed by the toplevel sync check, the
+# host build tools cannot write staging_dir, and the first message that names a
+# package is "ERROR: package/utils/lua [host] failed to build." — measured in
+# the 14a07b7 rebuild, where an inspection shell had left root-owned files in
+# tmp/.  Say it once, with the path, before anything else runs.
+assert_tree_writable() {
+	local path
+	[ -d "$SRC" ] || return 0
+	for path in "$SRC" "$SRC/tmp" "$SRC/staging_dir" "$SRC/build_dir" "$SRC/package"; do
+		[ -e "$path" ] || continue
+		[ -w "$path" ] && continue
+		die "$path is not writable by $(id -un) — another user wrote the build tree (a root shell inside a container is the usual cause); chown it back before building"
+	done
+}
+
 prepare_source() {
 	local rev staging
 
@@ -646,6 +681,13 @@ feed_tree_is_complete() {
 prepare_feeds() {
 	cd "$SRC"
 
+	# `feeds install -a` calls `make prepare-tmpinfo` internally, and that make
+	# target needs the host prerequisite gate — a stage that compiles nothing.
+	# Satisfy it here when the caller only asked for configuration, so a
+	# lightweight host does not have to install a full compiler just to learn
+	# which packages exist.  A real build still goes through the real gate.
+	prepare_config_stage
+
 	write_feeds_conf
 	prune_stale_feeds
 
@@ -665,7 +707,43 @@ prepare_feeds() {
 	run_with_timeout "$FEEDS_TIMEOUT" ./scripts/feeds install -a ||
 		die "feeds install failed"
 
+	verify_package_index
 	verify_wwand_feed
+}
+
+# Fail loudly when `feeds install` ran without a package database.
+#
+# `./scripts/feeds install -a` shells out to `make prepare-tmpinfo`, and when
+# that fails it does NOT stop.  Measured on a host missing one prerequisite
+# (python3-distutils, 2026-11-23): the log carried
+#
+#   gmake: *** [.../include/toplevel.mk:106: prepare-tmpinfo] Error 2
+#   Cannot open './tmp/.packageinfo': No such file or directory
+#
+# then sixteen thousand
+#
+#   Installing package 'acl' from packages
+#   WARNING: No feed for package 'libc' found
+#
+# lines — one per dependency it could not resolve — and finished with exit 0.
+# The tree looked installed while every package had lost its dependency
+# information, so defconfig afterwards silently produced a different image.  The
+# index is the thing install depends on, so assert it exists and looks like a
+# whole tree rather than a fragment.
+verify_package_index() {
+	local info="${SRC}/tmp/.packageinfo" count
+
+	if [ ! -s "$info" ]; then
+		die "${info} was not generated: 'make prereq' failed in ${SRC} (look for 'Prerequisite check failed' above), or a configured feed is broken. Fix the host dependency, then re-run — installing feeds without a package database drops every dependency without an error."
+	fi
+
+	count="$(grep -c '^Package: ' "$info" 2>/dev/null || true)"
+	case "$count" in '' | *[!0-9]*) count=0 ;; esac
+	[ "$count" -gt 100 ] ||
+		die "${info} lists only ${count} packages; the feed index is a fragment, which happens when 'make prepare-tmpinfo' failed but 'feeds install' carried on. Check 'make prereq' in ${SRC}."
+
+	log "Package index: ${count} packages"
+	return 0
 }
 
 # The ddimension feed is not one directory per package: `wwand/Makefile` alone
@@ -751,37 +829,76 @@ normalize_source_mtimes() {
 		-not -path "${SRC}/dl/*"
 	)
 
-	local count
-	count="$(find "$SRC" -type f "${scope[@]}" 2>/dev/null | wc -l)"
-	[ "$count" -gt 0 ] || return 0
+	local list count
+
+	# One tree walk, not two: the list is written once and both the count and
+	# the hashing pass read it back.  The old form walked the whole tree for
+	# `wc -l` and then again for the hashing pass.
+	list="$(mktemp "${TMPDIR:-/tmp}/h5000m-mtimes.XXXXXX" 2>/dev/null)" || return 0
+	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null >"$list"
+	count="$(tr -cd '\000' <"$list" | wc -c)"
+	if [ "$count" -eq 0 ]; then
+		rm -f "$list"
+		return 0
+	fi
 
 	log "Normalizing mtimes of ${count} source files (content-derived, for cache reuse)"
-	find "$SRC" -type f "${scope[@]}" -print0 2>/dev/null |
-		xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 bash -c '
-			for f do
-				h=$(sha1sum "$f" 2>/dev/null | cut -c1-8) || continue
-				[ -n "$h" ] || continue
-				# 8 hex digits as an unsigned value: 16# is bash-only, so fold
-				# the nibbles explicitly.
-				n=0
-				i=0
-				while [ "$i" -lt 8 ]; do
-					c=${h:$i:1}
-					case "$c" in
-						[0-9]) d=$c ;;
-						a|A) d=10 ;; b|B) d=11 ;; c|C) d=12 ;; d|D) d=13 ;;
-						e|E) d=14 ;; f|F) d=15 ;;
-						*) n=""; break ;;
-					esac
-					n=$(( n * 16 + d ))
-					i=$(( i + 1 ))
-				done
-				[ -n "$n" ] || continue
-				# 2000-01-01 + (hash mod 20 years), always in the past.
-				touch -d "@$(( 946684800 + n % 630720000 ))" "$f" 2>/dev/null || true
-			done
-		' _ || warn "Some source mtimes could not be normalized"
+	# sha1sum once per 64 files, not once per file.  A full tree is ~10^5
+	# files, so the old per-file call was ~10^5 process spawns — minutes of
+	# pure fork overhead on a CI runner, every single build.  `sha1sum f1 ..
+	# f64` prints one line per file, and the line count tells us whether the
+	# output is parseable; a filename with a newline or a backslash makes
+	# sha1sum escape or wrap it, and that batch falls back to one file per
+	# call rather than touching the wrong path.
+	xargs -0 -r -P "$(nproc 2>/dev/null || echo 4)" -n 64 bash -c '
+		apply_mtime() {
+			local h="$1" f="$2" n=0 i=0 c d
 
+			# 8 hex digits as an unsigned value: 16# is bash-only, so fold
+			# the nibbles explicitly.
+			while [ "$i" -lt 8 ]; do
+				c=${h:$i:1}
+				case "$c" in
+					[0-9]) d=$c ;;
+					a|A) d=10 ;; b|B) d=11 ;; c|C) d=12 ;; d|D) d=13 ;;
+					e|E) d=14 ;; f|F) d=15 ;;
+					*) return 0 ;;
+				esac
+				n=$(( n * 16 + d ))
+				i=$(( i + 1 ))
+			done
+			# 2000-01-01 + (hash mod 20 years), always in the past.
+			touch -d "@$(( 946684800 + n % 630720000 ))" "$f" 2>/dev/null || true
+		}
+
+		out=$(sha1sum -- "$@" 2>/dev/null) || exit 0
+		lines=$(printf "%s\n" "$out" | wc -l)
+		if [ "$lines" -eq "$#" ]; then
+			# sha1sum keeps the argument order, so line i belongs to argument
+			# i — the path is taken from "$@", not from the output line.
+			# Parsing the path back out of the line is what made this silently
+			# do nothing on MSYS: there sha1sum marks binary input as
+			# `hash *file` instead of `hash  file`, so a "strip the first two
+			# spaces" split produced a path that does not exist and every
+			# touch failed while the loop reported success.
+			args=("$@")
+			i=0
+			while IFS= read -r line; do
+				h=${line%% *}
+				h=${h#\\}
+				apply_mtime "$h" "${args[$i]}"
+				i=$(( i + 1 ))
+			done <<<"$out"
+			exit 0
+		fi
+
+		for f do
+			h=$(sha1sum -- "$f" 2>/dev/null | cut -c1-8)
+			[ -n "$h" ] && apply_mtime "$h" "$f"
+		done
+	' _ <"$list" || warn "Some source mtimes could not be normalized"
+
+	rm -f "$list"
 	return 0
 }
 
@@ -889,6 +1006,7 @@ seed_cached_build_state() {
 		# Opt-in, because a LOCAL caller may be reusing a hand-made archive and
 		# deleting someone's file is not this script's business.
 		if is_true "${BUILD_CACHE_ARCHIVE_DISPOSABLE:-false}"; then
+			local freed
 			freed="$(du -h "$archive" 2>/dev/null | cut -f1)"
 			rm -f "$archive"
 			log "Removed the restored build cache archive (${freed}) to leave room for the save steps"
@@ -1632,7 +1750,7 @@ clone_and_prune() {
 
 	for drop in "$@"; do
 		if [ -e "${dest}/${drop}" ]; then
-			rm -rf "${dest}/${drop}"
+			rm -rf "${dest}/${drop:?}"
 			log "  pruned ${name}/${drop} (official feeds already provide it)"
 		fi
 	done
@@ -1961,6 +2079,10 @@ prune_dangling_depends() {
 
 	[ -f "$mk" ] || return 0
 
+	# One package today, a list on purpose: the next dangling dependency gets
+	# appended here rather than a new block of near-identical code.  shellcheck
+	# only sees the current single element and calls it a mistake.
+	# shellcheck disable=SC2043
 	for pkg in kcptun-client; do
 		grep -q ":${pkg}\b" "$mk" 2>/dev/null || continue
 		# A real package definition anywhere in the tree means the dependency
@@ -1985,8 +2107,23 @@ prune_dangling_depends() {
 		# still contained the pruned clause when the audit ran at 19:05, which
 		# made the audit fail on a dependency that had already been removed.
 		# Dropping the stale scan result is what makes the prune authoritative.
-		rm -f "${SRC}/tmp/info/.packageinfo-$(basename "$(dirname "$mk")")" \
-			"${SRC}/tmp/.config-package.in" 2>/dev/null || true
+		# The chunk is named after the directory RELATIVE to package/ with
+		# every slash turned into an underscore — include/scan.mk builds the
+		# merged index with
+		#
+		#   cat $(FILELIST) | awk '{gsub(/\//,"_",$0);print "…/.packageinfo-" $0}'
+		#
+		# so `package/feeds/packages/net/kcptun-client` is
+		# `.packageinfo-feeds_packages_net_kcptun-client`.  Using
+		# $(basename $(dirname)) here — as this line used to — computed
+		# `.packageinfo-kcptun-client`, a file that never exists, so the
+		# invalidation was a no-op and the stale clause survived in the
+		# index exactly as the comment above complains.
+		local rel chunk
+		rel="${mk#"${SRC}/package/"}"
+		rel="${rel%/Makefile}"
+		chunk="${SRC}/tmp/info/.packageinfo-${rel//\//_}"
+		rm -f "$chunk" "${SRC}/tmp/.packageinfo" "${SRC}/tmp/.config-package.in" 2>/dev/null || true
 		log "  pruned the dangling dependency on ${pkg} (no feed in this tree provides it)"
 		pruned=$((pruned + 1))
 	done
@@ -2231,12 +2368,153 @@ config_set_symbol() {
 	fi
 }
 
-# Both directions used to exist here.  config_disable had no caller anywhere in
-# the repository (checked: 68 shell functions, this was the only one), and the
-# only place a package is deliberately turned off writes the line directly — the
-# `CONFIG_PACKAGE_ip-tiny=n` next to the ip-full note — so the wrapper is gone
-# rather than left as an invitation to use a second way of doing it.
+# Both directions are needed after all, but they are not symmetric edits.
+#
+# Every caller that turns a package ON is `config_enable`; the only place a
+# package is deliberately turned OFF writes its line directly (the
+# `CONFIG_PACKAGE_ip-tiny=n` next to the ip-full note), so that wrapper stays
+# unwrapped.  A *bool Kconfig symbol* is a different story — see
+# config_disable_symbol below.
 config_enable() { config_set_symbol "CONFIG_PACKAGE_$1" "y"; }
+
+# Turn a Kconfig symbol off the way kconfig itself would.
+#
+# kconfig renders an unset bool as `# CONFIG_FOO is not set`.  Writing
+# `CONFIG_FOO=n` instead makes the two disagree about the file's content, and
+# that disagreement is not cosmetic: include/toplevel.mk:262-281 re-runs
+# `conf --defconfig` on every `make` and compares the result against .config;
+# on a difference it refuses to create the tmp/.config-check stamp, so every
+# single invocation pays that kconfig pass and prints
+#
+#   WARNING: your configuration is out of sync. Please run make menuconfig, ...
+#
+# Measured 2026-11-23 on a full tree with the old `=n` spelling:
+# `./scripts/kconfig.pl '>' .config tmp/.config` printed exactly one line —
+# `# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set` — so this symbol alone kept
+# the whole build permanently out of sync and made its own warning noise.
+#
+# The canonical form hands off to the kernel just as well: kernel-defaults.mk:119
+# is `awk '/^(#[[:space:]]+)?CONFIG_KERNEL/{...}'`, which copies
+# `# CONFIG_KERNEL_*` lines into the kernel .config.target too.
+config_disable_symbol() {
+	local symbol="$1"
+
+	if grep -q "^${symbol}=" "$SRC/.config" 2>/dev/null; then
+		sed -i "/^${symbol}=/d" "$SRC/.config"
+	fi
+	if ! grep -q "^# ${symbol} is not set$" "$SRC/.config" 2>/dev/null; then
+		printf '# %s is not set\n' "$symbol" >>"$SRC/.config"
+	fi
+}
+
+# OpenWrt decides whether .config is "in sync" by running `conf --defconfig` on
+# a copy and diffing the result against .config (include/toplevel.mk:272-283).
+# A single line the second pass produces and .config does not carry costs a
+# `conf` run plus a red "your configuration is out of sync" line on **every**
+# make invocation until the next `make defconfig`; crucially it also means
+# tmp/.config-check is never created, so the cheap stamp-based skip never
+# applies again for the rest of the build.
+#
+# Measured on 6.18.64, our own writes produced exactly that in two ways, neither
+# of which changes a value:
+#
+#   * the same symbol ends up on both spellings — kconfig's
+#     `# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set` and a plain
+#     `CONFIG_KERNEL_DEBUG_INFO_REDUCED=n` that a later defconfig pass appended
+#     after reading our canonical line.  kconfig.pl compares by value, so `n`
+#     and `#undef` count as different even though they mean the same thing;
+#   * a symbol whose value is probed from the host — `CONFIG_MOLD` is
+#     `def_bool $(shell, ./config/check-hostcxx.sh 10 2 12)` — disagrees because
+#     .config was produced on a machine (or in a container image) whose
+#     staging_dir/host/bin/g++ answered differently.
+#
+# The repair is deliberately narrow so it cannot paper over a real disagreement:
+# a duplicate `SYM=n` is dropped only when the canonical spelling is present, a
+# diff line is appended only when it concerns a symbol this script never wrote,
+# and a host-probed symbol adopts the freshly computed value.  Anything else —
+# defconfig wanting a different *value* than the emitted lists ask for — is
+# reported and fatal.
+canonicalise_config() {
+	local tmp delta line sym conflicts=0
+
+	# One spelling per symbol: `SYM=n` next to `# SYM is not set` is the same
+	# value twice, and only the canonical line matches kconfig's own output.
+	awk 'NR == FNR {
+		     if ($0 ~ /^# CONFIG_[A-Za-z0-9_]+ is not set$/) off[$2] = 1
+		     next
+	     }
+	     /^CONFIG_[A-Za-z0-9_]+=n$/ { split($0, kv, "="); if (kv[1] in off) next }
+	     { print }' "$SRC/.config" "$SRC/.config" >"$SRC/.config.canonical" ||
+		die "could not canonicalise .config"
+	mv "$SRC/.config.canonical" "$SRC/.config"
+
+	# Fold in what kconfig adds on its own: symbols this config never mentions.
+	tmp="$(mktemp -d)"
+	cp "$SRC/.config" "$tmp/.config"
+	# shellcheck disable=SC2016 # the redirection is kconfig.pl's own selector
+	if ! ( cd "$SRC" && ./scripts/config/conf --defconfig="$tmp/.config" -w "$tmp/.config" Config.in >/dev/null 2>&1 ); then
+		rm -rf "$tmp"
+		die "conf --defconfig failed while checking .config for consistency"
+	fi
+	delta="$(cd "$SRC" && ./scripts/kconfig.pl '>' .config "$tmp/.config")"
+	rm -rf "$tmp"
+
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		case "$line" in
+		"# CONFIG_"*" is not set")
+			sym="${line#\# }"
+			sym="${sym% is not set}"
+			;;
+		CONFIG_*=*) sym="${line%%=*}" ;;
+		*) sym="" ;;
+		esac
+
+		# A symbol whose value comes from probing the host cannot be "wrong"
+		# in .config: it describes the machine that ran defconfig, and a
+		# .config restored from the CI tree cache may describe a different
+		# one.  The value kconfig just computed matches the machine about to
+		# build, so adopt it.  `CONFIG_MOLD` is the only such symbol in
+		# config/Config-build.in (`def_bool $(shell, ./config/check-hostcxx.sh
+		# 10 2 12)`, which compiles a C++20 snippet with
+		# $STAGING_DIR_HOST/bin/g++); everything else must agree.
+		if [ -n "$sym" ] && [ "$sym" = CONFIG_MOLD ]; then
+			sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set$/d" "$SRC/.config"
+			printf '%s\n' "$line" >>"$SRC/.config"
+			warn "adopted the host-probed ${sym} value from defconfig: ${line}"
+			continue
+		fi
+
+		case "$line" in
+		"# CONFIG_"*" is not set")
+			if ! grep -q "^${sym}=" "$SRC/.config"; then
+				printf '%s\n' "$line" >>"$SRC/.config"
+				continue
+			fi
+			;;
+		esac
+		warn ".config and defconfig disagree about: ${line}"
+		conflicts=$((conflicts + 1))
+	done <<<"$delta"
+
+	[ "$conflicts" -eq 0 ] ||
+		die "${conflicts} .config value(s) disagree with defconfig — set them in configs/ (or in the emit lists) rather than editing .config by hand"
+
+	# Finally the exact diff OpenWrt runs before every make, so a regression
+	# here fails the build instead of printing a warning for the next two hours.
+	tmp="$(mktemp -d)"
+	cp "$SRC/.config" "$tmp/.config"
+	if ! ( cd "$SRC" && ./scripts/config/conf --defconfig="$tmp/.config" -w "$tmp/.config" Config.in >/dev/null 2>&1 ); then
+		rm -rf "$tmp"
+		die "conf --defconfig failed while re-checking .config"
+	fi
+	delta="$(cd "$SRC" && ./scripts/kconfig.pl '>' .config "$tmp/.config")"
+	rm -rf "$tmp"
+	[ -z "$delta" ] ||
+		die ".config is still out of sync after canonicalisation: $(printf '%s' "$delta" | tr '\n' ' ')"
+
+	log ".config canonicalised — the make-time sync check now passes"
+}
 
 append_board_stack_config() {
 	local out="$1"
@@ -2396,7 +2674,13 @@ CONFIG_KERNEL_CGROUP_BPF=y
 # the same trade this project already accepts for the libbpf package.
 #
 # `select DWARVES` builds the pahole host tool automatically once BTF is on.
-CONFIG_KERNEL_DEBUG_INFO_REDUCED=n
+#
+# Written in kconfig's own spelling — `# … is not set`, not `…=n`.  The `=n`
+# form is what made every `make` print "your configuration is out of sync"
+# (include/toplevel.mk:262-281 compares `conf --defconfig` output against
+# .config), and kernel-defaults.mk:119 copies `# CONFIG_KERNEL_*` lines as well.
+# config_disable_symbol() writes it this way after the final defconfig.
+# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
 CONFIG_KERNEL_DEBUG_INFO_BTF=y
 EOF
 	fi
@@ -2924,7 +3208,7 @@ configure_build() {
 		# kernel ships without type information.  Order matters, and both are
 		# re-asserted here for the same reason as the cgroup pair above.
 		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO" "y"
-		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO_REDUCED" "n"
+		config_disable_symbol "CONFIG_KERNEL_DEBUG_INFO_REDUCED"
 		config_set_symbol "CONFIG_KERNEL_DEBUG_INFO_BTF" "y"
 	fi
 
@@ -2944,6 +3228,11 @@ configure_build() {
 	# helps nobody.  Forced back to =m after the final defconfig, the same way
 	# the feed and ccache symbols above are.
 	config_set_symbol "CONFIG_PACKAGE_luci-app-ssr-plus" "m"
+
+	# Last write wins nowhere: everything below only removes a duplicate
+	# spelling or adds symbols this config never mentioned, so the values set
+	# above survive byte for byte.
+	canonicalise_config
 }
 
 # OpenWrt gates .config on $(STAGING_DIR_HOST)/.prereq-build, whose recipe runs
@@ -2964,6 +3253,31 @@ prepare_config_stage() {
 	touch "$stamp"
 
 	log "Configuration stage: host prerequisite gate satisfied directly (nothing is compiled)"
+
+	# Drop the package scan cache.
+	#
+	# include/scan.mk decides staleness from MTIMES and from a stamp that covers
+	# only the FILELIST of package directories, while normalize_source_mtimes()
+	# deliberately rewrites every source mtime to a content-derived value.  A
+	# re-cloned or re-installed package can therefore sit behind a cached
+	# tmp/.packageinfo that predates it, and the merge that builds it is
+	#
+	#   -cat $(FILELIST) | ... | xargs cat > $@ 2>/dev/null
+	#
+	# — a MISSING or empty chunk silently subtracts a whole directory without a
+	# single log line.  defconfig then rewrites .config without those packages
+	# and still exits 0, which is exactly how the `minimal` and `all-optional`
+	# profiles lost luci-theme-argon, mosdns, easymesh and chinadns-ng while the
+	# two profiles before them passed.  The configuration stage compiles
+	# nothing, so paying for one honest rescan here is the cheap side of the
+	# trade: correctness over a cache that cannot be trusted across a re-clone.
+	local cache
+	for cache in "${SRC}"/tmp/info/.packageinfo-* "${SRC}"/tmp/info/.files-packageinfo-* \
+		"${SRC}/tmp/.packageinfo" "${SRC}/tmp/.config-package.in"; do
+		[ -e "$cache" ] || continue
+		rm -f "$cache"
+	done
+	log "Dropped the package scan cache — tmp/.packageinfo is rebuilt from the current package/ tree"
 }
 
 config_symbol_is_set() {
@@ -2991,6 +3305,44 @@ assert_repo_only() {
 	return 0
 }
 
+# Say WHICH layer lost a package.  The bare "did not survive defconfig" line
+# only describes the last of three, and the middle one is silent: a package can
+# be missing from the merged scan output (tmp/.packageinfo), missing from the
+# Kconfig that output produces (tmp/.config-package.in), or present in the
+# Kconfig and still switched off by defconfig.  include/scan.mk merges chunks
+# with `xargs cat > $@ 2>/dev/null`, so a missing chunk subtracts a whole
+# directory without logging anything — without this the next reader is left to
+# guess, which is how a config regression gets re-diagnosed from scratch.
+diagnose_missing_package() {
+	local pkg="$1" dirs found="" dir
+
+	# A package's Makefile lives in a directory named after it: either a real
+	# clone under package/<pkg> or a feed symlink under package/feeds/*/<pkg>.
+	dirs="$(cd "$SRC" 2>/dev/null && find package -maxdepth 3 -type d -name "$pkg" 2>/dev/null | head -n 3)"
+
+	if grep -q "^config PACKAGE_${pkg}\$" "${SRC}/tmp/.config-package.in" 2>/dev/null; then
+		warn "  ${pkg}: it IS in the Kconfig (tmp/.config-package.in) and defconfig still turned it off — look for a select/dependency conflict"
+		return 0
+	fi
+
+	while IFS= read -r dir; do
+		[ -n "$dir" ] || continue
+		if grep -q "^Source-Makefile: ${dir}/Makefile\$" "${SRC}/tmp/.packageinfo" 2>/dev/null; then
+			found="$dir"
+			break
+		fi
+	done <<< "$dirs"
+
+	if [ -n "$found" ]; then
+		warn "  ${pkg}: in tmp/.packageinfo as ${found} but missing from tmp/.config-package.in — package-metadata dropped it"
+	elif [ -n "$dirs" ]; then
+		warn "  ${pkg}: on disk at $(printf '%s' "$dirs" | head -n 1) but ABSENT from tmp/.packageinfo — the package scan missed it (see logs/package/<dir>/dump.txt)"
+	else
+		warn "  ${pkg}: not on disk anywhere under package/ — nothing cloned or installed it"
+	fi
+	return 0
+}
+
 verify_config() {
 	local pkg fe entry checked missing=()
 
@@ -3006,6 +3358,7 @@ verify_config() {
 		printf '\n' >&2
 		for pkg in "${missing[@]}"; do
 			warn "required package did not survive defconfig: ${pkg}"
+			diagnose_missing_package "$pkg"
 		done
 		die "Configuration is missing required packages — refusing to build a firmware without ${missing[*]}"
 	fi
@@ -3029,7 +3382,11 @@ verify_config() {
 		# would drop BTF without any other symptom, so all three are asserted.
 		grep -q '^CONFIG_KERNEL_DEBUG_INFO=y$' "$SRC/.config" ||
 			die "CONFIG_KERNEL_DEBUG_INFO was dropped — CONFIG_DEBUG_INFO_BTF cannot be generated without full debug info"
-		grep -q '^CONFIG_KERNEL_DEBUG_INFO_REDUCED=n$' "$SRC/.config" ||
+		# The off symbol is asserted in kconfig's own spelling.  A `=n` line
+		# would still be "off" for rules.mk, but it is not what kconfig
+		# writes, so include/toplevel.mk would report the tree out of sync on
+		# every make invocation — see config_disable_symbol().
+		grep -q '^# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set$' "$SRC/.config" ||
 			die "CONFIG_KERNEL_DEBUG_INFO_REDUCED is not explicitly off — it defaults to y and silently disables CONFIG_DEBUG_INFO_BTF"
 		grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' "$SRC/.config" ||
 			die "CONFIG_KERNEL_DEBUG_INFO_BTF was dropped — the kernel would ship no BTF type information"
@@ -3162,6 +3519,12 @@ audit_own_warnings() {
 	if [ "$ours" -ne 0 ]; then
 		die "${ours} Makefile(s) of ours declare dependencies this tree cannot satisfy — see prune_dangling_depends() and the emit lists in this script"
 	fi
+
+	# The comment above says an arithmetic error means the normalisation did
+	# nothing; that is only true if the audit refuses to continue.  It used to be
+	# reported and then ignored, which is exactly how a silent no-op survives.
+	[ "$arith" -eq 0 ] ||
+		die "${arith} 'arithmetic expression: expecting EOF' error(s) in ${LOG_FILE} — the mtime normalisation is silently doing nothing"
 
 	log "Warning audit: ${ours} of ours, ${baseline} baseline OpenWrt (unselected optional deps), ${upstream} upstream feed, ${arith} arithmetic error(s)"
 	return 0
@@ -3413,15 +3776,17 @@ build_apk_repository() {
 	local repo="${dest}/apk-repo"
 	local apk_tool=""
 	local count
+	local sign_args=()
 
 	mkdir -p "$repo"
 
 	# Collect from both locations.  cp -a on the tree would keep the per-feed
-	# directories; this flattens deliberately.
-	find "${SRC}/bin/packages/${TARGET_ARCH}" -mindepth 2 -maxdepth 2 -name '*.apk' \
-		-exec cp -f {} "$repo/" \; 2>/dev/null || true
-	find "${SRC}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}/packages" -maxdepth 1 -name '*.apk' \
-		-exec cp -f {} "$repo/" \; 2>/dev/null || true
+	# directories; this flattens deliberately.  Batched, because this directory
+	# holds a few thousand .apk files.
+	copy_files_into "$repo" find "${SRC}/bin/packages/${TARGET_ARCH}" \
+		-mindepth 2 -maxdepth 2 -name '*.apk'
+	copy_files_into "$repo" find "${SRC}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}/packages" \
+		-maxdepth 1 -name '*.apk'
 
 	count="$(find "$repo" -maxdepth 1 -name '*.apk' | wc -l)"
 	if [ "$count" -eq 0 ]; then
@@ -3454,7 +3819,6 @@ build_apk_repository() {
 	#
 	# --allow-untrusted still applies to the .apk files themselves, which carry
 	# no signature this host trusts; the index is what the target verifies.
-	sign_args=()
 	if [ -f "${SRC}/private-key.pem" ]; then
 		sign_args=(--sign-key "${SRC}/private-key.pem")
 	else
@@ -3503,15 +3867,31 @@ collect_artifacts() {
 	# The rootfs tarballs are included because this config builds them
 	# (CONFIG_TARGET_ROOTFS_TARGZ) and they are the artifact used for a
 	# container/chroot or a manual sysupgrade.
-	find "$bin_dir" -maxdepth 1 -type f \
+	copy_files_into "$dest" find "$bin_dir" -maxdepth 1 -type f \
 		\( -name '*.bin' -o -name '*.itb' -o -name '*.tar.gz' -o -name '*.img.gz' \
 		-o -name '*.manifest' -o -name 'profiles.json' -o -name 'sha256sums' \
-		-o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \) \
-		-exec cp -f {} "$dest/" \;
+		-o -name 'version.buildinfo' -o -name 'config.buildinfo' -o -name 'feeds.buildinfo' \)
+
+	# IMAGE_PREFIX comes from configs/upstream.env: it is the image name the whole
+	# release pipeline looks for.  It was parsed and then never used, so an
+	# upstream renaming of the target/profile would have published a directory of
+	# differently-named images with no complaint — the sysupgrade file simply
+	# would not be there under the name the download page advertises.
+	local missing_names=""
+	local suffix
+	for suffix in -squashfs-sysupgrade.bin -targz-rootfs.tar.gz; do
+		[ -f "${dest}/${IMAGE_PREFIX}${suffix}" ] || missing_names="${missing_names} ${IMAGE_PREFIX}${suffix}"
+	done
+	[ -z "$missing_names" ] ||
+		die "collected artifacts are missing the expected image name(s):${missing_names} — check IMAGE_PREFIX in configs/upstream.env against the profile name and CONFIG_TARGET_ROOTFS_TARGZ"
+	for suffix in -initramfs-kernel.bin -rootfs.tar.gz; do
+		[ -f "${dest}/${IMAGE_PREFIX}${suffix}" ] ||
+			warn "optional artifact ${IMAGE_PREFIX}${suffix} was not produced"
+	done
 
 	if [ -d "${bin_dir}/packages" ]; then
 		mkdir -p "${dest}/packages"
-		find "${bin_dir}/packages" -maxdepth 1 -type f -name '*.apk' -exec cp -f {} "${dest}/packages/" \;
+		copy_files_into "${dest}/packages" find "${bin_dir}/packages" -maxdepth 1 -type f -name '*.apk'
 	fi
 
 	build_apk_repository "$dest"
@@ -3522,9 +3902,36 @@ collect_artifacts() {
 	ls -la "$dest"
 }
 
+# `BUILD-INFO.txt` used to read `project_version=unknown` for every local build,
+# because only CI exported PROJECT_VERSION.  The artifact was then impossible to
+# compare with a release even though it carries the same name, so derive the same
+# value build.yml's `id: version` step does — newest reachable milestone tag,
+# else the newest CHANGELOG entry, else 0.0.0.  The tag filter is explicit for
+# the reason recorded in that workflow: the rolling `vX.Y.Z-r<sha>` tags this
+# project publishes also match `v*`, and matching those fed a previous build's
+# own name back into the next one.
+derive_project_version() {
+	local latest
+
+	latest="$(git -C "$ROOT_DIR" tag --list --merged HEAD 2>/dev/null |
+		grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+	if [ -z "$latest" ]; then
+		latest="$(sed -n 's/^## \[\([0-9][0-9.]*\)\].*/v\1/p' "${ROOT_DIR}/CHANGELOG.md" 2>/dev/null |
+			head -n 1 || true)"
+	fi
+	if [ -n "$latest" ]; then
+		printf '%s' "${latest#v}"
+	else
+		printf '0.0.0'
+	fi
+}
+
 write_build_info() {
 	local dest="$1" rev desc ver code kver abi
+	local project_version="${PROJECT_VERSION:-}"
 	local profiles="${dest}/profiles.json"
+
+	[ -n "$project_version" ] || project_version="$(derive_project_version)"
 
 	rev="$(cat "${ROOT_DIR}/.upstream-revision" 2>/dev/null || echo unknown)"
 	desc="$(cat "${ROOT_DIR}/.upstream-describe" 2>/dev/null || echo unknown)"
@@ -3575,7 +3982,7 @@ project=AutoBuild-H5000M-Openwrt
 # The two answer different questions — "which firmware build is this" and "which
 # OpenWrt tree is it based on" — and the release title, the artifact names and
 # this file all spell the first one the same way, from the same variable.
-project_version=${PROJECT_VERSION:-unknown}
+project_version=${project_version}
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
 upstream_track=${OPENWRT_TRACK}
@@ -3629,6 +4036,7 @@ main() {
 	show_features
 
 	prepare_source
+	assert_tree_writable
 	install_signing_key
 	seed_cached_toolchain
 	seed_cached_build_state

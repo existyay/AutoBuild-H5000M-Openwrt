@@ -1,6 +1,31 @@
 # Auto detect text files and perform LF normalization
-* text=auto
+* text=auto eol=lf
+# eol=lf on the catch-all is load-bearing, not tidiness.  With plain
+# `* text=auto`, a machine with core.autocrlf=true checks every text file out
+# with CRLF, and anything built from the WORKING TREE (a tarball, `git ls-files
+# | tar`, a docker copy) then ships CRLF: the rootfs carried `#!/bin/sh` in
+# nine device scripts, sh reported "`: not found`" and first boot silently did
+# nothing.  Measured on the built rootfs before this line existed.  Attributes
+# beat core.autocrlf, so this keeps the working tree LF on every platform.
 *.sh text eol=lf
 *.patch text eol=lf
 *.config text eol=lf
 *.env text eol=lf
+# Device-side scripts have no extension (uci-defaults, hotplug.d, usr/sbin), so
+# `* text=auto` alone left them at the mercy of core.autocrlf: on a Windows
+# checkout they came out CRLF, and `#!/bin/sh\r` is an interpreter path that does
+# not exist — first-boot defaults and the USB/ieee80211 hotplug hooks would
+# silently never run while the filenames still looked right in the tree.
+# They are shipped into the rootfs by local-packages/*/Makefile, so LF is
+# mandatory here, not a style preference.
+local-packages/**/files/** text eol=lf
+# Workflows and the files every job parses.  CRLF in YAML is legal but makes a
+# one-line edit look like a whole-file rewrite in `git diff`, and it is the same
+# class of accident as the device scripts above: invisible until something
+# greps for an anchor.
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.js   text eol=lf
+*.uc   text eol=lf
+*.mjs  text eol=lf

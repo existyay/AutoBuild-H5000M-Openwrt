@@ -67,6 +67,18 @@ check() { # check <description> <expected> <actual>
 	if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1 — expected [$2], got [$3]"; fi
 }
 
+# A script under test that exits nonzero used to abort this harness on the spot
+# (set -e), so a real artifact defect reported only "rc=2" and none of the
+# checks that would have named it ever ran.  Report it as a failed check and
+# carry on: the per-field checks below then say which values are still wrong.
+run_script() { # run_script <label> <command...>
+	local label="$1"
+	shift
+	"$@" && return 0
+	bad "$label — the script exited nonzero (its own output above says why)"
+	return 0
+}
+
 [ -n "$QEMU_AARCH64" ] || {
 	echo "qemu-aarch64-static not found; see the header of this script" >&2
 	exit 2
@@ -89,6 +101,27 @@ file "$UCI" | grep -q aarch64 || {
 	echo "$UCI is not aarch64 — wrong artifact?" >&2
 	exit 2
 }
+
+# CRLF guard.  Every shell script in this rootfs starts with `#!/bin/sh`, and a
+# Windows checkout without .gitattributes stores them with CRLF, which makes
+# `#!/bin/sh\r` an interpreter that does not exist: sh then reports
+# "`: not found`" against lines it cannot parse and the first-boot pass silently
+# does nothing on the device.  This was shipped once (artifact built from a
+# CRLF working tree) and the only symptom was four "not found" lines, so it is
+# now a fatal, self-describing failure rather than a puzzle.
+crlf_hits=""
+for f in "$WORK"/root/usr/sbin/h5000m-* "$WORK"/root/etc/h5000m-*.conf \
+	"$WORK"/root/etc/uci-defaults/*h5000m* "$WORK"/root/etc/hotplug.d/*/*h5000m*; do
+	[ -f "$f" ] || continue
+	if grep -q $'\r' "$f"; then
+		crlf_hits="$crlf_hits ${f#"$WORK/root"}"
+	fi
+done
+if [ -n "$crlf_hits" ]; then
+	printf '  \033[1;31mFAIL\033[0m the image ships CRLF line endings:%s\n' "$crlf_hits" >&2
+	printf '       a shell script with \r in it cannot run; rebuild from an LF working tree\n' >&2
+	exit 1
+fi
 
 # The real uci, with -c so it reads and writes our scratch config dir and never
 # the host's /etc/config.
@@ -148,7 +181,7 @@ EOF
 echo
 echo "== profile: untouched first boot — WiFi must come up and offload turn on"
 seed_wireless OpenWrt
-sh "$WORK/firstboot"
+run_script 'untouched first boot' sh "$WORK/firstboot"
 
 check "radio0.country" "$H5000M_WIFI_COUNTRY" "$(uci -q get wireless.radio0.country)"
 check "radio0.disabled" "0" "$(uci -q get wireless.radio0.disabled)"
@@ -171,7 +204,7 @@ fi
 echo
 echo "== profile: owner already changed the SSID — nothing may be touched"
 seed_wireless MyOwnWiFi
-sh "$WORK/firstboot"
+run_script 'owner already changed the SSID' sh "$WORK/firstboot"
 check "ssid preserved" "MyOwnWiFi" "$(uci -q get wireless.default_radio0.ssid)"
 check "radio0.disabled kept" "1" "$(uci -q get wireless.radio0.disabled)"
 check "offload still applied" "$H5000M_FLOW_OFFLOAD" "$(uci -q get firewall.@defaults[0].flow_offloading)"
@@ -187,7 +220,7 @@ config defaults
 FWEOS
 : >"$WORK/config/wireless"
 rm -f "$WORK/marker-wifi" "$WORK/marker-offload"
-sh "$WORK/firstboot"
+run_script 'empty wireless file' sh "$WORK/firstboot"
 if [ -e "$WORK/marker-wifi" ]; then
 	bad "wifi marker written with no radios present — WiFi would never be configured"
 else
@@ -199,7 +232,7 @@ echo
 echo "== profile: marker present — second boot must be a no-op"
 seed_wireless OpenWrt
 touch "$WORK/marker-wifi" "$WORK/marker-offload"
-sh "$WORK/firstboot"
+run_script 'marker present (second boot)' sh "$WORK/firstboot"
 check "radio0.disabled kept" "1" "$(uci -q get wireless.radio0.disabled)"
 check "offload not applied" "" "$(uci -q get firewall.@defaults[0].flow_offloading)"
 
@@ -276,7 +309,7 @@ bypass_has() {
 }
 
 seed_ebpf 1
-sh "$WORK/accel" apply
+run_script 'accel apply (first)' sh "$WORK/accel" apply
 check "bypass entries after the first apply" "10" "$(bypass_count)"
 for entry in 'fc00::/7' 'fd12:0:0:0:0:0:0:0/64' '2001:db8:0:0:0:0:0:0/64'; do
 	if bypass_has "$entry"; then
@@ -293,7 +326,7 @@ for entry in 'fe80:0:0:0:0:0:0:0/64' '2001:db8:0:1:0:0:0:0/64'; do
 	fi
 done
 
-sh "$WORK/accel" apply
+run_script 'accel apply (second)' sh "$WORK/accel" apply
 check "a second apply adds nothing (the whole-line bug appended copies)" "10" "$(bypass_count)"
 if grep -q "''" "$WORK/config/nikki-rs"; then
 	bad "bypass config holds quote-wrapped values (uci set \"k='v'\" bug)"
@@ -303,7 +336,7 @@ fi
 check "check-bypass reports nothing missing once repaired" "" "$(sh "$WORK/accel" check-bypass)"
 
 seed_ebpf 0
-sh "$WORK/accel" apply
+run_script 'accel apply (eBPF disabled)' sh "$WORK/accel" apply
 check "with eBPF disabled the list is left exactly as it was" "7" "$(bypass_count)"
 
 printf '\n\033[1m== summary ==\033[0m\n  passed: %s\n  failed: %s\n' "$pass" "$fail"

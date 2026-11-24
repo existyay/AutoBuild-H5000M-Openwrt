@@ -84,3 +84,22 @@ fix(kmods): kmod-tun 未进镜像导致 TUN 模式无法启用
   To enable Tun support, you need to install ip-full and kmod-tun.
 kmod 只能来自同内核构建的仓库，故改为 =y 进镜像。
 ```
+
+## 七、换行符：仓库里一律 LF，且要两层都管
+
+文本文件必须是 LF，`.gitattributes` 的 catch-all 是 `* text=auto eol=lf`。
+只改工作区不够，两层都得管：
+
+| 层 | 现状 | 怎么坏 |
+|---|---|---|
+| blob（仓库里存的内容） | LF | `git add --renormalize .` **修不了**：git 比较的是归一化后的内容，CRLF blob 与 LF 工作区"相等"，它什么都不做。必须 `git rm -r --cached . && git add -A .` |
+| 属性 | `eol=lf` | 只写 `* text=auto` 时，`core.autocrlf=true` 的机器会把工作区检出成 CRLF；属性优先于 core.autocrlf |
+| 工作区 | LF | 从工作区打包（`git ls-files \| tar`、docker 复制）会把 CRLF 带进产物 |
+
+实测代价：根文件系统里九支设备脚本每行都以 CRLF 结尾，`#!/bin/sh\r` 在设备上
+是"解释器不存在"，首启脚本静默什么都不做、hotplug 也不触发；构建侧唯一的痕迹是
+`firstboot: 22: : not found` 这类报文。`scripts/rootfs-script-test.sh` 现在把
+CRLF 列为致命项并逐支点名，所以这类回归会在产物测试阶段就断掉。
+
+容器/跨平台复制源码时不要用 MSYS 的 `tar`+`docker cp` 混搭：用
+`python3 -c 'shutil.copyfile'` 按 `git ls-files` 逐字节复制，然后 grep 一遍 `\r`。

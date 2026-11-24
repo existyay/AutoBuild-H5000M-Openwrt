@@ -69,18 +69,33 @@ jobs:
         # and three cache-poisoning findings in this very repository went
         # unnoticed.  A finding now fails the job.
         #
-        # `--persona=auditor` matches .github/zizmor.yml, and `--min-severity`
-        # keeps the signal at the level the config documents.
+        # `--persona=auditor` matches .github/zizmor.yml, which is where the
+        # per-rule decisions live.  No `--min-severity` here: that flag would
+        # drop the informational findings `auditor` exists to report.
         run: |
           set -euo pipefail
           # Hash-pinned, like the checks.yml job (see the note there).
           python3 -m pip install --disable-pip-version-check --require-hashes \
             -r .github/requirements-zizmor.txt
-          zizmor --persona=auditor --format sarif .github/workflows/ > zizmor.sarif
+          # Findings must fail the job, but the SARIF must still be written.
+          # `zizmor > zizmor.sarif` under `set -e` used to abort right there,
+          # so the human-readable summary below never printed and the upload
+          # step was skipped — the Security tab got nothing at exactly the
+          # moment there was something to report.
+          rc=0
+          zizmor --persona=auditor --format sarif .github/workflows/ > zizmor.sarif || rc=$?
+          if [ ! -s zizmor.sarif ]; then
+            echo "::error::zizmor produced no SARIF output (rc=${rc})"
+            exit "${rc:-1}"
+          fi
           echo "--- human-readable summary ---"
-          zizmor --persona=auditor --format plain .github/workflows/
+          zizmor --persona=auditor --format plain .github/workflows/ || true
+          exit "$rc"
 
       - name: Upload zizmor SARIF
+        # `always()`: the step above deliberately fails on findings, and the
+        # SARIF is most needed in exactly that case.
+        if: always() && hashFiles('zizmor.sarif') != ''
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: zizmor.sarif
@@ -302,7 +317,12 @@ jobs:
           curl -fsSL --retry 3 -o /tmp/syft.tar.gz \
             "https://github.com/anchore/syft/releases/download/v${version}/syft_${version}_linux_amd64.tar.gz"
           echo "${sha256}  /tmp/syft.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/syft.tar.gz -C /usr/local/bin syft
+          # NOT /usr/local/bin: that is root-owned on a hosted runner and this
+          # step runs without sudo, so the extraction failed with "Cannot open:
+          # Permission denied".  A run-local bin dir needs no privileges.
+          mkdir -p "$PWD/.syft-bin"
+          tar -xzf /tmp/syft.tar.gz -C "$PWD/.syft-bin" syft
+          export PATH="$PWD/.syft-bin:$PATH"
           syft scan dir:apk-repo -o spdx-json=sbom.spdx.json
           syft --version
 

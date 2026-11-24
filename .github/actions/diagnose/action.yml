@@ -36,7 +36,13 @@ runs:
         DIAG_LOGS: ${{ inputs.log_files }}
         DIAG_TAIL: ${{ inputs.tail_lines }}
       run: |
+        # No errexit on purpose: this step only runs after something already
+        # failed, and a reporter that aborts halfway loses the very lines that
+        # explain the failure.  `set +e` is spelled out because a composite
+        # `shell: bash` starts as `bash --noprofile --norc -eo pipefail {0}`,
+        # so errexit is inherited unless it is turned off here.
         set -uo pipefail
+        set +e
 
         report="$(mktemp)"
         {
@@ -71,7 +77,26 @@ runs:
         } >> "$report"
 
         # Tail each requested log when it exists at this point in the job.
-        for log in $DIAG_LOGS; do
+        #
+        # `for log in $DIAG_LOGS` word-splits the input but does NOT expand a
+        # glob: a caller passing `coverage-*.log` (coverage.yml does) got a
+        # literal pattern that never matched, so the report silently lost the
+        # only thing that would have explained the failure.  compgen -G expands
+        # it here; a plain path that matches nothing still yields nothing.
+        files=()
+        for pattern in $DIAG_LOGS; do
+          matched=()
+          while IFS= read -r f; do
+            [ -n "$f" ] && matched+=("$f")
+          done < <(compgen -G "$pattern" || true)
+          if [ "${#matched[@]}" -gt 0 ]; then
+            files+=("${matched[@]}")
+          elif [ -f "$pattern" ]; then
+            files+=("$pattern")
+          fi
+        done
+        for log in "${files[@]:-}"; do
+          [ -n "$log" ] || continue
           [ -f "$log" ] || continue
           {
             echo "### \`${log}\`（末 ${DIAG_TAIL} 行）"

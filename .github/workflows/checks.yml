@@ -34,6 +34,10 @@ jobs:
   check:
     name: 仓库与主机检查
     runs-on: ubuntu-24.04
+    # Without this the job inherits the 360-minute default: one hung `curl` in
+    # the repository-reachability loop (or a stalled apt) could sit there for
+    # six hours while nothing was being checked.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -45,8 +49,13 @@ jobs:
       - name: Install configuration-stage dependencies
         run: |
           sudo apt-get update
+          # The libraries and parsers are here because scripts/check-deps.sh now
+          # reports them: they are what `configure` needs, and a bare
+          # `command -v` in the old list could not see them, so the gate said
+          # "host looks ready" on hosts where the build died later.
           sudo apt-get install -y --no-install-recommends \
-            build-essential gawk unzip wget curl rsync zstd git patch python3
+            build-essential gawk unzip wget curl rsync zstd git patch python3 \
+            bison flex pkgconf libncurses-dev libssl-dev libelf-dev libgmp-dev
 
       - name: Check build host
         run: ./scripts/check-deps.sh
@@ -416,6 +425,14 @@ jobs:
       - name: Verify the fullcone patches still apply to the sources upstream ships
         run: |
           set -euo pipefail
+          # The clone below uses ${OPENWRT_REPO_BRANCH}/${OPENWRT_REPO_URL}, which
+          # live in configs/upstream.env — the two steps above source it, this
+          # one did not.  On the normal path the `if [ ! -d "$SRC" ]` branch is
+          # dead, but a partial re-run (or a resumed job) skips the cloning step
+          # and then hit `OPENWRT_REPO_BRANCH: unbound variable` under `set -u`
+          # — a failure that reported the wrong reason.
+          # shellcheck source=/dev/null
+          . configs/upstream.env
           SRC=/tmp/upstream-check
 
           # Reuse the clone the previous step made; clone only if this step is
@@ -537,10 +554,20 @@ jobs:
             sbwml/luci-app-mosdns \
             FUjr/QModem
           do
-            code="$(curl -s -o /dev/null -w '%{http_code}' \
+            code="$(curl -sS --max-time 10 --retry 3 --retry-delay 2 \
+              -o /dev/null -w '%{http_code}' \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H 'Accept: application/vnd.github+json' \
-              "https://api.github.com/repos/${repo}")"
+              "https://api.github.com/repos/${repo}")" || {
+              # curl itself failed (DNS, timeout, connection reset).  Under
+              # `set -e` a failing assignment used to abort the whole step with
+              # curl's own message, so the ::error:: line below never printed
+              # and the reason was invisible; --max-time keeps one hung
+              # connection from occupying the job.
+              echo "::error::${repo} could not be queried (curl failed)"
+              fail=1
+              continue
+            }
             if [ "$code" = "200" ]; then
               echo "ok   ${repo}"
             else
@@ -595,11 +622,14 @@ jobs:
           want scripts/local-build.sh 'kmod-sched-bpf' \
             "local-build.sh carries the TC BPF modules"
           # BTF is required, and it has two prerequisites that are easy to lose:
-          # DEBUG_INFO_REDUCED defaults to y and silently disables it.
+          # DEBUG_INFO_REDUCED defaults to y and silently disables it.  The
+          # assertion is on kconfig's own spelling — `# … is not set` — because
+          # an `…=n` line makes include/toplevel.mk report the tree out of sync
+          # on every make invocation.
           want scripts/local-build.sh 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' \
             "local-build.sh requests CONFIG_KERNEL_DEBUG_INFO_BTF"
-          want scripts/local-build.sh 'CONFIG_KERNEL_DEBUG_INFO_REDUCED' \
-            "local-build.sh explicitly disables CONFIG_KERNEL_DEBUG_INFO_REDUCED"
+          want scripts/local-build.sh '# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set' \
+            "local-build.sh disables CONFIG_KERNEL_DEBUG_INFO_REDUCED in kconfig spelling"
           want .github/workflows/build.yml 'CONFIG_KERNEL_DEBUG_INFO_BTF' \
             "build.yml asserts BTF survived into the kernel config"
           want scripts/local-build.sh 'kmod-veth' \

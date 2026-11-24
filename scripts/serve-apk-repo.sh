@@ -25,6 +25,27 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_DIR="${ROOT_DIR}/artifacts/apk-repo"
 PORT="${1:-8099}"
 
+case "$PORT" in
+	'' | *[!0-9]*)
+		echo "error: port must be numeric, got '${PORT}'" >&2
+		exit 2
+		;;
+	*)
+		if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+			echo "error: port out of range: ${PORT}" >&2
+			exit 2
+		fi
+		;;
+esac
+
+# Python is what actually serves the repository: check it before printing a URL
+# the user pastes into a build.  The `-c` probe also rejects the Windows Store
+# alias stub, which `command -v` reports as present but which exits immediately.
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'pass' >/dev/null 2>&1; then
+	echo "error: python3 required to serve the repository, none that runs was found" >&2
+	exit 1
+fi
+
 if [ ! -f "${REPO_DIR}/packages.adb" ]; then
 	echo "No repository at ${REPO_DIR}/packages.adb" >&2
 	echo "Build one first:  scripts/local-build.sh" >&2
@@ -38,7 +59,12 @@ host_ip() {
 	local ip
 	ip="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)"
 	[ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-	echo "${ip:-127.0.0.1}"
+	if [ -z "$ip" ]; then
+		echo "warning: could not determine a routable address; falling back to 127.0.0.1" >&2
+		echo "         a router cannot reach that; use the host's LAN address instead" >&2
+		ip=127.0.0.1
+	fi
+	echo "$ip"
 }
 
 IP="$(host_ip)"

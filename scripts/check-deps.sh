@@ -8,17 +8,45 @@
 #
 set -uo pipefail
 
-REQUIRED=(git make gcc g++ python3 patch gawk unzip wget curl zstd find)
+REQUIRED=(git make gcc g++ python3 patch gawk unzip wget curl zstd find tar)
 CONFIG_ONLY_REQUIRED=(git make gcc g++ python3 patch gawk find tar zstd)
+# Libraries without which configure fails, not compile — checked through
+# pkg-config because a bare `command -v` cannot see them.  These are the ones
+# `local-build.sh --install-deps` installs and this script used to stay silent
+# about: on a host missing libncurses-dev it printed "OK — host looks ready"
+# and the build then died in `make menuconfig`'s toolchain probe twenty
+# minutes later.  bison/flex are here for the same reason (the kernel and the
+# kmods regenerate parsers).
+REQUIRED_PC=(ncurses:libncurses-dev openssl:libssl-dev libelf:libelf-dev gmp:libgmp-dev)
+REQUIRED_TOOLS_FULL=(bison flex pkg-config)
 RECOMMENDED=(rsync ccache timeout flock dtc fastjar gperf swig)
 SWAP_HINT_GB=8
 DISK_HINT_GB=30
 
 missing_required=()
+missing_full=()
 missing_recommended=()
 
 for cmd in "${REQUIRED[@]}"; do
 	command -v "$cmd" >/dev/null 2>&1 || missing_required+=("$cmd")
+done
+
+for cmd in "${REQUIRED_TOOLS_FULL[@]}"; do
+	command -v "$cmd" >/dev/null 2>&1 || missing_full+=("$cmd")
+done
+
+# pkg-config itself may be the very thing that is missing, in which case the
+# library names are what has to be reported.  `--exists` prints nothing and is
+# exactly the question worth asking: "is the .pc file there", i.e. is the -dev
+# package installed rather than just the runtime library.
+for entry in "${REQUIRED_PC[@]}"; do
+	pc="${entry%%:*}"
+	pkg="${entry#*:}"
+	if command -v pkg-config >/dev/null 2>&1; then
+		pkg-config --exists "$pc" >/dev/null 2>&1 || missing_full+=("$pkg")
+	else
+		missing_full+=("$pkg")
+	fi
 done
 
 for cmd in "${RECOMMENDED[@]}"; do
@@ -30,6 +58,26 @@ missing_config=()
 for cmd in "${CONFIG_ONLY_REQUIRED[@]}"; do
 	command -v "$cmd" >/dev/null 2>&1 || missing_config+=("$cmd")
 done
+
+# OpenWrt's own prerequisite list has a `python3-distutils` entry, and it is
+# version-aware: the module only has to exist below Python 3.12.  It matters
+# here because `./scripts/feeds install -a` runs `make prepare-tmpinfo`
+# internally, and when that precondition fails feeds install does not stop — it
+# reinstalls every package with no package database, prints one
+# "WARNING: No feed for package 'libc' found" per unresolved dependency (16k
+# lines, measured) and exits 0, leaving a tree whose packages have no depends.
+# No `command -v` can see this, so probe the module the way OpenWrt does.
+if command -v python3 >/dev/null 2>&1; then
+	if ! python3 - >/dev/null 2>&1 <<'PY'
+from sys import version_info
+if version_info < (3, 12):
+    from distutils import util
+PY
+	then
+		missing_full+=("python3-distutils")
+		missing_config+=("python3-distutils")
+	fi
+fi
 if [ "${#missing_config[@]}" -eq 0 ]; then
 	echo "  ready — 'local-build.sh --config-only' can run"
 else
@@ -42,6 +90,12 @@ if [ "${#missing_required[@]}" -eq 0 ]; then
 	echo "  all present (${REQUIRED[*]})"
 else
 	printf '  MISSING: %s\n' "${missing_required[*]}"
+fi
+if [ "${#missing_full[@]}" -eq 0 ]; then
+	echo "  libraries present (ncurses, openssl, libelf, gmp + bison/flex/pkg-config)"
+else
+	printf '  MISSING: %s\n' "${missing_full[*]}"
+	echo "  these fail 'configure', not the tool lookup, so they are counted below"
 fi
 
 echo
@@ -71,10 +125,10 @@ fi
 echo
 printf '  jobs: %s\n' "$(nproc 2>/dev/null || echo '?')"
 
-if [ "${#missing_required[@]}" -gt 0 ]; then
+if [ "${#missing_required[@]}" -gt 0 ] || [ "${#missing_full[@]}" -gt 0 ]; then
 	echo
 	echo "Run 'scripts/local-build.sh --install-deps' on Debian/Ubuntu, or install the equivalent packages."
-	exit "${#missing_required[@]}"
+	exit "$(( ${#missing_required[@]} + ${#missing_full[@]} ))"
 fi
 
 echo
