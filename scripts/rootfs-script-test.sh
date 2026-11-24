@@ -254,9 +254,14 @@ ACCEL_SRC="$WORK/root/usr/sbin/h5000m-accel"
 # Only the absolute runtime paths change; the uci invocations are what ships.
 sed -e "s|/etc/config/|$WORK/config/|g" \
 	-e "s|/proc/net/if_inet6|$WORK/if_inet6|g" \
+	-e "s|/etc/sysctl.d/|$WORK/sysctl.d/|g" \
+	-e "s|/proc/sys/net/ipv4/tcp_available_congestion_control|$WORK/tcp_available|g" \
 	-e "s|/etc/init.d/nikki-rs|$WORK/no-such-initd|g" \
 	-e "s|/etc/init.d/firewall|$WORK/no-such-initd|g" \
 	"$ACCEL_SRC" >"$WORK/accel"
+
+# What the kernel offers is a host property: the runner may or may not have bbr.
+printf 'reno cubic bbr\n' >"$WORK/tcp_available"
 
 # apply_settings really does write net.ipv4.tcp_congestion_control through
 # sysctl, and the eBPF path loads modules: none of that belongs on the machine
@@ -338,6 +343,30 @@ check "check-bypass reports nothing missing once repaired" "" "$(sh "$WORK/accel
 seed_ebpf 0
 run_script 'accel apply (eBPF disabled)' sh "$WORK/accel" apply
 check "with eBPF disabled the list is left exactly as it was" "7" "$(bypass_count)"
+
+# BBR is a runtime sysctl: without a /etc/sysctl.d drop-in it is gone at the next
+# boot while /etc/config still says 'bbr' — the page then reports a setting the
+# kernel does not have.  The profile is 'custom' here because the presets decide
+# bbr themselves ('performance' already means bbr=1, 'compat' means 0).
+ACCEL_DROPIN="$WORK/sysctl.d/90-h5000m-accel.conf"
+printf "config settings 'settings'\n\toption profile 'custom'\n\toption flow_offload '1'\n\toption flow_offload_hw '0'\n\toption bbr '1'\n\toption fullcone '0'\n\toption ebpf_proxy 'keep'\n" >"$WORK/config/h5000m_accel"
+run_script 'accel apply (bbr on)' sh "$WORK/accel" apply
+if [ -f "$ACCEL_DROPIN" ] && grep -qx 'net.ipv4.tcp_congestion_control=bbr' "$ACCEL_DROPIN"; then
+	ok 'bbr is written to a sysctl.d drop-in (it survives a reboot)'
+else
+	bad 'bbr was not written to /etc/sysctl.d, so it dies with the reboot'
+fi
+
+# 切回 compat 预设：它会自己把 bbr 定成 0，且不依赖上一段写下的 custom 配置 ——
+# `seed_ebpf` 只重写 nikki-rs，不会碰 h5000m_accel。
+printf "config settings 'settings'\n\toption profile 'compat'\n\toption flow_offload '1'\n\toption flow_offload_hw '0'\n\toption bbr '0'\n\toption fullcone '0'\n\toption ebpf_proxy 'keep'\n" >"$WORK/config/h5000m_accel"
+seed_ebpf 1
+run_script 'accel apply (bbr off)' sh "$WORK/accel" apply
+if [ -e "$ACCEL_DROPIN" ]; then
+	bad 'the drop-in is still there after bbr was switched off'
+else
+	ok 'the drop-in is removed when bbr is switched off'
+fi
 
 printf '\n\033[1m== summary ==\033[0m\n  passed: %s\n  failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
