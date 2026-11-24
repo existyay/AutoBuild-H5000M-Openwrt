@@ -57,8 +57,8 @@
 ```sh
 OPENWRT_REPO_URL=https://github.com/openwrt/openwrt.git
 OPENWRT_REPO_BRANCH=main
-OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-ce245c873917cfbb412244dad80e395effed3167}
-OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-ce245c8}
+OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-727d8d2f8e5b19a2121e2cf05824e9e5cac35310}
+OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-727d8d2}
 OPENWRT_TRACK=latest          # latest 跟随分支头；pinned 复现指定 revision
 OPENWRT_TARGET=mediatek
 OPENWRT_SUBTARGET=filogic
@@ -2284,6 +2284,30 @@ project_version=1.3.0
 
 非 `Build` 里最贵的是**恢复**构建缓存那 17.4 min。它买的是“12.4 min 而不是 170 min”，
 所以不去动它；但这是这条流水线上下一个会先涨起来的地方。
+
+### 4.4 2026-11-24 再推一次 pin：`ce245c8` → `727d8d2`
+
+`ce245c8` 之后上游又走了 11 个 commit（head
+`727d8d2f8e5b19a2121e2cf05824e9e5cac35310`，快照标签 `r0-727d8d2`）。按 4.3 的规则，
+先编一次再记：
+
+- run **45436214328**（`pinned=false`，即走 `latest` 线，`694667a`）编的就是 `727d8d2`：
+  `openwrt_revision=727d8d2f8e5b19a2121e2cf05824e9e5cac35310`、
+  `openwrt_version_code=r0-727d8d2`、`upstream_track=latest`。
+- 全绿：`Verify the fullcone chain …`、`Verify the proxy stack dependencies …`、
+  `Verify the built repository can satisfy every frontend on its own`、
+  `Audit build warnings`、`Attest the firmware and the apk repository`、`Publish release`，
+  以及 `设备脚本测试`（真实 `uci`，qemu-user）对同一份 rootfs 全绿。
+- 这 11 个 commit 全是 realtek / airoha / starfive 的目标改动，外加一个 ppp
+  `options.pptp` 的修正；**没有** mediatek 目标文件、**没有** `package/kernel/mt76`，
+  所以本工程带的两个补丁（`0001-h5000m-userspace-fan-control.patch`、
+  `0002-h5000m-mt76-txwi-fix.patch`）一行没改就贴上了。
+
+代价，这次推翻 4.3 的结论：job 41.8 min，`Build` **12.9 min**，`Restore build cache`
+9.5 min —— 构建缓存按配置打 key 且带 `restore-keys` 回退，所以换 revision 不会再赔
+一次全量。4.3 里那次 `Build` 170 min 是缓存未命中的成本，不是换 revision 的固有成本。
+
+于是 `configs/upstream.env` 两行同时改：revision → `727d8d2f8e5b…`，标签 → `r0-727d8d2`。
 
 ### 5. 重新生成一个包内补丁
 
