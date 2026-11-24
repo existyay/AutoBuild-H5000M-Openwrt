@@ -1898,6 +1898,20 @@ jobs:
           # 找 `github-pages`，名字对不上时报的是「No artifacts named …」，而
           # 真实原因是名字改了却只改了一半。
           artifact_name: github-pages-${{ github.run_attempt }}
+        # 步骤级的 continue-on-error 不只是「别让 run 变红」，它是下面那个
+        # `if: steps.deployment.outcome == 'failure'` 能成立的前提。
+        #
+        # 实测（run 45419038608，四个 job 的对照）：
+        #
+        #   只给 job 加 continue-on-error：步骤结论仍是 failure，但
+        #     `steps.<id>.outcome` **不是** 'failure' —— 引用它的步骤被静默
+        #     跳过。（这正是 run 45408586022 的样子：Deploy to Pages 失败，
+        #     「Deploy to Pages (retry)」和「失败诊断」都显示 skipped。）
+        #   步骤自己也加 continue-on-error：outcome = failure（重试能触发），
+        #     conclusion = success（run 仍然是绿的）。
+        #
+        # 两层都留着：job 级保证托管问题不拖挂一次好构建，步骤级让 outcome 可信。
+        continue-on-error: true
 
       # 再试一次。
       #
@@ -1917,11 +1931,14 @@ jobs:
       # 这个 job 是 continue-on-error 的（托管问题不能拖挂一次好构建），所以
       # 部署失败**不会让 run 变红**，只会让站点悄悄停在上一版。重试是这个
       # 前提下唯一能做到的补救。
+      #
+      # 实测对照：`failure()` 在 job 级 continue-on-error 下仍然会被触发，
+      # `steps.<id>.outcome` 不会 —— 所以两者不能互相替代，这一步用的是
+      # 上一个步骤带步骤级 continue-on-error 之后才可信的 `outcome`。
       - name: Deploy to Pages (retry)
         id: deployment_retry
-        # 用步骤的 outcome 而不是 `failure()`：这个 job 是 continue-on-error 的，
-        # 判断依据直说“刚才那次部署失败了”比依赖失败传播语义稳。
         if: steps.deployment.outcome == 'failure'
+        continue-on-error: true
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
