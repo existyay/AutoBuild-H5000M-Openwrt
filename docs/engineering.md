@@ -2252,6 +2252,39 @@ revision 不变时 `Build` 只要 20.4 min —— 这不属于“拖慢编译的
 候选 sha 可以先用 `scripts/local-build.sh --revision <sha>`（或 CI 的仓库变量
 `OPENWRT_PINNED_REVISION` + `pinned=true`）完整编一遍，过了再写回文件。
 
+#### 4.3.1 推上之后那一趟：57 分钟，其中 `Build` 12.4 分钟
+
+pin 改成 `ce245c8` 并合入（`ab13f1a`）后，又派发了一趟 `{"pinned":"true",
+"publish_release":"false","build_repo":true}` 的 run **45337990913**，全部绿。它的
+`BUILD-INFO.txt` 正好把新机制钉住：
+
+```
+upstream_track=pinned
+openwrt_revision=ce245c873917cfbb412244dad80e395effed3167
+openwrt_revision_source=caller
+openwrt_version_code=r0-ce245c8
+project_version=1.3.0
+```
+
+`openwrt_revision_source=caller` 是关键：revision 是 `Resolve the upstream revision`
+解析后**传给**构建的，`local-build.sh` 没有再去 `git ls-remote` 自己取一次头部 ——
+缓存 key 与实际编译对象从此说的是同一个 commit。`r0-ce245c8` 也留住了，因为标签
+前七位与 revision 一致，`write_build_info()` 的守卫放行。
+
+时间分布（job 57.1 min）：`Install build dependencies` 11.4、
+`Restore build cache from GitHub Packages` 17.4、`Build` **12.4**、
+`Save build cache to GitHub Packages` 9.1、`Free disk space` 3.0，其余都在 1.3 以内。
+对比 4.3 里冷启动那次 `Build` 170.5 min：同一个 revision 的缓存 key 已经在 45307537181
+里存过，所以这里直接命中。**结论是一条预算而不是一个缺陷**：bump 一次要付一次全量
+（≈170 min），之后这个 revision 的每一次构建都在 15 min 量级。
+
+按预期跳过的步骤：`Save download cache` / `Save ccache` / `Save toolchain`（命中即不存）、
+`Diagnose a failed build`、`Upload build logs on failure`、`Attest …`、`Publish release`。
+产物：`H5000M-mainline-openwrt` 160.1 MB、`apk-repo` 281.2 MB、`github-pages` 281.2 MB。
+
+非 `Build` 里最贵的是**恢复**构建缓存那 17.4 min。它买的是“12.4 min 而不是 170 min”，
+所以不去动它；但这是这条流水线上下一个会先涨起来的地方。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh
