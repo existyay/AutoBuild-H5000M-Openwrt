@@ -753,6 +753,10 @@ prepare_feeds() {
 
 	verify_package_index
 	verify_wwand_feed
+
+	# Cheap, and the only way an artifact can say which package set it shipped:
+	# feeds.conf.default pins branches, not commits.  See record_feed_revisions.
+	record_feed_revisions
 }
 
 # Fail loudly when `feeds install` ran without a package database.
@@ -817,6 +821,33 @@ verify_wwand_feed() {
 		[ -d "${feed}/${pkg}" ] || warn "wwand feed is missing ${pkg}"
 	done
 
+	return 0
+}
+
+# Record the HEAD of every feed next to the upstream revision.
+#
+# feeds.conf.default points at BRANCHES (`packages`, `luci`, `routing`,
+# `telephony`, `video` → master; `wwand` → main), so the OpenWrt revision does
+# not imply the package set: two builds of the same revision, a day apart, can
+# ship different versions of the same package.  BUILD-INFO.txt used to record
+# only openwrt_revision, which cannot be turned back into a build — it can only
+# be approximated.  These SHAs make the artifact reproducible (`feeds.<name>.
+# commit` in the checkouts) and make a "why is this package a different version
+# than yesterday" question answerable from the artifact itself.
+record_feed_revisions() {
+	local out="${ROOT_DIR}/.feeds-revisions" dir name sha
+
+	: >"$out"
+	[ -d "${SRC}/feeds" ] || return 0
+
+	for dir in "${SRC}"/feeds/*/; do
+		name="$(basename "$dir")"
+		sha="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+		[ -n "$sha" ] || continue
+		printf '%s=%s\n' "$name" "$sha" >>"$out"
+	done
+
+	[ -s "$out" ] && log "Feed revisions: $(tr '\n' ' ' <"$out")"
 	return 0
 }
 
@@ -4068,6 +4099,21 @@ enable_homeproxy=${ENABLE_HOMEPROXY}
 enable_adguardhome=${ENABLE_ADGUARDHOME}
 enable_ebpf_proxy_kernel=${ENABLE_EBPF_PROXY_KERNEL}
 EOF
+
+	# The feed HEADs go in last so the file reads "what tree, then what feeds".
+	# Absent (older trees, --skip-feeds-update on a fresh checkout) is not an
+	# error — the block simply does not appear.
+	if [ -s "${ROOT_DIR}/.feeds-revisions" ]; then
+		printf '# Feed HEADs at build time. feeds.conf.default points at branches, so
+' >>"${dest}/BUILD-INFO.txt"
+		printf '# these, not openwrt_revision, decide which package versions shipped.
+' >>"${dest}/BUILD-INFO.txt"
+		while IFS='=' read -r _feed _sha; do
+			[ -n "$_feed" ] && [ -n "$_sha" ] || continue
+			printf 'feed_%s=%s
+' "$_feed" "$_sha" >>"${dest}/BUILD-INFO.txt"
+		done <"${ROOT_DIR}/.feeds-revisions"
+	fi
 
 	log "Wrote ${dest}/BUILD-INFO.txt (kernel ${kver:-?}, abi ${abi:-?})"
 }

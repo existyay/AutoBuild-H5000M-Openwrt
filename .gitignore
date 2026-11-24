@@ -121,3 +121,4 @@ zizmor
 # that belongs in the repository, and it is what pins integrity.
 # ---------------------------------------------------------------------------
 node_modules/
+.feeds-revisions

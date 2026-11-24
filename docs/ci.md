@@ -351,6 +351,13 @@ Release Please 每次合入 release PR 才推进版本号。被替换掉的旧�
 代价写在明处：**同一版本的产物不是不可变的**，链接指向的文件会被后续构建替换。需要钉住某一次
 构建，就自己保存镜像与 `SHA256SUMS.txt`——`built_at` 与 `openwrt_revision` 在 `BUILD-INFO.txt` 里。
 
+`BUILD-INFO.txt` 还记了 `feed_<名字>=<sha>`：`feeds.conf.default` 指向的是**分支**（`packages`、
+`luci`、`routing`、`telephony`、`video` 跟 `master`，`wwand` 跟 `main`），所以
+`openwrt_revision` 相同的两次构建，包版本可以不同。没有这组 sha，产物只能"大致复现"；有了
+它，`git -C feeds/packages checkout <sha>` 就能回到当天的包集合，也才回答得清"为什么昨天和
+今天的同一个包版本号不一样"。这条记录在 `scripts/local-build.sh` 的 `record_feed_revisions()`
+里，跑在 `feeds install` 之后——`keys` 是 `feed_` 前缀而不是 `feeds_`，因为它是逐个 feed 一行。
+
 ### 版本号从哪来
 
 本仓库没有版本文件：`release-please.yml` 用 `release-type: simple`，产物是
