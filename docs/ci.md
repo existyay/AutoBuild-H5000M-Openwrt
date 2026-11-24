@@ -87,15 +87,21 @@ Ruleset `master-protection`，**id `23816928`**，`current_user_can_bypass: neve
 | **OpenSSF Scorecard** | `security.yml::scorecard` | 独立第三方视角检查仓库卫生（危险 workflow、未钉 action、分支保护）。仅默认分支运行，结果经 OIDC 发布。 |
 | **SLSA / Artifact Attestations** | `build.yml::Attest the firmware and the apk repository` | 为 `*squashfs-sysupgrade.bin` 与 `apk-repo/packages.adb` 签发 **build provenance**，任何人事后可验证"这个索引确实由该 commit 的该次运行产出"。 |
 | **SBOM** | `security.yml::attest` | 生成 SPDX SBOM 并随证明一起签发、作为 artifact 保留 90 天。 |
-| **Action Pinning** | 全部 workflow | **16 个 action 全部钉到 commit SHA**（tag 仅作注释）。已用 API 逐个核验 SHA 可解析回自身。Dependabot 每周分组升级——**SHA 钉定的可持续性依赖它**，否则会变成会腐烂的快照。 |
+| **Action Pinning** | 全部 workflow | **20 个 action（21 处调用）全部钉到 commit SHA**（tag 仅作注释）。已用 API 逐个核验 SHA 可解析回自身；`scripts/check-action-inputs.sh` 每次 PR 都重新核对「调用方传的 `with:` 键确实是它 `action.yml` 里声明的输入」，并且连**可复用工作流的 `with:`/`secrets:`** 一起核。Dependabot 每周分组升级——**SHA 钉定的可持续性依赖它**，否则会变成会腐烂的快照。 |
 
 ## 四、复用与编排
 
 | 术语 | 落地 | 选择理由 |
 | --- | --- | --- |
 | **Reusable Workflows** | `.github/workflows/reusable-script-test.yml`（`workflow_call`）+ `build.yml::script-test` 调用 | 需要**独立 job/runner/权限边界**的单元。用真实 aarch64 `uci`（qemu）跑首启脚本——本仓库已经因此类 bug 被咬过一次（值存成 `'0'` 而非 `0`：配置看似正确、射频始终不启）。调用方**不传 secrets**（`secrets: inherit` 会无谓扩大暴露面）。 |
-| **Composite Actions** | `.github/actions/verify-repo/action.yml` | 只需**步骤序列**、不需要独立 runner 的单元，复用 apk 仓库校验。用 reusable workflow 会为 5 秒的检查白起一个 runner。 |
+| **Composite Actions** | `.github/actions/diagnose/action.yml`（`checks.yml`、`coverage.yml`、`security.yml` 的 `if: failure()` 步骤） | 只需**步骤序列**、不需要独立 runner 的单元：把「日志尾部 + 关键脚本版本 + 运行环境 + `free`/`gcc`/`make` 版本」一次性收进 step summary，红了的 run 不必再本地复现。用 reusable workflow 会为几秒的取证白起一个 runner。 |
 | **Matrix Strategy** | `security.yml::codeql`（`fail-fast: false`） | 两种语言各自独立分析；`fail-fast: false` 保证一个失败不掩盖另一个。 |
+
+> **`.github/actions/verify-repo/action.yml` 目前没有任何 workflow 调用它。**
+> 仓库里的 `git log -S"actions/verify-repo" -- .github/workflows` 是空的，也就是说它从来没有接上；
+> 真正跑在内联步骤里的是 `build.yml::Verify the built repository can satisfy every frontend on its own`。
+> 保留它的理由只有一个：`docs/conventions.md` 拿它当 Composite Action 的**命名示例**（动词短语目录）。
+> 不删、也不加「每个 action 都必须被引用」的检查——后者要么逼着删掉一个文档示例，要么逼着把一个绿的构建步骤换成没验证过的分支，代价是三个小时。
 
 ## 五、文件结构
 
@@ -105,7 +111,8 @@ Ruleset `master-protection`，**id `23816928`**，`current_user_can_bypass: neve
 ├── dependabot.yml                   # 每周分组升级 actions（含 SHA 更新）
 ├── zizmor.yml                       # workflow 审计器配置与例外说明
 ├── actions/
-│   └── verify-repo/action.yml       # Composite Action：apk 仓库校验
+│   ├── diagnose/action.yml          # Composite Action：失败诊断（三个 workflow 都在用）
+│   └── verify-repo/action.yml       # Composite Action：apk 仓库校验（目前无 workflow 调用，见下）
 └── workflows/
     ├── build.yml                    # 固件构建 + 发布 + 证明（3 job）
     ├── checks.yml                   # 仓库/主机检查 + 上游集成校验 + commitlint
