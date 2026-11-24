@@ -236,9 +236,24 @@ jobs:
           # the line, so any dispatch input would be attacker-controlled code
           # (zizmor: template-injection).  An env var is data.
           PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.pinned || false }}
+          # A candidate pin is proved WITHOUT editing configs/upstream.env: set
+          # the OPENWRT_PINNED_REVISION repository variable (Settings ->
+          # Variables) and dispatch with `pinned`.  Empty falls back to the
+          # revision recorded in the file, because configs/upstream.env assigns
+          # `OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-…}`.  A variable
+          # and not an 11th dispatch input: GitHub caps those at 10 and this
+          # form already uses all 10.
+          OPENWRT_PINNED_REVISION: ${{ vars.OPENWRT_PINNED_REVISION || '' }}
         run: |
           set -euo pipefail
           . configs/upstream.env
+          # Validated even when it came from the file: a truncated or mistyped
+          # paste would otherwise surface as an opaque `git fetch` failure.
+          case "${OPENWRT_PINNED_REVISION}" in
+            *[!0-9a-f]*) echo "::error::OPENWRT_PINNED_REVISION must be a 40-character commit sha"; exit 1 ;;
+          esac
+          [ "${#OPENWRT_PINNED_REVISION}" -eq 40 ] ||
+            { echo "::error::OPENWRT_PINNED_REVISION must be a 40-character commit sha"; exit 1; }
           if [ "${PINNED}" = "true" ]; then
             rev="${OPENWRT_PINNED_REVISION}"
           else
@@ -566,6 +581,11 @@ jobs:
           # Same reason as the Resolve step: an input must reach the shell as
           # data, not as interpolated source text.
           PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.pinned || false }}
+          # Build exactly the revision resolved (and cached) above rather than
+          # re-resolving: `git ls-remote` can hand out a branch head that moves
+          # again before the clone, which would leave the toolchain/download/
+          # ccache keys describing a tree the build never used.
+          OPENWRT_REVISION: ${{ steps.upstream.outputs.rev }}
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"

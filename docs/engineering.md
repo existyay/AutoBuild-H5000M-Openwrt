@@ -57,7 +57,8 @@
 ```sh
 OPENWRT_REPO_URL=https://github.com/openwrt/openwrt.git
 OPENWRT_REPO_BRANCH=main
-OPENWRT_PINNED_REVISION=058da17df29908b0b77099fb522823723c385a5e
+OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-058da17df29908b0b77099fb522823723c385a5e}
+OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-058da17}
 OPENWRT_TRACK=latest          # latest 跟随分支头；pinned 复现指定 revision
 OPENWRT_TARGET=mediatek
 OPENWRT_SUBTARGET=filogic
@@ -65,6 +66,28 @@ OPENWRT_PROFILE=hiveton_h5000m
 ```
 
 等 25.12.6 带上该设备后，把 `OPENWRT_REPO_BRANCH` 改成 `openwrt-25.12` 即可切到稳定分支。
+
+**候选 pin 的验证顺序（不必先改文件）**：`OPENWRT_PINNED_REVISION` 与
+`OPENWRT_PINNED_SNAPSHOT` 都写成 `${VAR:-默认值}`，所以一个候选 commit 可以在
+不改仓库的前提下被完整编译验证：
+
+```sh
+# 本地：直接编译指定 commit
+scripts/local-build.sh --revision 14a07b78e9ac9d604547533550e6aa41955ac588
+# CI：把候选 sha 写进仓库变量 OPENWRT_PINNED_REVISION，然后 workflow_dispatch 勾 pinned
+```
+
+只有“镜像 + apk 仓库 + publish”都过的那次构建，才允许把候选 sha 写回
+`configs/upstream.env`。`build.yml` 把这个变量当数据传给脚本（不做文本插值，避免
+template-injection），并在使用前校验“40 位小写 hex”。CI 的 Build 步骤还会把 Resolve
+步骤算出的 revision 通过 `OPENWRT_REVISION` 交给 `local-build.sh`，保证**缓存键描述的
+那棵树就是真正编译的树** —— 否则 `git ls-remote` 与 clone 之间分支头移动，缓存就指向了
+一个没被用过的 revision（BUILD-INFO 里 `openwrt_revision_source` 记录它是
+`latest`/`pinned`/`caller`）。
+
+`OPENWRT_PINNED_SNAPSHOT` 必须描述同一个 commit（其尾部七位等于该 revision 的前七位）；
+`write_build_info()` 在两者对不上时会丢弃这个标签、退回树内推导的 `r0-<sha>`，
+所以升级 pin 要同时改这两行。
 
 ---
 
@@ -255,6 +278,7 @@ reload一次（模组反复重枚举不会反复重载网络）。首启那条�
 | `--prepare-only` | 拉到源码/feeds/补丁/本地包后停止 |
 | `--config-only` | 再跑 defconfig 与包校验后停止 |
 | `--pinned` | 编译 `OPENWRT_PINNED_REVISION` 而不是分支头 |
+| `--revision <sha>` | 编译指定的 40 位 commit（覆盖面比 `--pinned` 大，用于验证候选 pin） |
 | `--skip-toolchain` | 跳过显式 `make toolchain/install` |
 | `--skip-download` | 跳过 `make download` |
 | `--skip-feeds-update` | 复用已有 feeds（本地迭代提速） |

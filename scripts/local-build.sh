@@ -36,6 +36,13 @@ IMAGE_PREFIX="${OPENWRT_IMAGE_PREFIX}"
 # auto-build); `pinned` builds the revision this harness was validated against.
 OPENWRT_TRACK="${OPENWRT_TRACK:-latest}"
 
+# Exact revision to build, overriding the track above.  This is what CI sets:
+# the workflow resolves the revision once, keys every cache on that value, and
+# then has to build THAT revision — otherwise `ls-remote` can hand out a branch
+# head that moves again before the clone, and the caches end up describing a
+# tree the build never used.
+OPENWRT_REVISION="${OPENWRT_REVISION:-}"
+
 GIT_TIMEOUT="${GIT_TIMEOUT:-1800}"
 FEEDS_TIMEOUT="${FEEDS_TIMEOUT:-3600}"
 CONFIG_TIMEOUT="${CONFIG_TIMEOUT:-1800}"
@@ -251,6 +258,7 @@ Options:
   --prepare-only        Clone/update source, feeds, patches and local packages, then stop.
   --config-only         Additionally run defconfig and verify the package set, then stop.
   --pinned              Build OPENWRT_PINNED_REVISION instead of the branch head.
+  --revision <sha>      Build exactly this upstream commit (wins over --pinned).
   --skip-toolchain      Skip the explicit `make toolchain/install` prebuild step.
   --skip-download       Skip `make download` prefetch.
   --skip-feeds-update   Reuse the existing feeds checkout (no ./scripts/feeds update).
@@ -296,6 +304,30 @@ while [ "$#" -gt 0 ]; do
 		--config-only) CONFIG_ONLY=true ;;
 		--pinned)
 			OPENWRT_TRACK=pinned
+			;;
+		--revision)
+			shift
+			[ "$#" -gt 0 ] || {
+				echo "--revision needs a commit sha" >&2
+				exit 2
+			}
+			# Exactly 40 lowercase hex characters: the value is handed to `git
+			# fetch` as an argument, so anything else (a leading `--`, a refspec,
+			# whitespace) is either a mistake or an argument-injection attempt.
+			# `echo`+`exit` rather than `die`: this runs during argument parsing,
+			# before die() is defined at line 342, so die would be "command not
+			# found" and the script would continue with a bogus revision.
+			case "$1" in
+				*[!0-9a-f]*)
+					echo "--revision expects a 40-character commit sha, got '$1'" >&2
+					exit 2
+					;;
+			esac
+			if [ "${#1}" -ne 40 ]; then
+				echo "--revision expects a 40-character commit sha, got '$1'" >&2
+				exit 2
+			fi
+			OPENWRT_REVISION="$1"
 			;;
 		--skip-toolchain) SKIP_TOOLCHAIN=true ;;
 		--skip-download) SKIP_DOWNLOAD=true ;;
@@ -588,13 +620,25 @@ prepare_source() {
 		rm -rf "$staging"
 	fi
 
-	if [ "${OPENWRT_TRACK}" = "pinned" ]; then
+	# An exact revision wins over the track: the caller already resolved it (and
+	# keyed its caches on it), so re-resolving here could pick a different commit
+	# and make BUILD-INFO, the cache keys and the tree disagree.
+	if [ -n "${OPENWRT_REVISION}" ]; then
+		REVISION_SOURCE=caller
+		rev="${OPENWRT_REVISION}"
+		log "Fetching revision ${rev} exactly as resolved by the caller"
+		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$rev" ||
+			die "Cannot fetch revision ${rev}"
+		git -C "$SRC" checkout -f FETCH_HEAD
+	elif [ "${OPENWRT_TRACK}" = "pinned" ]; then
+		REVISION_SOURCE=pinned
 		rev="${OPENWRT_PINNED_REVISION}"
 		log "Fetching pinned revision ${rev}"
 		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$rev" ||
 			die "Cannot fetch pinned revision ${rev}"
 		git -C "$SRC" checkout -f FETCH_HEAD
 	else
+		REVISION_SOURCE=latest
 		log "Updating ${REPO_BRANCH} to the current upstream head"
 		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$REPO_BRANCH" ||
 			die "Cannot fetch ${REPO_BRANCH}"
@@ -3973,7 +4017,16 @@ PY
 	# inventing a snapshot number we did not verify would be worse.
 	if [ -n "${OPENWRT_PINNED_SNAPSHOT:-}" ] && [ -n "${OPENWRT_PINNED_REVISION:-}" ] &&
 		[ "$rev" = "$OPENWRT_PINNED_REVISION" ]; then
-		code="$OPENWRT_PINNED_SNAPSHOT"
+		# The label has to describe this very commit.  The revision can be
+		# overridden (OPENWRT_PINNED_REVISION / --revision) without the label
+		# following along, and then the snapshot id would name a different tree —
+		# worse than the honest `r0-<sha>`, so it is dropped in that case.
+		case "$OPENWRT_PINNED_SNAPSHOT" in
+			*"${rev:0:7}"*) code="$OPENWRT_PINNED_SNAPSHOT" ;;
+			*)
+				warn "OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT} does not describe revision ${rev}; recording the tree-derived version instead"
+				;;
+		esac
 	fi
 
 	cat >"${dest}/BUILD-INFO.txt" <<EOF
@@ -3986,6 +4039,11 @@ project_version=${project_version}
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
 upstream_track=${OPENWRT_TRACK}
+# Where openwrt_revision came from: `latest` (the branch head at build time),
+# `pinned` (OPENWRT_PINNED_REVISION) or `caller` (an exact revision handed in via
+# OPENWRT_REVISION/--revision — CI does this so the tree matches the revision its
+# caches were keyed on).
+openwrt_revision_source=${REVISION_SOURCE:-latest}
 openwrt_revision=${rev}
 openwrt_version_code=${code:-unknown}
 openwrt_version_number=${ver:-unknown}

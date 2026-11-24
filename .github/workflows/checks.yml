@@ -293,6 +293,31 @@ jobs:
           printf '  %s\n' "${files[@]}"
           shellcheck -S error "${files[@]}"
 
+      - name: local-build.sh argument guards
+        run: |
+          set -euo pipefail
+          # `--revision` is the one argument that is handed to `git fetch` AS AN
+          # ARGUMENT, so its validation is a security control rather than
+          # politeness: an unvalidated value like `--upload-pack=…` would be
+          # interpreted by git, not by us.  Every case here is pure argument
+          # parsing — no network, no clone — so the step costs milliseconds.
+          check() { # <expected-exit> <args...>
+            local want="$1"; shift
+            local rc=0
+            scripts/local-build.sh "$@" >/tmp/argguard.log 2>&1 || rc=$?
+            if [ "$rc" -ne "$want" ]; then
+              echo "::error::'local-build.sh $*' exited ${rc}, expected ${want}"
+              tail -5 /tmp/argguard.log
+              exit 1
+            fi
+          }
+          check 2 --revision 12345                      # too short
+          check 2 --revision 058da17df29908b0b77099fb522823723c385a5EZ  # uppercase
+          check 2 --revision                            # no value
+          check 2 --revision --upload-pack=touch-pwned   # would be read by git
+          check 2 --bogus                                # unknown switch
+          echo "argument guards hold"
+
       - name: actionlint (workflow schema)
         run: |
           set -euo pipefail
