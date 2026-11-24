@@ -57,8 +57,8 @@
 ```sh
 OPENWRT_REPO_URL=https://github.com/openwrt/openwrt.git
 OPENWRT_REPO_BRANCH=main
-OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-058da17df29908b0b77099fb522823723c385a5e}
-OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-058da17}
+OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-ce245c873917cfbb412244dad80e395effed3167}
+OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-ce245c8}
 OPENWRT_TRACK=latest          # latest 跟随分支头；pinned 复现指定 revision
 OPENWRT_TARGET=mediatek
 OPENWRT_SUBTARGET=filogic
@@ -2149,9 +2149,9 @@ Makefile，并且 `kmod-ip6tables`、`kmod-ip6tables-extra`、`kmod-ipt-nat6`、
 版本一变，`linux-6.18.60` 这个目录不再被引用、kmod 的 stamp 名字跟着 `.config` 变，
 内核与 kmod 会自己重编；缓存里留下来的只是"确实没变"的那些包。
 
-所以 `OPENWRT_PINNED_REVISION` 仍是 `058da17`，`latest` 那条线本来就在编 `14a07b7`，
-固件内容没有落后。推 pin 需要的只有一条：下一次定时构建（或手动 `pinned=true`）
-在 `14a07b78e9ac9d604547533550e6aa41955ac588` 上跑过镜像 + apk 仓库 + 发布三段门禁。
+所以这一轮的结论是「`058da17` 可以推，但推的目标已经不是 `14a07b7`」—— 写这段时 main
+已经走到 `ce245c8`，而 `latest` 线编的就是它。后面的 4.3 记录了
+那次推 pin 的完整证据。
 
 这轮顺手修的三处**自身缺陷**（前两处在 `scripts/local-build.sh`，第三处在
 `local-packages/nft-fullcone/Makefile`）：
@@ -2214,6 +2214,43 @@ docker run --rm -v "$PWD":/src:ro -v h5000m-e2e:/work debian:bookworm-slim bash 
 上游 wwand feed 自己的包（`rmnet-nss` 依赖 `kmod-qca-nss-drv`、`wwand-ims` 依赖
 `strongswan-mod-eap-aka`/`-p-cscf`/`libsimaka`），与 `ENABLE_WWAND` 默认集合无关，
 `audit_own_warnings` 把它们正确归到"上游 feed"而不是"我们的"。
+
+### 4.3 2026-11-24 推 pin：`058da17` → `ce245c8`
+
+`14a07b7` 的核对还没写完，main 就已经过了它（`14a07b7` → `ce245c8`，后者是
+`ipq806x: refresh patches`，2026-11-23T22:02:46Z）。所以推 pin 的目标直接取当时的
+head：`ce245c873917cfbb412244dad80e395effed3167`（快照标签 `r0-ce245c8`）。
+
+证据来自 CI run **45307537181**（在 `28ae754` 上以 `pinned=false` 手工派发，走的是
+`latest` 线）。`BUILD-INFO.txt` 证明编的就是这一棵：
+
+| 字段 | 值 |
+| --- | --- |
+| `openwrt_revision` | `ce245c873917cfbb412244dad80e395effed3167` |
+| `openwrt_version_code` | `r0-ce245c8` |
+| `project_version` | `1.3.0` |
+| `upstream_track` | `latest` |
+
+同一个 run 里以下步骤全是 success，没有一步 skip：镜像内的 fullcone 链、代理栈依赖、
+「本仓库自己够不够前端用」、构建告警审计；apk 仓库已发到 Pages（281.2 MB），设备脚本
+测试也在**那一次构建出来的 rootfs** 上跑过（真 `uci` + qemu-user）。产物：
+`H5000M-mainline-openwrt` 160.7 MB、`apk-repo` 281.2 MB。
+
+**发布那段是故意没跑的。**`publish_release=false`，否则 `1.3.0` 已发布的产物会被换成另
+一棵树的固件 —— 同一个版本号下换内容是比「没发布」更糟的事。publish 步骤与上游
+revision 无关，上一次绿是 run 45189136209。所以本次按「镜像 + apk 仓库」两段门禁记
+账，publish 沿用已有证据。
+
+**一次 bump 的代价，实测**：整个 job 202.3 min，其中 `Build` 170.5 min；`Install build
+dependencies` 14.5 min；`Save build cache to GitHub Packages` 8.8 min。同一个 job 在
+revision 不变时 `Build` 只要 20.4 min —— 这不属于“拖慢编译的缺陷”，而是缓存的固有
+代价：toolchain / dl / ccache / build cache 的 key 全部按 revision 命名，上游一动就是一次
+全量重编。这也是「同一天重跑很快、每周构建很慢」的真正原因。
+
+顺手把“推 pin 必须先改文件”这个死锁去掉了（`058da17` 时代只能改完文件再看 CI）：
+`OPENWRT_PINNED_REVISION` / `OPENWRT_PINNED_SNAPSHOT` 现在写成 `${VAR:-默认值}`，
+候选 sha 可以先用 `scripts/local-build.sh --revision <sha>`（或 CI 的仓库变量
+`OPENWRT_PINNED_REVISION` + `pinned=true`）完整编一遍，过了再写回文件。
 
 ### 5. 重新生成一个包内补丁
 
