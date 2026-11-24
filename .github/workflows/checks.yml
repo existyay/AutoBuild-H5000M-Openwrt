@@ -707,6 +707,10 @@ jobs:
             "the accel apply script loads cls_bpf"
           want "$accel/root/usr/sbin/h5000m-accel" 'modprobe veth' \
             "the accel apply script loads veth"
+          want "$accel/root/usr/sbin/h5000m-accel" 'net.ipv4.tcp_congestion_control=bbr' \
+            "the accel applier makes bbr survive a reboot (sysctl.d drop-in)"
+          want "$accel/root/etc/modules.d/tcp_bbr" 'tcp_bbr' \
+            "tcp_bbr is loaded before /etc/init.d/sysctl applies the drop-in"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_kernel' \
             "the accel status script reports eBPF readiness"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ls -d /sys/module/nf_flow_table' \
