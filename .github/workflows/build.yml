@@ -1790,13 +1790,33 @@ jobs:
     runs-on: ubuntu-24.04
     continue-on-error: true
     permissions:
+      # `contents: read` 只为下面那次 checkout（失败诊断用的是本仓库里的复合
+      # action，action.yml 必须在工作区里才找得到）。没有它 checkout 会以
+      # 「Resource not accessible by integration」失败。
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
-      # 第一次就成功时用它的 URL；第一次失败、重试成功时用重试的。
-      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
+      # 第一次就成功时用它的 URL；否则用后来那次成功重试的。
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url || steps.deployment_retry2.outputs.page_url }}
     steps:
+      # 这个 job 本来不需要工作区（产物来自 artifact），但「失败诊断」调用的是
+      # 本仓库的复合 action，`.github/actions/diagnose/action.yml` 不在磁盘上时
+      # 它报的是：
+      #
+      #   Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under
+      #   '…/.github/actions/diagnose'. Did you forget to run
+      #   actions/checkout before running your local action?
+      #
+      # 也就是说部署真的失败时，本该给出证据的那一步自己又红了一次
+      # （run 45422883193 就是这样：诊断步骤 failure，日志里只有这一句）。
+      # checkout 这条仓库很小，代价约两秒。
+      - name: Checkout (for the local diagnose action)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
       - name: Download the apk repository
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -1935,6 +1955,17 @@ jobs:
       # 实测对照：`failure()` 在 job 级 continue-on-error 下仍然会被触发，
       # `steps.<id>.outcome` 不会 —— 所以两者不能互相替代，这一步用的是
       # 上一个步骤带步骤级 continue-on-error 之后才可信的 `outcome`。
+      # 重试之前必须等一会儿。run 45422883193 证明“立刻重试”等于没重试：
+      # 两次部署相距 470 毫秒（16:07:49.125 → 16:07:49.595），第二次拿到的
+      # 是同一句 `Fetching artifact metadata failed`。这既然是索引/接口的
+      # 抖动，就必须给它时间恢复，否则加的只是一行日志。
+      - name: Wait before the first retry
+        if: steps.deployment.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "deploy-pages 读不到 artifact 元数据，30 秒后重试"
+          sleep 30
+
       - name: Deploy to Pages (retry)
         id: deployment_retry
         if: steps.deployment.outcome == 'failure'
@@ -1943,10 +1974,25 @@ jobs:
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
 
-      # 两次都失败时至少留下证据：这个 job 不会让 run 变红，而“站点比固件旧”
+      - name: Wait before the second retry
+        if: steps.deployment_retry.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "第二次仍然失败，再等 60 秒"
+          sleep 60
+
+      - name: Deploy to Pages (retry 2)
+        id: deployment_retry2
+        if: steps.deployment_retry.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      # 三次都失败时至少留下证据：这个 job 不会让 run 变红，而“站点比固件旧”
       # 是最难从界面上看出来的事，所以把日志尾部收进 step summary。
       - name: 失败诊断
-        if: steps.deployment.outcome == 'failure' || steps.deployment_retry.outcome == 'failure'
+        if: steps.deployment_retry2.outcome == 'failure'
         uses: ./.github/actions/diagnose
         with:
           title: 发布 apk 仓库失败（站点可能仍是上一版）
