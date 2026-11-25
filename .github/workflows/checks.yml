@@ -91,6 +91,100 @@ jobs:
               exit 1 ;;
           esac
 
+      - name: The push triggers name the real default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # GitHub parses `on:` BEFORE any expression is evaluated, so a
+          # `branches:` list has to hold a literal branch name — a default-branch
+          # expression never gets a chance to run there.  A rename of the default
+          # branch therefore turns those workflows off silently: no error, no red
+          # run, just release automation that never fires again.
+          #
+          # The tempting workaround is `branches: ['**']` plus a per-job
+          # `if: github.ref == format('refs/heads/{0}', ...)`.  It is worse, and
+          # it cost a permanently blocked PR to learn that: every branch push
+          # then creates check-runs with the SAME names as the required ones
+          # (`工作流静态审计（zizmor）`, `依赖审查`, ...) but `skipped`, and a
+          # required context whose run is skipped is NOT satisfied — so all PRs
+          # sit at `mergeable_state=blocked` while every check looks green.
+          #
+          # So the literal stays and this step makes it non-silent: it parses the
+          # push trigger of each workflow and compares it with the repository's
+          # real default branch.  It also runs a negative control, because a
+          # parser that quietly returns "fine" for everything is exactly the bug
+          # class this whole file exists to prevent.
+          python3 - "$DEFAULT_BRANCH" \
+            .github/workflows/release-please.yml \
+            .github/workflows/security.yml <<'PY'
+          import os, pathlib, shutil, sys, tempfile
+
+          def push_branches(path):
+              lines = pathlib.Path(path).read_text(encoding='utf-8').splitlines()
+              in_on = in_push = False
+              out = []
+              for line in lines:
+                  if not in_on:
+                      if line.rstrip() == 'on:':
+                          in_on = True
+                      continue
+                  if line.strip() and not line[0].isspace():
+                      break                      # end of the `on:` block
+                  if not in_push:
+                      if line.strip() == 'push:':
+                          in_push = True
+                      continue
+                  indent = len(line) - len(line.lstrip())
+                  body = line.strip()
+                  if indent <= 2 and body and not body.startswith('-'):
+                      break                      # next trigger key
+                  if body.startswith('branches:'):
+                      val = body[len('branches:'):]
+                      # A trailing `# comment` is normal here, so take the list
+                      # between the first '[' and its matching ']' rather than
+                      # requiring the line to end with ']'.
+                      if '[' in val and ']' in val:
+                          inner = val[val.index('[') + 1:val.index(']')]
+                          return [v.strip().strip('"').strip("'") for v in inner.split(',') if v.strip()]
+                      continue
+                  if body.startswith('-'):
+                      out.append(body[1:].strip().strip('"').strip("'"))
+              return out or None
+
+          default = sys.argv[1]
+          files = sys.argv[2:]
+          problems = []
+          for f in files:
+              got = push_branches(f)
+              if not got:
+                  problems.append((f, 'no on.push.branches list found — did the trigger get restructured?'))
+              elif default not in got:
+                  problems.append((f, 'on.push.branches=%s does not contain the default branch %r' % (got, default)))
+              else:
+                  print('%s: on.push.branches=%s contains %r' % (f, got, default))
+
+          # Negative control: the same parser must reject a stale literal.
+          src = files[0]
+          ctl_dir = tempfile.mkdtemp()
+          ctl = os.path.join(ctl_dir, 'control.yml')
+          shutil.copyfile(src, ctl)
+          text = pathlib.Path(ctl).read_text(encoding='utf-8')
+          pathlib.Path(ctl).write_text(text.replace('[' + default + ']', '[definitely-not-the-default]'), encoding='utf-8')
+          control = push_branches(ctl)
+          if control and default in control:
+              problems.append((ctl, 'negative control was NOT detected — this check cannot fail'))
+          else:
+              print('negative control: a workflow naming a different branch is rejected')
+
+          if problems:
+              for f, why in problems:
+                  print('::error::%s: %s' % (f, why))
+              print('::error::修复：把 on.push.branches 里的字面量改成 %r（它就是当前默认分支）。' % default)
+              sys.exit(1)
+          print('push triggers agree with the default branch %r' % default)
+          PY
+
       - name: Workflow contracts (reusable workflows)
         run: |
           # A silent failure mode, made loud.  When build.yml calls a reusable
