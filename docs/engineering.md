@@ -241,6 +241,9 @@ reload一次（模组反复重枚举不会反复重载网络）。首启那条�
 └── scripts/
     ├── local-build.sh                      唯一构建入口（本地与 CI 共用）
     ├── check-deps.sh                       主机依赖与资源检查
+    ├── check-workflow-contracts.sh         工作流契约门禁（可本地跑）
+    ├── check-action-inputs.sh              核对 action 输入声明
+    ├── check-build-info-comments.sh        BUILD-INFO 注释不会被 heredoc 吃掉
     └── coverage-test.sh                    配置覆盖测试（不完整编译）
 ```
 
@@ -2467,6 +2470,50 @@ gh workflow run build.yml --ref "${TAG_NAME}" \
 现在只比对**未注释的**命令行（含续行），并且 `checks.yml` 的自检里有两个负向对照
 （删掉 `pinned`、删掉 `build_repo`）证明它真的会红 —— 一条永远通过的门禁比没有门禁
 更糟，因为它会被当作证据。
+
+#### 4.5.4 2026-11-26 `BUILD-INFO.txt` 里那句注释其实不是注释
+
+v1.4.1 的发布产物里，`openwrt_revision_source` 上面那段说明长这样：
+
+```
+# Where openwrt_revision came from:  (the branch head at build time),
+#  (OPENWRT_PINNED_REVISION) or 3999 ./scripts/local-build.sh (an exact revision handed in via
+# OPENWRT_REVISION/--revision — CI does this so the tree matches the revision its
+# caches were keyed on).
+```
+
+三个取值不见了。原因不是拼写错误：那段注释写在 `write_build_info` 的
+**未加引号** heredoc 里（`cat >"${dest}/BUILD-INFO.txt" <<EOF`），而未加引号的
+heredoc 会在**每一行**上做参数展开与命令替换 —— `#` 注释行也一样。于是
+`` `latest` `` 和 `` `pinned` `` 当命令跑掉了（不存在，什么也没留下），
+`` `caller` `` 展开成 bash 内建 `caller` 的输出，也就是 `3999 ./scripts/local-build.sh`。
+
+没有任何一步失败。heredoc 不会因为"命令找不到"而失败（`set -e` 也不管用：那是
+heredoc 展开阶段，不是一条独立命令），所以损坏只出现在已经发布出去的产物里，
+谁也没在构建日志里看到它。
+
+修法有两层：
+
+* 注释里的三个取值改用双引号（`"latest"` / `"pinned"` / `"caller"`），并写明为什么
+  这里不能用反引号。**注意修的时候别再写反引号** —— 我第一版修法在同一段注释里
+  又用反引号描述这件事，渲染一次立刻复现了同样的空洞。
+* 新增 `scripts/check-build-info-comments.sh`，`checks.yml` 每次 PR 都跑：
+  1. 扫描 `scripts/*.sh` 与 `.github/actions/*/action.yml` 里所有未加引号 heredoc 的
+     `#` 注释行，含反引号即失败（`<<'EOF'` / `<<"EOF"` 引号化过，不在此列）；
+  2. 真把 `write_build_info` 渲染一遍：stderr 必须干净，产物里必须逐字读到
+     `"latest"` / `"pinned"` / `"caller"` 三个词，且那句注释不得出现"冒号后两个空格"
+     的空洞 —— 被吃掉的替换只留空洞，不留错误信息，所以空洞是唯一能抓住它的痕迹。
+
+负向对照（把原始文本换回去）报 7 处并 `exit 1`；恢复修复后通过。
+
+写这个脚本时踩的两个坑，都跟"跨平台"有关，值得记一笔：
+
+* 扫描器第一版把自己抓了 —— 它把脚本开头那句"你写的是 `<<EOF`"当成了真 heredoc。
+  现在只解析**代码行**（行首 `#` 直接跳过）。
+* 渲染时 `subprocess.run(["bash", ...])` 在 Windows 上命中的是 `System32ash.exe`
+  （WSL），它读不了 `C:/…` 路径，rc=127 报 "No such file or directory"。看起来像
+  脚本有 bug，其实是找错了 shell。现在解释器由外层 `${BASH:-bash}` 传进去，路径一律
+  `as_posix()`（`str(Path)` 给的反斜杠会被 bash 当转义符吃掉）。
 
 ### 5. 重新生成一个包内补丁
 

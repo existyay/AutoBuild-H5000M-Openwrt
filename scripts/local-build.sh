@@ -4095,10 +4095,20 @@ project_version=${project_version}
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
 upstream_track=${OPENWRT_TRACK}
-# Where openwrt_revision came from: `latest` (the branch head at build time),
-# `pinned` (OPENWRT_PINNED_REVISION) or `caller` (an exact revision handed in via
+# Where openwrt_revision came from: "latest" (the branch head at build time),
+# "pinned" (OPENWRT_PINNED_REVISION) or "caller" (an exact revision handed in via
 # OPENWRT_REVISION/--revision — CI does this so the tree matches the revision its
 # caches were keyed on).
+#
+# The words above are quoted with " and never with backticks.  This comment sits
+# inside an UNQUOTED heredoc, where a backtick is command substitution: written
+# with backticks, the words latest and pinned ran as (missing) commands and left
+# nothing behind, while caller expanded to the shell builtin's output, so the
+# released BUILD-INFO.txt said "came from:  (the branch head at build time),
+# (OPENWRT_PINNED_REVISION) or 3999 ./scripts/local-build.sh (an exact revision
+# ...)".  A file meant to be read by a human cannot depend on the shell lacking
+# a builtin of that name — and the same trap applies to every line of this
+# heredoc, so anything that must appear literally needs quotes or no markup.
 openwrt_revision_source=${REVISION_SOURCE:-latest}
 openwrt_revision=${rev}
 openwrt_version_code=${code:-unknown}
