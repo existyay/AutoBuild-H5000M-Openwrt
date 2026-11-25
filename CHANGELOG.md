@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.4.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.3.0...v1.4.0) (2026-11-25)
+
+
+### Features
+
+* **build:** BUILD-INFO 记下每个 feed 的 HEAD ([#90](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/90)) ([b426fc4](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/b426fc478117ea865e4669888843440937d2e547))
+* **build:** 按解析出的 revision 编译，并让 pin 可覆盖验证 ([#81](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/81)) ([39fd484](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/39fd484a5914ab54ec8e72b91218554db3751b74))
+
+
+### Bug Fixes
+
+* **accel:** 让 BBR 活过重启，而不是只在当前内核里生效 ([#85](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/85)) ([f8ee399](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/f8ee399564b22a6d74ef8baa9532c27ece5997e6))
+* **build:** 运行期枚举的 MT5700M 补一次 network reload ([#80](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/80)) ([28ae754](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/28ae75476d2b62cf2911540bb2d452c424207ff2))
+* **ci:** oras 走 HTTP/1.1，规避 9-16 GB blob 的 HTTP/2 断流 ([#75](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/75)) ([f2088d1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/f2088d1ff709339efb78ca9e5764d2d5ce6de06b))
+* **ci:** Pages artifact 名字带上 run_attempt，重跑不再撞重名 ([#87](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/87)) ([88c2188](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/88c2188dce9e415883bdd9e13338330381f2b11c))
+* **ci:** Pages 部署读不到 artifact 时再试一次，并留下证据 ([#89](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/89)) ([073dbba](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/073dbba6723356d0dcf4942f326ecc8c6ab7ee55))
+* **ci:** Pages 部署重试在 job 级 continue-on-error 下从未触发 ([#93](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/93)) ([4f827d0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/4f827d04a7290c13cc1d3f2c328f209cd87384c6))
+* **ci:** 不再写死默认分支与版本钉，PR 分支不再跑注定失败的部署 ([#97](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/97)) ([b968f9c](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/b968f9cb75a39f6251679e3bf98b84795e1fa6b3))
+* **ci:** 修掉门禁里的四处「判断失效但退出码正常」 ([2d173c2](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/2d173c22d56172444ffd25ff4e3c49e3a6e7e108)), closes [#84](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/84)
+* **ci:** 权限子集门禁不再把「显式空 permissions」当成「没写」 ([#91](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/91)) ([6856b7a](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/6856b7a040b0b6bef14f9197c35f4d98e43a2aa1))
+* **ci:** 解包后删掉 24.8 GB 的 build cache 归档，缓存保存不再因磁盘满失败 ([#72](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/72)) ([545ae71](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/545ae7114d93cbf0f895340ed258d0ff559a77b6))
+* **ci:** 让提交信息门禁接受 dependabot 的 deps-dev scope ([#70](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/70)) ([8903d9e](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/8903d9eb10dfe0496497d4f5fe6082bc4a55d0d5))
+* **ci:** 部署重试要等得住抖动，诊断步骤要能找到 action.yml ([#94](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/94)) ([694667f](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/694667fa93f6641553a20615cd26ed86d54c44ec))
+* **release:** 版本号去掉 -r&lt;revision&gt; 后缀，一个版本一条 release ([#74](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/74)) ([932cdd1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/932cdd1a4f285965e6f82755bd111427c2883580))
+
 ## [1.3.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.2.0...v1.3.0) (2026-11-17)
 
 
