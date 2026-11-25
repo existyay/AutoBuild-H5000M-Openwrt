@@ -2515,6 +2515,48 @@ heredoc 展开阶段，不是一条独立命令），所以损坏只出现在已
   脚本有 bug，其实是找错了 shell。现在解释器由外层 `${BASH:-bash}` 传进去，路径一律
   `as_posix()`（`str(Path)` 给的反斜杠会被 bash 当转义符吃掉）。
 
+#### 4.5.5 2026-11-26 提交签名：本机签得对，GitHub 却不认
+
+规则集 `master-protection` 里有一条 `required_signatures`，看起来像随时会挡住提交，
+实测却一直没挡：`master` 上 187 个提交里有 94 个 `reason=unsigned`，因为
+`allowed_merge_methods` 只有 squash —— 合并提交由 GitHub 自己重签（PGP web-flow），
+手工提交根本不需要满足这条规则。所以“推不上去”和这条规则无关。
+
+真正难看的是推到**分支**上的手工提交：`verification.verified=false`、
+`reason=unknown_key`。而签名本身是对的：
+
+```
+$ git verify-commit d96b448
+Good "git" signature for liujam with ED25519 key SHA256:CPYCyTTQ2VjmZFugp2CsDSmsTERlaQF3Dj3Mk7iYzJI
+```
+
+GitHub 说 unknown_key 是因为**账号里登记的是另一把钥匙**：
+`/users/existyay/ssh_signing_keys` 只有一把，id `1194013`（2026-09-23 建，
+`SHA256:W4jPeR9tZ8vK8hWwFHIi82zcIH1oAG4Zf5jLibBVVVg`），本机没有它的私钥；
+本机签名用的是 `SHA256:CPYCyTTQ…`，登记表里没有它。两把钥匙，各在各处。
+
+登记它需要 `admin:ssh_signing_key`。本机凭证里那把 `gho_` 只有
+`gist, repo, workflow`，于是：
+
+```
+$ POST /user/ssh_signing_keys
+HTTP 404 {"message":"Not Found"}
+X-OAuth-Scopes: gist, repo, workflow
+X-Accepted-OAuth-Scopes: admin:ssh_signing_key, write:ssh_signing_key
+```
+
+这个 404 很容易被读成“接口不存在/路径写错了”。区分方法只有一个：看
+`X-Accepted-OAuth-Scopes` 与 `X-OAuth-Scopes` 的差集 —— 缺的是 scope，不是接口。
+
+没有 scope 时唯一不靠手工点网页的路径是 OAuth device flow：用 gh CLI 的公开
+`client_id`（`178c6fc778ccc68e1d6a`）配 `scope=admin:ssh_signing_key` 换一次性 token，
+再 `POST /user/ssh_signing_keys` 一次。审批那一下仍然要人点，换不来的是“谁签的”。
+
+最后一条判据值得单独记：**本地 `git verify-commit` 通过 ≠ GitHub 认可**。前者回答
+“我这台机器认这把钥匙”，后者回答“这个账号认这把钥匙”。要看后者，就去读
+`/repos/{owner}/{repo}/commits/{sha}` 里的 `verification.verified` 与 `reason` ——
+绿勾是结果，这两个字段才是证据。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh
