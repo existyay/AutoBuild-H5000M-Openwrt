@@ -521,6 +521,76 @@ jobs:
           check 2 --bogus                                # unknown switch
           echo "argument guards hold"
 
+      - name: BUILD-INFO only records real feeds
+        run: |
+          set -euo pipefail
+          # `record_feed_revisions` walked `feeds/*/` and asked git for each
+          # one's HEAD.  Two of those directories are not feeds and have no
+          # repository of their own:
+          #
+          #   feeds/base      -> symlink to ../package (include/toplevel.mk:108)
+          #   feeds/<n>.tmp   -> scratch dir the scan writes (scripts/feeds:102)
+          #
+          # `git -C` walks UP to the enclosing checkout instead of failing, so
+          # both resolved to the OpenWrt revision and BUILD-INFO.txt shipped
+          #   feed_base=fb742de8…      (not a feed)
+          #   feed_luci.tmp=fb742de8…  (an empty scratch dir)
+          # alongside the real feeds.  A build artifact claiming to list feed
+          # HEADs while one of them is the tree itself is worse than one that
+          # lists none, so this runs the function over a synthetic feeds/ tree
+          # that has all four shapes and asserts only the real repo comes out.
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          mkdir -p "$work/src/feeds" "$work/src/package" "$work/root"
+          # $SRC is the OpenWrt clone, i.e. a repository.  That is the whole
+          # trap: without a repository ENCLOSING feeds/, `git -C feeds/base`
+          # would simply fail and the bug would be invisible here.  Measured
+          # against the unfixed function, this fixture reported
+          # `base luci localfeed luci.tmp` — every one of them the enclosing
+          # tree's HEAD.
+          git -C "$work/src" init -q
+          git -C "$work/src" -c user.email=t@t -c user.name=t \
+            commit -qm enclosing --allow-empty
+          # a real feed: a repository of its own
+          mkdir -p "$work/src/feeds/luci"
+          git -C "$work/src/feeds/luci" init -q
+          git -C "$work/src/feeds/luci" -c user.email=t@t -c user.name=t \
+            commit -qm x --allow-empty
+          want="$(git -C "$work/src/feeds/luci" rev-parse HEAD)"
+          # the two impostors, plus an src-link feed with no git at all
+          ln -s ../package "$work/src/feeds/base"
+          mkdir -p "$work/src/feeds/luci.tmp" "$work/src/feeds/localfeed"
+
+          # Lift the function out of the script instead of guessing at it, so
+          # this test cannot drift away from the implementation it covers.
+          python3 - "$work" >"$work/run.sh" <<'PY'
+          import io, os, re, sys
+          work = sys.argv[1]
+          src = io.open("scripts/local-build.sh", encoding="utf-8").read()
+          body = re.search(r"^record_feed_revisions\(\) \{.*?^\}\n", src, re.S | re.M)
+          assert body, "record_feed_revisions is gone — update this test"
+          print('set -uo pipefail')
+          print('ROOT_DIR=%s' % work + '/root')
+          print('SRC=%s' % work + '/src')
+          print('log() { printf "[log] %s\\n" "$*"; }')
+          print(body.group(0))
+          print('record_feed_revisions')
+          PY
+          bash "$work/run.sh" >/dev/null
+
+          got="$(cut -d= -f1 "$work/root/.feeds-revisions" | sort | tr '\n' ' ')"
+          echo "recorded feeds: ${got}"
+          [ "$got" = "luci " ] || {
+            echo "::error::record_feed_revisions recorded '${got}', expected only 'luci '"
+            echo "::error::feeds/base (a symlink) and feeds/*.tmp (scan scratch) must be skipped: they have no repository of their own, so git -C answers with the enclosing OpenWrt checkout."
+            exit 1
+          }
+          grep -qx "luci=${want}" "$work/root/.feeds-revisions" || {
+            echo "::error::the recorded sha is not the feed's HEAD"
+            exit 1
+          }
+          echo "feed revisions are real feed HEADs"
+
       - name: actionlint (workflow schema)
         run: |
           set -euo pipefail

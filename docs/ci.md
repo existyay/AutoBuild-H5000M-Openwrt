@@ -358,6 +358,15 @@ Release Please 每次合入 release PR 才推进版本号。被替换掉的旧�
 今天的同一个包版本号不一样"。这条记录在 `scripts/local-build.sh` 的 `record_feed_revisions()`
 里，跑在 `feeds install` 之后——`keys` 是 `feed_` 前缀而不是 `feeds_`，因为它是逐个 feed 一行。
 
+`feeds/` 里有两个目录**不是** feed，记录时会跳过：`feeds/base` 是指向 `../package` 的符号链接
+（`include/toplevel.mk` 自己建的），`feeds/<名字>.tmp` 是 feed 扫描用的临时目录。两者都没有
+自己的仓库，而 `git -C` 会一路往上找到外层的 OpenWrt checkout，于是它们会"答"出
+`openwrt_revision`——`feed_base` 与 `feed_luci.tmp` 这类行看着有信息、其实一个都没答。判据是
+**目录自己有没有 `.git`**：有才算 feed（`src-link` 本地 feed 没有 `.git`，本来也没有 HEAD 可记）。
+`.github/workflows/checks.yml` 有一条 `BUILD-INFO only records real feeds` 守着这件事，它把
+`record_feed_revisions()` 从脚本里原样抽出来、跑在一棵造好的 `feeds/` 上（真 feed + 符号链接 +
+`.tmp` + 无 git 的本地 feed），只允许真 feed 出现。
+
 ### 版本号从哪来
 
 本仓库没有版本文件：`release-please.yml` 用 `release-type: simple`，产物是
