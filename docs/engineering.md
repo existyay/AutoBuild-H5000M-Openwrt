@@ -1103,6 +1103,12 @@ ERROR: kmod-tun-6.18.44-r1: unexpected end of file
   `patches/0003`，但上下文补丁会被上游例行的版本 bump 打失效，故改为脚本改写）。
   而 apk 解析依赖时**在所有源之间取最高版本**，所以只放仓库会让它去官方镜像取
   1.14.0 —— 正是这个钉要防的崩溃。**版本钉住的前提是我们能决定装哪个版本。**
+  这个钉的数值只有一处来源：`configs/pins.env` 的 `SINGBOX_PIN_VERSION` /
+  `SINGBOX_PIN_RELEASE` / `SINGBOX_PIN_HASH`。读它的是三个互不相干的程序 ——
+  `scripts/local-build.sh` 的 `pin_sing_box()`（改写 feed 的 Makefile）、
+  `scripts/verify-apk-repo.sh` 的 `PINNED_VERSION`（断言仓库里能装到的是哪个）、以及
+  `build.yml` 的发布池校验（断言 pool 里只有那个名字）。此前这三处各写一个 `1.12.25`
+  字面量：改一处忘另一处不会报错，只会留下一个“校验着构建早已不再钉的版本”的门禁。
 
 结论：**kmod 一律进镜像**（每个只有几十 KB，`=y` 只会提升符号、不会降级，因此没有"把
 基础系统已 `=y` 的模块降成仓库包"的风险），**钉版本的核（sing-box）也进镜像**；
