@@ -577,6 +577,28 @@ jobs:
           [ "$fail" -eq 0 ] || exit 1
           echo "all six gates still detect the defects they exist to catch"
 
+      - name: Every script is executable in the index
+        run: |
+          set -euo pipefail
+          # `core.fileMode=false` is the default on Windows checkouts (this repo
+          # is developed on one), and there `chmod +x` never reaches the index.
+          # The script then lands as 100644 and CI — which calls it by path —
+          # dies with "Permission denied" / exit 126, three steps after the real
+          # defect if the failing step is late in the job.
+          #
+          # Measured on PR #104: `scripts/check-build-info-comments.sh` sat at
+          # 100644 while working perfectly locally, because locally it was run
+          # under an MSYS bash that ignores the mode bit.
+          bad=""
+          while read -r mode _sha _stage path; do
+            [ "$mode" = "100755" ] || bad="${bad}${path} (${mode}) "
+          done < <(git ls-files -s -- 'scripts/*.sh' 'scripts/*.py')
+          if [ -n "$bad" ]; then
+            echo "::error::these scripts are not executable in the git index: ${bad}"
+            echo "::error::fix with: git update-index --chmod=+x <path>  (chmod alone does nothing when core.fileMode=false)"
+            exit 1
+          fi
+          echo "all $(git ls-files -- 'scripts/*.sh' 'scripts/*.py' | wc -l) scripts are 100755"
       - name: Shell syntax check
         run: |
           for f in scripts/*.sh; do
