@@ -702,6 +702,22 @@ jobs:
           }
           echo "feed revisions are real feed HEADs"
 
+      - name: BUILD-INFO comments survive the heredoc
+        run: |
+          # `write_build_info` writes BUILD-INFO.txt with an UNQUOTED heredoc, where
+          # a backtick is command substitution even on a `#` comment line.  The
+          # released v1.4.1 artifact proved it: three documented values came out as
+          # `came from:  (the branch head at build time),` — `latest` and `pinned`
+          # ran as missing commands, `caller` printed a stack frame.  Nothing
+          # failed; heredocs do not fail on a missing command, so the damage only
+          # ever appears in a published file.
+          #
+          # The gate lives in scripts/ so it can be run directly; it scans every
+          # unquoted heredoc in scripts/ and .github/actions/ for backticks on
+          # comment lines, then renders write_build_info and requires the three
+          # values to survive verbatim.
+          scripts/check-build-info-comments.sh
+
       - name: actionlint (workflow schema)
         run: |
           set -euo pipefail
