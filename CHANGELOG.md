@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.4.1...v1.4.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **build:** BUILD-INFO 里那句注释不再是 shell 命令 ([#104](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/104)) ([c1e258d](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/c1e258d80c8309670e2f42f8fbab159ea55d40f3))
+
 ## [1.4.1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.4.0...v1.4.1) (2026-11-25)
 
 
