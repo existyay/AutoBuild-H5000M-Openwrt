@@ -2321,6 +2321,48 @@ project_version=1.3.0
 `The pinned upstream revision and its label agree` 步骤静态断言：revision 必须是 40 位小写
 十六进制，标签必须含其前 7 位；在 `仓库与主机检查` 里分钟级失败。
 
+### 4.5 2026-11-25 发布 1.4.0，pin 跟着走到 fb742de8
+
+发版这条路以前没写下来，值得记：Release PR 合并后 release-please 打 `v1.4.0`
+标签，然后执行 `gh workflow run build.yml --ref v1.4.0`（`release-please.yml:266`）。
+**这个 dispatch 不带任何 input**，所以 `pinned` 取默认 `false`，`Resolve the upstream
+revision` 走的是 `git ls-remote … refs/heads/main` 的当前头——也就是说
+**一次发布构建钉的是「发版那一刻的上游头」，不是 `configs/upstream.env` 里的 pin**。
+实测这次发到 `fb742de8e5126809fddf16fa2b5e82b016be0edb`（内核 6.18.64，ABI
+`ac7024928df204cd6201adcbc2974cb5`），产物的 `BUILD-INFO.txt` 老老实实写着
+`upstream_track=latest`、`openwrt_revision=fb742de8…`。
+
+由此得出一条必须遵守的规则：**发布构建用了哪个 revision，pin 就要跟到哪个**。
+否则 `pinned=true` 的构建复现不出发布页上那个固件——pin 的意义正是「能复现」。
+所以本次两行同时改：revision → `fb742de8e5126809fddf16fa2b5e82b016be0edb`，
+标签 → `r0-fb742de`（`The pinned upstream revision and its label agree` 静态断言这一对）。
+
+为什么这次不需要「先单独验证再改 pin」：**发布构建本身就是那次验证**。
+run [45618943712](https://github.com/existyay/AutoBuild-H5000M-Openwrt/actions/runs/45618943712)
+在同一棵树上跑绿了 `Verify the fullcone chain …`、`Verify the proxy stack
+dependencies …`、`Verify the built repository can satisfy every frontend on its
+own`、`Audit build warnings`（`No warnings about packages this project builds.`）、
+`Attest the firmware and the apk repository`、`Publish release`（7 个资产）、
+apk 仓库部署 Pages，以及 `设备脚本测试`（真实 `uci`）。相对 `727d8d2` 的 delta 是
+10 个 commit / 37 个文件，唯一沾 mediatek 的是
+`package/boot/uboot-mediatek/Makefile`（image builder 的 chainloader），
+**没有** `package/kernel/mt76`、**没有** ppp 文件，两个自带补丁一行没改就贴上了。
+
+顺带记两个从这次发布里量出来的事实，免得下次重新怀疑：
+
+- `Deploy to Pages` 的第一次尝试失败是**常态**，不是偶发：到今天为止的 4 次构建里有
+  2 次首跳报 `Fetching artifact metadata failed. …` + `No artifacts named
+  "github-pages-N" were found`，30 秒后的 `Deploy to Pages (retry)` 都成功了。
+  所以「部署失败」这个红脸只有在**重试也失败**时才值得查；`failure()` 那条路走不通
+  （job 级 `continue-on-error` 下 `steps.*.outcome` 不会变成 `'failure'`），
+  必须靠步骤级 `continue-on-error` + `outcome`，见 `.github/workflows/build.yml`
+  里 `Deploy to Pages` / `Wait before the first retry` / `Deploy to Pages (retry 2)`
+  三处注释。
+- `Save build cache to GitHub Packages` 在 master 上会真的执行（修复前因为
+  `github.ref == 'refs/heads/master'` 被写死而永远跳过），但**内容没变时**
+  `Save download cache` / `Save ccache` / `Save toolchain` 仍会被 skip —— 那是
+  缓存命中，不是失败，别当红线看。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh
