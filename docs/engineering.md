@@ -57,8 +57,8 @@
 ```sh
 OPENWRT_REPO_URL=https://github.com/openwrt/openwrt.git
 OPENWRT_REPO_BRANCH=main
-OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-727d8d2f8e5b19a2121e2cf05824e9e5cac35310}
-OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-727d8d2}
+OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-9285edcb617278c1aa982d917a34460c05f6e5f3}
+OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-9285edc}
 OPENWRT_TRACK=latest          # latest 跟随分支头；pinned 复现指定 revision
 OPENWRT_TARGET=mediatek
 OPENWRT_SUBTARGET=filogic
@@ -2387,6 +2387,43 @@ check-run；ruleset 要求的 5 个上下文里只要有其中落到 skipped 就
 `GET /repos/{o}/{r}/rules/branches/{branch}` 里 `required_status_checks` 的上下文
 与**同名 check-run 的全部实例**的结论，别直接怀疑签名或评审要求；同名的多个
 check-run 里只要有一个不是 `success`，就卡住。
+
+#### 4.5.2 2026-11-26 先构建候选、再推 pin：`fb742de8` → `9285edcb`
+
+这一次按 `configs/upstream.env` 里那条**晋升规则**走完整流程，而不是先改文件再赌：
+上游分支头走到 `9285edcb617278c1aa982d917a34460c05f6e5f3` 后，先派一个
+`pinned=false` 的构建（run **45664615331**，ref `master`@`a2299a5`），让它自己去
+`git ls-remote` 解析出候选 revision 并**完整跑一遍**。
+
+结果全绿：`构建固件`、`发布 apk 仓库`、`设备脚本测试` 三个 job 全 success，
+`Verify the fullcone chain is really in the image`、
+`Verify the proxy stack dependencies are in the image`、
+`Verify the built repository can satisfy every frontend on its own`、
+`Audit build warnings` 全部通过。BUILD-INFO 记的是
+`openwrt_revision=9285edcb617278c1aa982d917a34460c05f6e5f3`、
+`openwrt_version_code=r0-9285edc`、`upstream_track=latest`、
+`kernel_version=6.18.64`、`kernel_abi=ac7024928df204cd6201adcbc2974cb5`
+（与 1.4.0 同一个 ABI）。
+
+**顺带在真实 CI 里验证了 feed 记录修复**：这次 BUILD-INFO 的 feed 段只有 6 条真实
+feed（`feed_luci` / `feed_packages` / `feed_routing` / `feed_telephony` / `feed_video`
+/ `feed_wwand`），`feed_base=` 与 `feed_*.tmp=` 那些把 `openwrt_revision` 抄一遍的
+假行没有了。修复前 1.4.0 的 BUILD-INFO 里它们都在——`feeds/base` 是 OpenWrt 自己
+`ln -sf ../package` 建出来的软链，`feeds/<name>.tmp` 是 `scripts/feeds` 的扫描草稿
+目录，两者都没有自己的 `.git`，于是 `git -C` 往上走到了 OpenWrt 仓本身并报出树头。
+现在 `record_feed_revisions()` 用 `[ -e "${dir}.git" ] || continue` 判定，
+`checks.yml` 的 `BUILD-INFO only records real feeds` 用一个**故意放在 git 仓内部**
+的合成树守它（放在仓外面这个 bug 根本复现不出来，因为 `git -C` 无处可走）。
+
+相对 `fb742de8` 的 delta 是 8 个 commit / 13 个文件，全在 realtek
+（`target/linux/realtek/files-6.18/drivers/net/dsa/rtl83xx/*`、
+`.../soc/realtek/otto_table.c`）与 `target/linux/generic/pending-6.18/759-*`、`760-*`
+（MxL862xx DSA 标签）。没有 mediatek 目标文件、没有 `package/kernel/mt76`、没有 ppp，
+所以本项目两个补丁不受影响——上面那次构建就是证据，不是推断。
+
+于是 `configs/upstream.env` 两行同时改：revision → `9285edcb617278c1aa982d917a…`，
+标签 → `r0-9285edc`（`The pinned upstream revision and its label agree` 静态断言这一对）。
+改完 `latest` 与 `pinned` 又一次收敛到同一个 sha。
 
 ### 5. 重新生成一个包内补丁
 
