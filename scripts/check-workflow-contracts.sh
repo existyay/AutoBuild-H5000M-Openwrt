@@ -529,6 +529,60 @@ finally:
     _shutil.rmtree(scratch, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
+# 7) 同一个旋钮在所有步骤里必须看到同一个值
+# ---------------------------------------------------------------------------
+# 2026-11-25 的构建报告给出了自相矛盾的数字：
+#
+#     Cache size (GiB): 1.9 / 5.0 (37.25%)
+#     Cleanups: 9629
+#
+# 5.0 GiB 是 ccache 的内建默认天花板 —— `CCACHE_MAXSIZE: 2G` 只写在 Build 步骤
+# 自己的 env 里，`Report ccache effectiveness` 完全看不到它。真实状态是
+# 1.9 / 2.0：缓存已经顶在天花板上、淘汰过 9629 次，这才是 22.7% 命中率的来源。
+# 一份测量别人配置的报告，比没有报告更糟：它让一个已经饱和的缓存显示成“还有
+# 38% 空间”，而且这个错误会被当成“ccache 就是这么慢”长期接受下来。
+#
+# 检查规则：跨步骤共享的旋钮必须写在 job 或 workflow 级 env；步骤级只允许
+# 出现与上层相同的值，不允许另立一套。
+SHARED_KNOBS = ["CCACHE_MAXSIZE", "CCACHE_COMPRESS"]
+build_job = (build_wf.get("jobs") or {}).get("build") or {}
+knob_checked = 0
+
+
+def upper_env(doc, job, knob):
+    """(值, 位置) —— 上层 env 里这个旋钮的值，没有就是 (None, None)。"""
+    for scope, mapping in (("job", job.get("env")), ("workflow", doc.get("env"))):
+        if isinstance(mapping, dict) and knob in mapping:
+            return str(mapping[knob]).strip(), scope
+    return None, None
+
+
+for knob in SHARED_KNOBS:
+    knob_checked += 1
+    top_value, top_scope = upper_env(build_wf, build_job, knob)
+    if top_value is None:
+        problems.append(
+            f".github/workflows/build.yml: `{knob}` 只在步骤级出现 —— "
+            "同一个 job 里别的步骤（尤其负责测量它的那个）看不到这个值，"
+            "报告就会拿内建默认值去对比一个真实存在的上限"
+        )
+        continue
+    for step in build_steps:
+        if not isinstance(step, dict):
+            continue
+        step_env = step.get("env")
+        if not (isinstance(step_env, dict) and knob in step_env):
+            continue
+        step_value = str(step_env[knob]).strip()
+        if step_value != top_value:
+            problems.append(
+                f".github/workflows/build.yml: 步骤 "
+                f"`{step.get('name') or '?'}` 把 `{knob}` 覆盖成 "
+                f"`{step_value}`，而 {top_scope} 级是 `{top_value}` —— "
+                "同一个 job 里两套值，报告与构建必然对不上"
+            )
+
+# ---------------------------------------------------------------------------
 if problems:
     print(f"\033[31m✗ 发现 {len(problems)} 处复用工作流契约问题：\033[0m\n")
     for p in problems:
@@ -539,7 +593,8 @@ if problems:
 print(
     f"\033[32m✓ 复用工作流契约正常\033[0m"
     f"（检查了 {checked_calls} 处 uses: ./ 调用、表达式中的连字符点号访问，"
-    f"runs-on 的浮动标签、run 块里的表达式替换、固件缓存的恢复/保存顺序，"
+    f"runs-on 的浮动标签、run 块里的表达式替换、固件缓存的恢复/保存顺序、"
+    f"{knob_checked} 个跨步骤旋钮的唯一取值，"
     f"以及 {shell_checked} 个 bash run 块的 shell 语法（含复合 action））"
 )
 if perm_unchecked:

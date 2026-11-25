@@ -543,6 +543,33 @@ Cache saved with key: h5000m-ccache-41358560480
 应该有数字可看，而不是靠猜（OpenWrt 用自己编的 ccache 和 `./.ccache`，所以要问的是
 `staging_dir/host/bin/ccache`，`/usr/bin/ccache` 报的是另一个几乎空的缓存）。
 
+##### 这个「有效」报告本身是错的（2026-11-26）
+
+上面那个报告步骤加得太粗：它读到了 ccache 的配置，却没读到**构建真正使用的那份**配置。
+`CCACHE_MAXSIZE: 2G` 只写在 `Build` 步骤自己的 `env:` 里，报告步骤看不到，于是 `ccache -s`
+按内建默认值报出来一行自相矛盾的结论：
+
+```
+Cache size (GiB): 1.9 / 5.0 (37.25%)
+Cleanups: 9629
+Hits: 53406 / 234957 (22.73%)
+```
+
+5.0 GiB 从来没生效过。真实状态是 **1.9 / 2.0** —— 缓存早就顶在天花板上，淘汰过 9629 次，
+那 22.7% 的命中率正是被这种淘汰压下来的。一份「还有 38% 空间」的报告比没有报告更糟：
+它会让「ccache 就是这么慢」变成一个长期被接受的结论。
+
+修法分两层，缺一层都不算修好：
+
+1. `CCACHE_MAXSIZE` / `CCACHE_COMPRESS` 提到 job 级 `env:`，构建和报告读同一个值；报告步骤
+   开头再打一行 `ccache ceiling in effect: …`，让上限本身可见，而不是藏在百分比里。
+2. 工作流契约门禁新增「跨步骤旋钮只能有一个取值」规则：旋钮必须出现在 job/workflow 级，
+   且任何步骤不得把它覆盖成别的值。`checks.yml` 的自检里补了两个变异（`step-only` 与
+   `override`），两边都会红。
+
+上限本身没有跟着改：2 GB 是按 10 GB 预算与 download（4.3 GB × 2）、toolchain（1.4 GB × 2）
+共存的算法定下的，动它要先动那个预算（见 [ci.md 的缓存账](ci.md)）。
+
 同次审阅还去掉了两处纯 I/O 浪费：CI 已对 9–15 GB build cache 做过 sha256 和 `zstd -t` 时，
 `local-build.sh` 不再第三次扫描整个压缩流；firmware artifact 排除已经单独上传给 Pages 的
 `apk-repo/` 和它的 `packages/` 输入副本，不再把同一 APK 集合传两三遍。工作流契约门禁现在
