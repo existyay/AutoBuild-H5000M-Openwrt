@@ -2425,6 +2425,49 @@ feed（`feed_luci` / `feed_packages` / `feed_routing` / `feed_telephony` / `feed
 标签 → `r0-9285edc`（`The pinned upstream revision and its label agree` 静态断言这一对）。
 改完 `latest` 与 `pinned` 又一次收敛到同一个 sha。
 
+#### 4.5.3 2026-11-26 发布那条构建也必须钉住 revision
+
+v1.4.0 是 release-please 打 tag 后自己派发的：`release-please.yml` 里写的是
+
+```sh
+gh workflow run build.yml --ref "${TAG_NAME}"
+```
+
+**一个 input 都没传**，于是 `build.yml` 的 `pinned` 取了默认值 `false`，
+`Resolve the upstream revision` 去 `git ls-remote … refs/heads/main` 取当时的分支头。
+发布出来的固件自己的 `BUILD-INFO.txt` 写着：
+
+```
+upstream_track=latest
+openwrt_revision=fb742de8e5126809fddf16fa2b5e82b016be0edb
+```
+
+而同一时刻 `configs/upstream.env` 的 pin 还是 `727d8d2…`。也就是说**唯一最需要
+可复现的那次构建，是唯一没有要求可复现的那次**：事后用 `pinned=true` 编，得到的
+不是发布页上那个固件。
+
+现在派发带上两个 input：
+
+```sh
+gh workflow run build.yml --ref "${TAG_NAME}" \
+  -f pinned=true -f build_repo=true
+```
+
+* `-f pinned=true`：编译 `OPENWRT_PINNED_REVISION`，与发布页对得上。这是真正的
+  bug —— 它的默认值是 `false`，不传就编分支头。
+* `-f build_repo=true`：它的默认值目前就是 `true`，所以今天写不写结果一样。要求
+  写出来，是因为固件的 `/etc/apk/repositories` 指向 Pages 上的 apk 仓库：一旦默认值
+  被改成 `false`，发布出去的镜像 `apk add` 会撞上当时碰巧在线的那个仓库，ABI 对不对
+  只能靠运气，而且构建日志里不会有任何症状。两个参数一起要求，等于要求"发布这次
+  构建把两个决定都写出来，不要继承默认值"。
+
+`scripts/check-workflow-contracts.sh` 第 8 段断言这条命令必须带这两个参数。
+它的第一版是直接在整个 `run:` 块里搜字符串，结果被我自己刚写的那句注释
+（"`-f pinned=true` is not optional"）喂饱了：把参数删掉再跑，它照样报"正常"。
+现在只比对**未注释的**命令行（含续行），并且 `checks.yml` 的自检里有两个负向对照
+（删掉 `pinned`、删掉 `build_repo`）证明它真的会红 —— 一条永远通过的门禁比没有门禁
+更糟，因为它会被当作证据。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh

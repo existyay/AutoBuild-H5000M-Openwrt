@@ -583,6 +583,100 @@ for knob in SHARED_KNOBS:
             )
 
 # ---------------------------------------------------------------------------
+# 8) 发布必须显式请求钉住的上游版本
+# ---------------------------------------------------------------------------
+# 2026-11-25 的 v1.4.0 是 release-please 触发的：
+#
+#     gh workflow run build.yml --ref "${TAG_NAME}"
+#
+# 没有传任何输入，于是 build.yml 取了 `pinned: false` 的默认值，`Resolve the
+# upstream revision` 执行 `git ls-remote … refs/heads/main`，发布出来的固件来自
+# 当时的上游头。它自己的 BUILD-INFO.txt 写着
+#
+#     upstream_track=latest
+#     openwrt_revision=fb742de8e5126809fddf16fa2b5e82b016be0edb
+#
+# 而 configs/upstream.env 里的 pin 当时还是 727d8d2…。于是 `pinned=true` 的构建
+# 无法复现已经发布的固件 —— 而“可复现”正是设置 pin 的唯一理由。一次发布是最
+# 需要钉住的那次构建，它不能依赖一个默认值。
+#
+# 同时要求 `-f build_repo=true`，理由不同：它的默认值现在是 true，所以今天不漏
+# 也无害。要它显式出现，是因为固件的 /etc/apk/repositories 指向 Pages 上的仓库 ——
+# 一旦有人把默认值改成 false，发布出去的镜像 `apk add` 会撞上当时碰巧在线的那个
+# 仓库，ABI 匹配靠运气而不是靠构造，而这件事在构建日志里不会有任何症状。两个参数
+# 一起要求，等于要求“发布这次构建把两个决定都写出来，不要继承默认值”。
+# 不假设这个文件一定存在：门禁自身也跑在 checks.yml 造出来的临时树上（那里只有
+# build.yml 与可复用工作流）。但“不存在就跳过”必须说出来 —— 静默跳过正是这个
+# 文件存在的理由。
+release_path = wf_dir / "release-please.yml"
+release_wf = load(release_path) if release_path.exists() else None
+dispatch_checked = 0
+dispatch_unchecked = 0
+# 不能用 walk_runs：它只产出**含表达式**的 run 块，而这一步恰好把所有表达式都
+# 经 env 传进来了（zizmor 要求的写法），因此它一个 run 块都不会遇到 —— 断言就
+# 会以「没找到触发步骤」的形式失效。这里需要的是全部 run 块。
+def every_run(node, trail):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "run" and isinstance(value, str):
+                yield trail, value
+            else:
+                yield from every_run(value, trail + [str(key)])
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from every_run(value, trail + [str(index)])
+
+
+# 只看未注释的代码行。第一版的断言直接 `in body` 搜字符串，于是注释里那句
+# “`-f pinned=true` is not optional”把门禁喂饱了：把命令里的参数删掉再跑，它
+# 依然报“正常” —— 一条永远通过的门禁比没有门禁更糟，因为它会被人当作证据。
+def code_lines(body):
+    for line in body.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        yield line
+
+
+for trail, body in every_run(release_wf or {}, []):
+    code = list(code_lines(body))
+    if not any("gh workflow run" in l and "build.yml" in l for l in code):
+        continue
+    dispatch_checked += 1
+    where = "/".join(trail) or "run"
+    # 只看 `gh workflow run …` 这一条命令（含续行），而不是整个 run 块：
+    # 块里别处的注释或后续命令都不应该参与判断。
+    command, in_cmd = [], False
+    for line in code + [""]:
+        if "gh workflow run" in line:
+            in_cmd = True
+        if in_cmd:
+            command.append(line)
+            if not line.rstrip().endswith("\\"):
+                break
+    joined = " \n".join(command)
+    for flag, why in (
+        ("-f pinned=true",
+         "会取 pinned 的默认值 false，编译当时的上游分支头，"
+         "于是已发布的固件无法用 pin 复现"),
+        ("-f build_repo=true",
+         "发布固件时就该写明要不要配套的 apk 仓库，不该继承默认值 —— "
+         "固件的 apk 源指向 Pages 仓库，缺了配套仓库 ABI 匹配只能靠运气"),
+    ):
+        if flag not in joined:
+            problems.append(
+                f".github/workflows/release-please.yml: {where} 触发了 build.yml "
+                f"却没传 `{flag}` —— {why}"
+            )
+if release_wf is None:
+    dispatch_unchecked = 1
+elif dispatch_checked == 0:
+    # 和别的门禁一样：静默跳过等于失明。真换了触发方式，就把这条断言一起改。
+    problems.append(
+        ".github/workflows/release-please.yml: 没找到触发 build.yml 的步骤 —— "
+        "发布必须显式请求 `-f pinned=true` 这条断言已经没在检查任何东西"
+    )
+
+# ---------------------------------------------------------------------------
 if problems:
     print(f"\033[31m✗ 发现 {len(problems)} 处复用工作流契约问题：\033[0m\n")
     for p in problems:
@@ -594,7 +688,8 @@ print(
     f"\033[32m✓ 复用工作流契约正常\033[0m"
     f"（检查了 {checked_calls} 处 uses: ./ 调用、表达式中的连字符点号访问，"
     f"runs-on 的浮动标签、run 块里的表达式替换、固件缓存的恢复/保存顺序、"
-    f"{knob_checked} 个跨步骤旋钮的唯一取值，"
+    f"{knob_checked} 个跨步骤旋钮的唯一取值、"
+    f"{dispatch_checked} 处发布派发都显式钉住了版本，"
     f"以及 {shell_checked} 个 bash run 块的 shell 语法（含复合 action））"
 )
 if perm_unchecked:
