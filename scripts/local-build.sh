@@ -844,8 +844,27 @@ record_feed_revisions() {
 	: >"$out"
 	[ -d "${SRC}/feeds" ] || return 0
 
+	# Two of the directories in feeds/ are NOT feeds, and `git -C` happily
+	# answers for both of them:
+	#
+	#   feeds/base      symlink to ../package, created by include/toplevel.mk:108
+	#   feeds/<n>.tmp   scratch dir the feed scan writes (scripts/feeds:102)
+	#
+	# Neither holds a repository of its own, so `git -C` walks UP to the
+	# enclosing OpenWrt checkout and returns the tree we already record — and
+	# because the loop matches `feeds/*/`, both got written out.  The artifact
+	# then claimed
+	#
+	#   feed_base=fb742de8…      (that is openwrt_revision, not a feed)
+	#   feed_luci.tmp=fb742de8…  (an empty scratch dir)
+	#
+	# which is exactly the kind of line that makes a BUILD-INFO.txt look
+	# informative while answering nothing.  A directory with no `.git` of its
+	# own is not a feed: skip it.  (`src-link` feeds have no git either, and
+	# skipping them is right — they have no HEAD to record.)
 	for dir in "${SRC}"/feeds/*/; do
 		name="$(basename "$dir")"
+		[ -e "${dir}.git" ] || continue
 		sha="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
 		[ -n "$sha" ] || continue
 		printf '%s=%s\n' "$name" "$sha" >>"$out"
