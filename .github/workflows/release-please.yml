@@ -267,7 +267,25 @@ jobs:
         run: |
           set -euo pipefail
           echo "dispatching build.yml on ${TAG_NAME}"
-          gh workflow run build.yml --ref "${TAG_NAME}"
+          # `-f pinned=true` is not optional.  Without it the dispatch took the
+          # input default (`pinned: false`), so `Resolve the upstream revision`
+          # ran `git ls-remote … refs/heads/main` and the RELEASE was built from
+          # whatever upstream head existed at that moment — not from the
+          # revision recorded in configs/upstream.env.  v1.4.0 shipped that way:
+          # its BUILD-INFO.txt says upstream_track=latest,
+          # openwrt_revision=fb742de8…, while the pin still named 727d8d2…, so
+          # `pinned=true` builds could not reproduce the published firmware —
+          # which is the only reason to have a pin at all.  A release is exactly
+          # the build that must be reproducible, so it asks for the pin
+          # explicitly instead of inheriting a default.
+          #
+          # `-f build_repo=true` for the same reason: the firmware's
+          # /etc/apk/repositories points at the Pages repository, so a release
+          # built without it would ship an image whose `apk add` hits whatever
+          # repository happened to be published last, with a matching ABI by
+          # luck rather than by construction.
+          gh workflow run build.yml --ref "${TAG_NAME}" \
+            -f pinned=true -f build_repo=true
           # `gh workflow run` only queues the dispatch; confirm it exists so a
           # silent failure here cannot leave a tag with no firmware, which is
           # exactly the state v1.1.0/v1.1.1 were left in.

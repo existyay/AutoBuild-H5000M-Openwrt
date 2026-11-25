@@ -512,8 +512,70 @@ jobs:
           render_cache_fixture valid
           check_knob_fixture override
 
+          # The release-dispatch rule (2026-11-26).  v1.4.0 was dispatched with no
+          # inputs, so it took `pinned: false` and shipped the moving branch head
+          # (`upstream_track=latest`) instead of the pin — the one build that most
+          # needs a fixed revision was the only one not asking for it.  The gate
+          # must reject a dispatch that drops either flag, and it must not be
+          # satisfied by the COMMENT that explains the flags — that is exactly how
+          # the first version went deaf.
+          # Each case renders the real build.yml FIRST: `render_cache_fixture
+          # override` left a knob defect behind, and then a correct
+          # release-please.yml would still be rejected — the fixture would be
+          # measuring the previous case's defect.  The renderer's exit status is
+          # checked too, otherwise a crash inside it leaves the previous mutant in
+          # place and “rejected” proves nothing.
+          check_dispatch_fixture() {
+            render_cache_fixture valid
+            if ! python3 - "$cache_fixture" "$1" <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          case = sys.argv[2]
+          src = pathlib.Path(".github/workflows/release-please.yml").read_text(encoding="utf-8")
+          (root / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
+          flag_block = "-f pinned=true -f build_repo=true"
+          if case == "no-pinned":
+              out = src.replace(flag_block, "-f build_repo=true")
+          elif case == "no-build-repo":
+              out = src.replace(flag_block, "-f pinned=true")
+          elif case == "valid":
+              out = src
+          else:
+              raise SystemExit(f"unknown dispatch case {case}")
+          if case != "valid" and out == src:
+              raise SystemExit(f"dispatch fixture {case} did not apply; the command drifted")
+          (root / ".github" / "workflows" / "release-please.yml").write_text(out, encoding="utf-8")
+          PY
+            then
+              echo "::error::dispatch fixture '$1' failed to render — the mutation drifted"
+              fail=1
+              return 1
+            fi
+            if [ "$1" = "valid" ]; then
+              if ! ./scripts/check-workflow-contracts.sh "$cache_fixture" >/dev/null 2>&1; then
+                echo "::error::release-dispatch gate rejects the real workflow — it is now unusable"
+                fail=1
+              else
+                echo "  OK    release-dispatch gate accepts the real workflow"
+              fi
+              return 0
+            fi
+            if ./scripts/check-workflow-contracts.sh "$cache_fixture" >/dev/null 2>&1; then
+              echo "::error::release-dispatch gate accepted '$1' — it has gone deaf"
+              fail=1
+            else
+              echo "  OK    release-dispatch gate rejects: $1"
+            fi
+          }
+
+          check_dispatch_fixture valid
+          check_dispatch_fixture no-pinned
+          check_dispatch_fixture no-build-repo
+
           [ "$fail" -eq 0 ] || exit 1
-          echo "all five gates still detect the defects they exist to catch"
+          echo "all six gates still detect the defects they exist to catch"
 
       - name: Shell syntax check
         run: |
