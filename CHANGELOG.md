@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.1](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.4.0...v1.4.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **build:** BUILD-INFO 不再把 feeds/base 与 feeds/*.tmp 当成 feed ([#99](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/99)) ([a2299a5](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/a2299a57c943051cd57f0aa241fd7b3721eb5c3d))
+* **ci:** ccache 的上限与报告步骤终于指的是同一个数 ([#102](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/102)) ([cae679b](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/cae679bbfa9244dd31f96351f435672b137fe433))
+* **release:** 发布那次派发必须自己钉住 revision ([#103](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/103)) ([3c21312](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/3c213127326e7435c5e9a5dddeda6d5689ec2ddf))
+
 ## [1.4.0](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.3.0...v1.4.0) (2026-11-25)
 
 
