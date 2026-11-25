@@ -463,8 +463,57 @@ jobs:
 
           check_perm_fixture
 
+          # The shared-knob rule (2026-11-26).  `CCACHE_MAXSIZE: 2G` lived in the
+          # Build step's own env, so `Report ccache effectiveness` measured
+          # against ccache's built-in 5 GiB default and printed "1.9 / 5.0" for
+          # a cache that was actually full at 1.9 / 2.0 (Cleanups: 9629).  Two
+          # mutations, because the rule has two halves: the knob must not live
+          # only at step level, and a step must not override the job-level value.
+          check_knob_fixture() {
+            python3 - "$cache_fixture" "$1" <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          case = sys.argv[2]
+          src = pathlib.Path(".github/workflows/build.yml").read_text(encoding="utf-8")
+          lines = src.split(chr(10))
+          job_env = next(i for i, l in enumerate(lines)
+                         if l.strip() == "CCACHE_MAXSIZE: 2G" and l.startswith("      "))
+          # Drop the job-level block (the knob plus its sibling on the next line
+          # and the `env:` header above them), then re-add the knob where it used
+          # to live: inside the Build step.
+          del lines[job_env - 1:job_env + 2]
+          build = next(i for i, l in enumerate(lines) if l.strip() == "- name: Build")
+          indent = " " * 10
+          if case == "step-only":
+              lines.insert(build + 4, indent + "CCACHE_MAXSIZE: 2G")
+          elif case == "override":
+              lines.insert(job_env - 1, "    env:")
+              lines.insert(job_env, "      CCACHE_MAXSIZE: 2G")
+              lines.insert(build + 4, indent + "CCACHE_MAXSIZE: 3G")
+          else:
+              raise SystemExit(f"unknown knob case {case}")
+          out = chr(10).join(lines)
+          if out == src:
+              raise SystemExit(f"knob fixture {case} did not apply; the env block drifted")
+          (root / ".github" / "workflows" / "build.yml").write_text(out, encoding="utf-8")
+          PY
+            if ./scripts/check-workflow-contracts.sh "$cache_fixture" >/dev/null 2>&1; then
+              echo "::error::shared-knob gate accepted '$1' — it has gone deaf"
+              fail=1
+            else
+              echo "  OK    shared-knob gate rejects: $1"
+            fi
+          }
+
+          render_cache_fixture valid
+          check_knob_fixture step-only
+          render_cache_fixture valid
+          check_knob_fixture override
+
           [ "$fail" -eq 0 ] || exit 1
-          echo "all three gates still detect the defects they exist to catch"
+          echo "all five gates still detect the defects they exist to catch"
 
       - name: Shell syntax check
         run: |

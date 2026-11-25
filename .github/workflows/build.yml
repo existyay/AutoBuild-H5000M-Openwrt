@@ -117,6 +117,22 @@ jobs:
     # A self-hosted runner must carry the labels linux, x64 and h5000m.
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && fromJSON('["self-hosted","linux","x64","h5000m"]') || 'ubuntu-24.04' }}
     timeout-minutes: 350
+    # ccache is configured here, at job level, because two different steps have
+    # to agree on it: the build that fills the cache and the report that says
+    # how well it worked.  They did not agree — the Build step set 2G while
+    # `Report ccache effectiveness` inherited nothing, so the report printed
+    # ccache's built-in default ceiling (5G) and announced "Cache size (GiB):
+    # 1.9 / 5.0" for a cache that was actually at 1.9 / 2.0, i.e. full and
+    # evicting (Cleanups: 9629 on the 2026-11-25 build).  A ceiling nobody
+    # enforces is not a ceiling, and a report that measures against the wrong
+    # one cannot be compared across builds.
+    #
+    # The value itself is sized for the repository's 10 GB actions/cache budget
+    # alongside the toolchain and the download archive; raising it needs that
+    # budget checked first, not just this number.
+    env:
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -525,10 +541,9 @@ jobs:
         # under its 108-byte limit.
         env:
           BUILD_DIR: ${{ (github.event_name == 'workflow_dispatch' && inputs.runner_type == 'self-hosted') && github.workspace || '/o' }}
-          # Keep ccache from growing past what the repository's 10 GB cache
-          # budget can hold alongside the toolchain and the downloads.
-          CCACHE_MAXSIZE: 2G
-          CCACHE_COMPRESS: 'true'
+          # CCACHE_MAXSIZE / CCACHE_COMPRESS are job-level env, shared with the
+          # effectiveness report below; setting them here again is how the two
+          # came to disagree.
           TOOLCHAIN_CACHE_ARCHIVE: ${{ github.workspace }}/.toolchain-cache/toolchain.tar.zst
           BUILD_CACHE_ARCHIVE: ${{ github.workspace }}/.buildcache/build-cache.tar.zst
           BUILD_CACHE_VERIFIED: ${{ steps.buildcache.outputs.valid || 'false' }}
@@ -672,6 +687,10 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
+          # Say which ceiling the numbers below are measured against, so a
+          # mismatch with the build step can no longer hide inside a plausible
+          # looking percentage.
+          echo "ccache ceiling in effect: ${CCACHE_MAXSIZE:-<unset>} (compression: ${CCACHE_COMPRESS:-<unset>})"
           echo "== ccache directory sizes =="
           du -sh ~/.ccache openwrt/.ccache 2>/dev/null || true
           # OpenWrt builds its own ccache in staging_dir and points CCACHE_DIR at
