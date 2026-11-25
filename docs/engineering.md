@@ -2363,6 +2363,31 @@ apk 仓库部署 Pages，以及 `设备脚本测试`（真实 `uci`）。相对 
   `Save download cache` / `Save ccache` / `Save toolchain` 仍会被 skip —— 那是
   缓存命中，不是失败，别当红线看。
 
+#### 4.5.1 分支名字面量：`on:` 不接受表达式，所以改用断言
+
+`on:` 是被 GitHub 在**求值任何表达式之前**就解析的，所以
+`branches: [${{ github.event.repository.default_branch }}]` 这条路根本不存在。
+默认分支改名那天，`release-please.yml` 与 `security.yml` 的 push 触发会**静默**失效：
+不报错、不告警，只是发布 PR 再也不更新、审计再也不跑。
+
+试过的绕过办法是 `push: branches: ['**']` 再在每个 job 上用
+`if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)`
+限定默认分支。**这个办法更糟**，代价是一个从此再也合不进来的 PR 才暴露：
+只要往任意分支 push，就会产生一批与必需检查**同名**、但结论是 `skipped` 的
+check-run；ruleset 要求的 5 个上下文里只要有其中落到 skipped 就不算满足，于是
+`mergeable_state` 永远是 `blocked`，而 PR 页面上 18 个检查全是绿的。
+
+最终选择：字面量留着，但让它不再静默——`checks.yml` 的
+`The push triggers name the real default branch` 步骤会解析这两个工作流的
+`on.push.branches`，并与 `github.event.repository.default_branch` 对账，改名那天直接红
+并打印要改的字面量；它还带一个负向对照（把默认分支换成不存在的名字，必须被拒绝），
+否则「解析器什么都没解析出来也算通过」正好是这套门禁存在的理由。
+
+顺带记下两条同一来源的经验：`mergeable_state=blocked` 且检查全绿时，先看
+`GET /repos/{o}/{r}/rules/branches/{branch}` 里 `required_status_checks` 的上下文
+与**同名 check-run 的全部实例**的结论，别直接怀疑签名或评审要求；同名的多个
+check-run 里只要有一个不是 `success`，就卡住。
+
 ### 5. 重新生成一个包内补丁
 
 ```sh

@@ -16,12 +16,13 @@ name: 供应链安全
 #   3. The workflows themselves are attack surface (script injection, pwn
 #      requests, credential persistence).  -> zizmor, CodeQL, Scorecard.
 on:
-  # 同 release-please.yml：不硬编码分支名。push 匹配所有分支（不含 tag），
-  # 每个依赖 push 的 job 在自己的 `if` 里限定到默认分支（CodeQL 很贵，不能每推
-  # 一个分支就跑一遍）。
+  # 同 release-please.yml：`on:` 不接受表达式，分支名只能是字面量。
+  # 不要为了“不写死”而改成 `['**']` —— 那样每推一个分支都会产生同名但
+  # `skipped` 的 check-run，被 ruleset 要求的上下文（zizmor、依赖审查）落到
+  # skipped 就不算满足，所有 PR 会永久停在 `mergeable_state=blocked`。
+  # 字面量由 checks.yml 的 `The push triggers name the real default branch` 对账。
   push:
-    # 匹配所有分支（不含 tag）：分支名不写死，限定在各 job 的 if 里。
-    branches: ['**']
+    branches: [master]          # 必须等于默认分支，由 checks.yml 断言
   pull_request:
   schedule:
     # Weekly, offset from the firmware build so the two never contend for the
@@ -47,8 +48,6 @@ jobs:
   # ---------------------------------------------------------------------------
   zizmor:
     name: 工作流静态审计（zizmor）
-    # push 事件只在默认分支上审计；PR / 定时 / 手动照旧。
-    if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -121,8 +120,6 @@ jobs:
           title: zizmor 审计失败
   codeql:
     name: CodeQL 静态分析
-    # 同 zizmor：push 只在默认分支，避免每个分支都跑一次 30 分钟的分析。
-    if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -247,7 +244,7 @@ jobs:
     # Only on the default branch: Scorecard publishes results to the public
     # OpenSSF API, and a PR run would report on a branch that is not the
     # project's real posture.
-    if: github.event_name != 'pull_request' && (github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -288,7 +285,7 @@ jobs:
     # schedule/push to master the build workflow runs separately; this job
     # attests whatever index is currently published, which is what devices
     # consume.
-    if: github.event_name != 'pull_request' && (github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
