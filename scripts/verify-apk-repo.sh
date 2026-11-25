@@ -40,6 +40,11 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# 版本钉（sing-box）：与 scripts/local-build.sh 的 pin_sing_box() 和 build.yml 的
+# 发布池校验共读同一份，三处不再各写一个字符串。
+# shellcheck source=../configs/pins.env
+. "${ROOT_DIR}/configs/pins.env"
 SRC="${ROOT_DIR}/openwrt"
 ARCH="${APK_ARCH:-aarch64_cortex-a53}"
 
@@ -200,8 +205,10 @@ declare -A REQUIRED_CORES=(
 )
 
 # This project's only version pin, and the reason it has to be in the image.
+# The number comes from configs/pins.env (SINGBOX_PIN_VERSION / _RELEASE) — see
+# the note there.
 PINNED_PACKAGE=sing-box
-PINNED_VERSION=1.12.25-r1
+PINNED_VERSION="${SINGBOX_PIN_VERSION}-r${SINGBOX_PIN_RELEASE}"
 
 OFFICIAL_FEEDS=(
 	"https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/packages/packages.adb"
