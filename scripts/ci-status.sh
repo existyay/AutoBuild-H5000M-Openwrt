@@ -91,13 +91,23 @@ gh run list --limit 10 \
 
 echo
 bold "-- 分支保护要求的检查（缺失/未过即为合并阻塞原因）--"
-rs_id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="master-protection") | .id' 2>/dev/null || true)"
+rs_id=""
+# 按��目标=分支且确实带了 required_status_checks”来找规则集，不按名字找：
+# 名字只是一个可改的字符串（这里曾经硬编码 `master-protection`），改名之后
+# 这整段会静默变成空列表 —— 而它恰好是“合并为什么被挡住”的答案来源。
+for id in $(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.target=="branch") | .id' 2>/dev/null || true); do
+	if gh api "repos/${REPO}/rulesets/${id}" \
+		--jq '.rules[] | select(.type=="required_status_checks") | .id' 2>/dev/null | grep -q .; then
+		rs_id="$id"
+		break
+	fi
+done
 if [ -n "$rs_id" ]; then
 	gh api "repos/${REPO}/rulesets/${rs_id}" \
 		--jq '.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' 2>/dev/null |
 		sed 's/^/  - /'
 else
-	ylw "  未找到 master-protection 规则集"
+	ylw "  未找到带 required_status_checks 的分支规则集"
 fi
 
 echo

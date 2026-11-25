@@ -8,8 +8,13 @@ name: 发布 PR 维护（Release Please）
 # changed in Chinese, grouped by feat/fix/perf — not "commits since last time".
 # It also gives every release a single reviewable diff before it ships.
 on:
+  # 不写死分支名是有意的：默认分支名不是常量（本仓库已改名过一次），而硬编码
+  # `branches: [master]` 会在改名那天静默关掉发布自动化 —— 不报错、不告警，只是再
+  # 也不会更新发布 PR。所以这里匹配所有分支，把“只在默认分支上干活”写进
+  # release-please job 的 `if`。
   push:
-    branches: [master]
+    # 匹配所有分支（不含 tag）：分支名不写死，限定在各 job 的 if 里。
+    branches: ['**']
   workflow_dispatch:
 
 permissions: {}
@@ -21,6 +26,8 @@ concurrency:
 jobs:
   release-please:
     name: 维护发布 PR
+    # 见 `on:` 上的说明：触发不过滤，限定写在这里。
+    if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

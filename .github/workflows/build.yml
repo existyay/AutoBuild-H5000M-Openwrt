@@ -651,7 +651,7 @@ jobs:
         # re-uploading ~3 GB cannot succeed (Actions caches are immutable), so
         # skip the attempt rather than fail on purpose.  This is the normal case
         # for a tag build whose revision master already built.
-        if: success() && steps.dl-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        if: success() && steps.dl-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -686,7 +686,7 @@ jobs:
           fi
 
       - name: Save ccache
-        if: success() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && steps.ccache-restore.outputs.cache-hit != 'true'
+        if: success() && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && steps.ccache-restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -741,7 +741,7 @@ jobs:
         # created the archive.  Saving it before Build was a no-op on a cold run.
         # Skip an exact hit: the archive is byte-identical and the key is
         # immutable, so the upload could only waste minutes and then warn.
-        if: success() && steps.toolchain-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        if: success() && steps.toolchain-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -773,7 +773,7 @@ jobs:
         # * `!startsWith(github.ref, 'refs/tags/')` alone let any branch that
         #   someone dispatched overwrite it.  The other three Save steps are
         #   already limited to master/tags; this one now matches them.
-        if: success() && github.ref == 'refs/heads/master' && (github.event_name != 'workflow_dispatch' || inputs.build_repo)
+        if: success() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name != 'workflow_dispatch' || inputs.build_repo)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1353,11 +1353,26 @@ jobs:
           # the highest version across every configured repository.  A pin only
           # holds if the pinned version is the one that gets installed; the
           # device proved it does not hold on its own.
+          # The pinned version is NOT written here: it lives in
+          # configs/pins.env, the one file also read by pin_sing_box() in
+          # scripts/local-build.sh (which rewrites the feed's Makefile) and by
+          # scripts/verify-apk-repo.sh (which asserts what the repository
+          # offers).  Three literal copies of `1.12.25` had already drifted:
+          # bumping one and not the others left a gate validating a version the
+          # build no longer pinned.
+          # shellcheck source=../../../configs/pins.env
+          # 绝对路径：这一步开头 `cd "$BUILD_DIR"`（托管 runner 上是 /o 短路径绑定，
+          # 自托管上是真实的 workspace），相对路径不一定落在仓库根上。
+          pins="${GITHUB_WORKSPACE:-$PWD}/configs/pins.env"
+          [ -f "$pins" ] || { echo "::error::找不到 $pins，版本钉无法核对"; exit 1; }
+          # shellcheck disable=SC1090
+          . "$pins"
+          want_pin="sing-box-${SINGBOX_PIN_VERSION}-r${SINGBOX_PIN_RELEASE}"
           pinned="$(apk_ list sing-box 2>/dev/null | awk '{print $1}')"
           case "$pinned" in
-            sing-box-1.12.25-r1) ok "sing-box is pinned to 1.12.25 ($pinned)" ;;
-            "")                  bad "sing-box is not in the built repository" ;;
-            *)                   bad "sing-box is $pinned, not 1.12.25 — the front-ends emit removed inbound fields" ;;
+            "$want_pin") ok "sing-box is pinned to ${SINGBOX_PIN_VERSION}-r${SINGBOX_PIN_RELEASE} ($pinned)" ;;
+            "")          bad "sing-box is not in the built repository" ;;
+            *)           bad "sing-box is $pinned, not $want_pin — the front-ends emit removed inbound fields" ;;
           esac
           echo
           echo "=== dependency resolution, exactly as the device does it ==="
@@ -1778,7 +1793,18 @@ jobs:
     needs: build
     # A validation build with `build_repo` off produces no repository, so there is
     # nothing to deploy and `download-artifact` would fail on a missing name.
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_repo }}
+    #
+    # The ref gate below mirrors the `github-pages` environment's own branch
+    # policy exactly (verified with
+    # `GET /repos/{o}/{r}/environments/github-pages/deployment-branch-policies`:
+    # branch `master`, tags `openwrt-*`, tags `v*`).  From any other ref — every
+    # PR branch, every feature branch — the deployment is refused BEFORE the
+    # first step exists: the job dies in ~3 s with `"steps": []` and no log at
+    # all (the log request returns BlobNotFound).  On a PR that shows up as a
+    # permanently red check that no author can ever fix, which is noise that
+    # trains people to ignore this job.  Skipping here cannot hide a real deploy
+    # failure: a real deploy only ever runs on a ref the environment allows.
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.build_repo) && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/openwrt-') || startsWith(github.ref, 'refs/tags/v')) }}
     # Always: the firmware's built-in source entry points here, so
     # publishing it is part of producing a usable firmware.
     #

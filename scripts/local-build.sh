@@ -18,6 +18,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../configs/upstream.env
 . "${ROOT_DIR}/configs/upstream.env"
 
+# 版本钉（sing-box 等）：与 scripts/verify-apk-repo.sh 和 build.yml 共读同一份。
+# shellcheck source=../configs/pins.env
+. "${ROOT_DIR}/configs/pins.env"
+
 # ---------------------------------------------------------------- knobs ------
 REPO_URL="${REPO_URL:-${OPENWRT_REPO_URL}}"
 REPO_BRANCH="${REPO_BRANCH:-${OPENWRT_REPO_BRANCH}}"
@@ -1194,8 +1198,10 @@ apply_patches() {
 # silently) if upstream ever stops packaging sing-box the normal way.
 pin_sing_box() {
 	local mk="${SRC}/feeds/packages/net/sing-box/Makefile"
-	local want_v="1.12.25"
-	local want_h="881435f07b5ab8170ccf3cb69e87130759521dc0ed1ae4bfeacbe7772a93a158"
+	# 值来自 configs/pins.env —— 同一个数也被 scripts/verify-apk-repo.sh 和
+	# build.yml 的发布池校验读到。
+	local want_v="${SINGBOX_PIN_VERSION}"
+	local want_h="${SINGBOX_PIN_HASH}"
 
 	if [ ! -f "$mk" ]; then
 		die "cannot pin sing-box: ${mk} does not exist — the packages feed layout changed; update pin_sing_box in scripts/local-build.sh"
@@ -1222,11 +1228,11 @@ pin_sing_box() {
 		-e "s|^PKG_VERSION:=.*|PKG_VERSION:=${want_v}|" \
 		-e "s|^PKG_HASH:=.*|PKG_HASH:=${want_h}|" \
 		"$mk"
-	# PKG_RELEASE, when present, is pinned to 1 as well: the repository gates
+	# PKG_RELEASE, when present, is pinned as well: the repository gates
 	# (verify-apk-repo.sh and the build.yml publish gate) assert the exact
-	# `sing-box-1.12.25-r1` name, and upstream bumps PKG_RELEASE for packaging
-	# changes that have nothing to do with our pin.
-	grep -q '^PKG_RELEASE:=' "$mk" && sed -i 's|^PKG_RELEASE:=.*|PKG_RELEASE:=1|' "$mk"
+	# `sing-box-<version>-r<release>` name, and upstream bumps PKG_RELEASE for
+	# packaging changes that have nothing to do with our pin.
+	grep -q '^PKG_RELEASE:=' "$mk" && sed -i "s|^PKG_RELEASE:=.*|PKG_RELEASE:=${SINGBOX_PIN_RELEASE}|" "$mk"
 
 	if ! grep -q "^PKG_VERSION:=${want_v}$" "$mk" ||
 		! grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
