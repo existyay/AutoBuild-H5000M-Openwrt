@@ -18,6 +18,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../configs/upstream.env
 . "${ROOT_DIR}/configs/upstream.env"
 
+# 版本钉（sing-box 等）：与 scripts/verify-apk-repo.sh 和 build.yml 共读同一份。
+# shellcheck source=../configs/pins.env
+. "${ROOT_DIR}/configs/pins.env"
+
 # ---------------------------------------------------------------- knobs ------
 REPO_URL="${REPO_URL:-${OPENWRT_REPO_URL}}"
 REPO_BRANCH="${REPO_BRANCH:-${OPENWRT_REPO_BRANCH}}"
@@ -35,6 +39,13 @@ IMAGE_PREFIX="${OPENWRT_IMAGE_PREFIX}"
 # Upstream tracking: `latest` follows the branch head (the point of a scheduled
 # auto-build); `pinned` builds the revision this harness was validated against.
 OPENWRT_TRACK="${OPENWRT_TRACK:-latest}"
+
+# Exact revision to build, overriding the track above.  This is what CI sets:
+# the workflow resolves the revision once, keys every cache on that value, and
+# then has to build THAT revision — otherwise `ls-remote` can hand out a branch
+# head that moves again before the clone, and the caches end up describing a
+# tree the build never used.
+OPENWRT_REVISION="${OPENWRT_REVISION:-}"
 
 GIT_TIMEOUT="${GIT_TIMEOUT:-1800}"
 FEEDS_TIMEOUT="${FEEDS_TIMEOUT:-3600}"
@@ -251,6 +262,7 @@ Options:
   --prepare-only        Clone/update source, feeds, patches and local packages, then stop.
   --config-only         Additionally run defconfig and verify the package set, then stop.
   --pinned              Build OPENWRT_PINNED_REVISION instead of the branch head.
+  --revision <sha>      Build exactly this upstream commit (wins over --pinned).
   --skip-toolchain      Skip the explicit `make toolchain/install` prebuild step.
   --skip-download       Skip `make download` prefetch.
   --skip-feeds-update   Reuse the existing feeds checkout (no ./scripts/feeds update).
@@ -296,6 +308,30 @@ while [ "$#" -gt 0 ]; do
 		--config-only) CONFIG_ONLY=true ;;
 		--pinned)
 			OPENWRT_TRACK=pinned
+			;;
+		--revision)
+			shift
+			[ "$#" -gt 0 ] || {
+				echo "--revision needs a commit sha" >&2
+				exit 2
+			}
+			# Exactly 40 lowercase hex characters: the value is handed to `git
+			# fetch` as an argument, so anything else (a leading `--`, a refspec,
+			# whitespace) is either a mistake or an argument-injection attempt.
+			# `echo`+`exit` rather than `die`: this runs during argument parsing,
+			# before die() is defined at line 342, so die would be "command not
+			# found" and the script would continue with a bogus revision.
+			case "$1" in
+				*[!0-9a-f]*)
+					echo "--revision expects a 40-character commit sha, got '$1'" >&2
+					exit 2
+					;;
+			esac
+			if [ "${#1}" -ne 40 ]; then
+				echo "--revision expects a 40-character commit sha, got '$1'" >&2
+				exit 2
+			fi
+			OPENWRT_REVISION="$1"
 			;;
 		--skip-toolchain) SKIP_TOOLCHAIN=true ;;
 		--skip-download) SKIP_DOWNLOAD=true ;;
@@ -588,13 +624,25 @@ prepare_source() {
 		rm -rf "$staging"
 	fi
 
-	if [ "${OPENWRT_TRACK}" = "pinned" ]; then
+	# An exact revision wins over the track: the caller already resolved it (and
+	# keyed its caches on it), so re-resolving here could pick a different commit
+	# and make BUILD-INFO, the cache keys and the tree disagree.
+	if [ -n "${OPENWRT_REVISION}" ]; then
+		REVISION_SOURCE=caller
+		rev="${OPENWRT_REVISION}"
+		log "Fetching revision ${rev} exactly as resolved by the caller"
+		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$rev" ||
+			die "Cannot fetch revision ${rev}"
+		git -C "$SRC" checkout -f FETCH_HEAD
+	elif [ "${OPENWRT_TRACK}" = "pinned" ]; then
+		REVISION_SOURCE=pinned
 		rev="${OPENWRT_PINNED_REVISION}"
 		log "Fetching pinned revision ${rev}"
 		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$rev" ||
 			die "Cannot fetch pinned revision ${rev}"
 		git -C "$SRC" checkout -f FETCH_HEAD
 	else
+		REVISION_SOURCE=latest
 		log "Updating ${REPO_BRANCH} to the current upstream head"
 		run_with_timeout "$GIT_TIMEOUT" git -C "$SRC" fetch --depth 1 origin "$REPO_BRANCH" ||
 			die "Cannot fetch ${REPO_BRANCH}"
@@ -709,6 +757,10 @@ prepare_feeds() {
 
 	verify_package_index
 	verify_wwand_feed
+
+	# Cheap, and the only way an artifact can say which package set it shipped:
+	# feeds.conf.default pins branches, not commits.  See record_feed_revisions.
+	record_feed_revisions
 }
 
 # Fail loudly when `feeds install` ran without a package database.
@@ -773,6 +825,33 @@ verify_wwand_feed() {
 		[ -d "${feed}/${pkg}" ] || warn "wwand feed is missing ${pkg}"
 	done
 
+	return 0
+}
+
+# Record the HEAD of every feed next to the upstream revision.
+#
+# feeds.conf.default points at BRANCHES (`packages`, `luci`, `routing`,
+# `telephony`, `video` → master; `wwand` → main), so the OpenWrt revision does
+# not imply the package set: two builds of the same revision, a day apart, can
+# ship different versions of the same package.  BUILD-INFO.txt used to record
+# only openwrt_revision, which cannot be turned back into a build — it can only
+# be approximated.  These SHAs make the artifact reproducible (`feeds.<name>.
+# commit` in the checkouts) and make a "why is this package a different version
+# than yesterday" question answerable from the artifact itself.
+record_feed_revisions() {
+	local out="${ROOT_DIR}/.feeds-revisions" dir name sha
+
+	: >"$out"
+	[ -d "${SRC}/feeds" ] || return 0
+
+	for dir in "${SRC}"/feeds/*/; do
+		name="$(basename "$dir")"
+		sha="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+		[ -n "$sha" ] || continue
+		printf '%s=%s\n' "$name" "$sha" >>"$out"
+	done
+
+	[ -s "$out" ] && log "Feed revisions: $(tr '\n' ' ' <"$out")"
 	return 0
 }
 
@@ -1119,8 +1198,10 @@ apply_patches() {
 # silently) if upstream ever stops packaging sing-box the normal way.
 pin_sing_box() {
 	local mk="${SRC}/feeds/packages/net/sing-box/Makefile"
-	local want_v="1.12.25"
-	local want_h="881435f07b5ab8170ccf3cb69e87130759521dc0ed1ae4bfeacbe7772a93a158"
+	# 值来自 configs/pins.env —— 同一个数也被 scripts/verify-apk-repo.sh 和
+	# build.yml 的发布池校验读到。
+	local want_v="${SINGBOX_PIN_VERSION}"
+	local want_h="${SINGBOX_PIN_HASH}"
 
 	if [ ! -f "$mk" ]; then
 		die "cannot pin sing-box: ${mk} does not exist — the packages feed layout changed; update pin_sing_box in scripts/local-build.sh"
@@ -1147,11 +1228,11 @@ pin_sing_box() {
 		-e "s|^PKG_VERSION:=.*|PKG_VERSION:=${want_v}|" \
 		-e "s|^PKG_HASH:=.*|PKG_HASH:=${want_h}|" \
 		"$mk"
-	# PKG_RELEASE, when present, is pinned to 1 as well: the repository gates
+	# PKG_RELEASE, when present, is pinned as well: the repository gates
 	# (verify-apk-repo.sh and the build.yml publish gate) assert the exact
-	# `sing-box-1.12.25-r1` name, and upstream bumps PKG_RELEASE for packaging
-	# changes that have nothing to do with our pin.
-	grep -q '^PKG_RELEASE:=' "$mk" && sed -i 's|^PKG_RELEASE:=.*|PKG_RELEASE:=1|' "$mk"
+	# `sing-box-<version>-r<release>` name, and upstream bumps PKG_RELEASE for
+	# packaging changes that have nothing to do with our pin.
+	grep -q '^PKG_RELEASE:=' "$mk" && sed -i "s|^PKG_RELEASE:=.*|PKG_RELEASE:=${SINGBOX_PIN_RELEASE}|" "$mk"
 
 	if ! grep -q "^PKG_VERSION:=${want_v}$" "$mk" ||
 		! grep -q "^PKG_HASH:=${want_h}$" "$mk"; then
@@ -3973,7 +4054,16 @@ PY
 	# inventing a snapshot number we did not verify would be worse.
 	if [ -n "${OPENWRT_PINNED_SNAPSHOT:-}" ] && [ -n "${OPENWRT_PINNED_REVISION:-}" ] &&
 		[ "$rev" = "$OPENWRT_PINNED_REVISION" ]; then
-		code="$OPENWRT_PINNED_SNAPSHOT"
+		# The label has to describe this very commit.  The revision can be
+		# overridden (OPENWRT_PINNED_REVISION / --revision) without the label
+		# following along, and then the snapshot id would name a different tree —
+		# worse than the honest `r0-<sha>`, so it is dropped in that case.
+		case "$OPENWRT_PINNED_SNAPSHOT" in
+			*"${rev:0:7}"*) code="$OPENWRT_PINNED_SNAPSHOT" ;;
+			*)
+				warn "OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT} does not describe revision ${rev}; recording the tree-derived version instead"
+				;;
+		esac
 	fi
 
 	cat >"${dest}/BUILD-INFO.txt" <<EOF
@@ -3986,6 +4076,11 @@ project_version=${project_version}
 upstream_url=${REPO_URL}
 upstream_branch=${REPO_BRANCH}
 upstream_track=${OPENWRT_TRACK}
+# Where openwrt_revision came from: `latest` (the branch head at build time),
+# `pinned` (OPENWRT_PINNED_REVISION) or `caller` (an exact revision handed in via
+# OPENWRT_REVISION/--revision — CI does this so the tree matches the revision its
+# caches were keyed on).
+openwrt_revision_source=${REVISION_SOURCE:-latest}
 openwrt_revision=${rev}
 openwrt_version_code=${code:-unknown}
 openwrt_version_number=${ver:-unknown}
@@ -4010,6 +4105,21 @@ enable_homeproxy=${ENABLE_HOMEPROXY}
 enable_adguardhome=${ENABLE_ADGUARDHOME}
 enable_ebpf_proxy_kernel=${ENABLE_EBPF_PROXY_KERNEL}
 EOF
+
+	# The feed HEADs go in last so the file reads "what tree, then what feeds".
+	# Absent (older trees, --skip-feeds-update on a fresh checkout) is not an
+	# error — the block simply does not appear.
+	if [ -s "${ROOT_DIR}/.feeds-revisions" ]; then
+		printf '# Feed HEADs at build time. feeds.conf.default points at branches, so
+' >>"${dest}/BUILD-INFO.txt"
+		printf '# these, not openwrt_revision, decide which package versions shipped.
+' >>"${dest}/BUILD-INFO.txt"
+		while IFS='=' read -r _feed _sha; do
+			[ -n "$_feed" ] && [ -n "$_sha" ] || continue
+			printf 'feed_%s=%s
+' "$_feed" "$_sha" >>"${dest}/BUILD-INFO.txt"
+		done <"${ROOT_DIR}/.feeds-revisions"
+	fi
 
 	log "Wrote ${dest}/BUILD-INFO.txt (kernel ${kver:-?}, abi ${abi:-?})"
 }

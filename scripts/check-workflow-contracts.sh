@@ -61,6 +61,18 @@ act_dir = root / ".github" / "actions"
 
 problems: list[str] = []
 checked_calls = 0
+# 权限子集没法静态判断的次数（例如调用方没写 permissions、显式减过权）。
+# 计数的目的是让「没核对」在输出里露头，而不是静默地算通过。
+perm_unchecked = 0
+
+
+def rel(p: pathlib.Path) -> str:
+    """报告里的路径一律用正斜杠。
+
+    `Path.relative_to()` 在 Windows 上给反斜杠，于是同一条报错在本地和 CI 里
+    长得不一样 —— 而照着报错去改文件的人只需要一种写法。
+    """
+    return p.relative_to(root).as_posix()
 
 
 def load(path: pathlib.Path):
@@ -80,6 +92,53 @@ def as_set(mapping) -> set:
     return set((mapping or {}).keys())
 
 
+def perm_map(value):
+    """权限声明的三种形态必须区分开，否则子集判断会静默失效。
+
+    * 没写（None）—— 继承上一级；
+    * 写成 map —— 精确集合。**空 map 是「什么都不给」，不是「没写」**；
+    * `read-all` / `write-all` 简写 —— 只能按语义近似比较。
+
+    以前这里写的是 `as_set(x) or 上一级`：`permissions: {}` 是空集、假值，于是
+    回退到工作流级，子集永远成立 —— 门禁在最该响的那一条上聋了（而这条规则
+    失效的表现就是整个工作流 startup_failure，没有 job、没有日志）。字符串
+    简写更坑：`set("read-all")` 是 `{'r','e','a','d','-'}`。
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items()}
+    if isinstance(value, str):
+        shorthand = value.strip().lower()
+        if shorthand in ("read-all", "write-all"):
+            return shorthand
+    return "unknown"
+
+
+def missing_permissions(granted, wanted):
+    """返回 `wanted` 里 `granted` 没给的权限名；`None` = 静态判断不了。
+
+    判不了的情况一律记成 unchecked 并打进摘要，而不是默认通过：这条规则的
+    代价是整条流水线起不来，宁可在输出里留一行「未能核对」。
+    """
+    if wanted is None or granted is None:
+        return None
+    if "unknown" in (granted, wanted):
+        return None
+    if granted == "write-all":
+        return set()
+    if wanted == "write-all":
+        return None
+    if granted == "read-all":
+        if wanted == "read-all":
+            return set()
+        return {k for k, v in wanted.items() if str(v).lower() != "read"}
+    if wanted == "read-all":
+        reads_only = all(str(v).lower() == "read" for v in granted.values())
+        return set() if reads_only else None
+    return {k for k in wanted if k not in granted}
+
+
 # ---------------------------------------------------------------------------
 # 1) 表达式里对含连字符的标识符用点号访问
 # ---------------------------------------------------------------------------
@@ -97,7 +156,7 @@ for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml")
             continue
         if DOTTED_HYPHEN.search(line):
             problems.append(
-                f"{path.relative_to(root)}:{i}: 表达式里对含连字符的标识符用了点号访问；"
+                f"{rel(path)}:{i}: 表达式里对含连字符的标识符用了点号访问；"
                 f"`-` 会被当作减法，导致启动期失败。请改用 snake_case 标识符或方括号写法。"
             )
 
@@ -107,7 +166,7 @@ for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml")
 for path in sorted(wf_dir.glob("*.yml")):
     data = load(path)
     jobs = data.get("jobs") or {}
-    caller_top = as_set(data.get("permissions"))
+    caller_top = perm_map(data.get("permissions"))
 
     for job_id, job in jobs.items():
         if not isinstance(job, dict):
@@ -120,7 +179,7 @@ for path in sorted(wf_dir.glob("*.yml")):
         target = (root / uses).resolve()  # 相对仓库根；直接 join，lstrip("./") 会吃掉 .github 的点
         if not target.exists():
             problems.append(
-                f"{path.relative_to(root)}: job {job_id} 引用了不存在的 {uses}"
+                f"{rel(path)}: job {job_id} 引用了不存在的 {uses}"
             )
             continue
 
@@ -128,7 +187,7 @@ for path in sorted(wf_dir.glob("*.yml")):
         wc = (callee.get("on") or {}).get("workflow_call")
         if wc is None:
             problems.append(
-                f"{path.relative_to(root)}: job {job_id} 调用了 {uses}，"
+                f"{rel(path)}: job {job_id} 调用了 {uses}，"
                 f"但它没有声明 on.workflow_call"
             )
             continue
@@ -138,29 +197,35 @@ for path in sorted(wf_dir.glob("*.yml")):
         for key in as_set(job.get("with")):
             if key not in declared:
                 problems.append(
-                    f"{path.relative_to(root)}: job {job_id} 传给 {uses} 的输入 "
+                    f"{rel(path)}: job {job_id} 传给 {uses} 的输入 "
                     f"`{key}` 未在被调用方声明（已声明：{sorted(declared)}）"
                 )
         # 必填输入必须传
         for key, spec in (wc.get("inputs") or {}).items():
             if isinstance(spec, dict) and spec.get("required") and key not in as_set(job.get("with")):
                 problems.append(
-                    f"{path.relative_to(root)}: job {job_id} 未传必填输入 `{key}` 给 {uses}"
+                    f"{rel(path)}: job {job_id} 未传必填输入 `{key}` 给 {uses}"
                 )
 
-        # 2b) 权限子集：被调用方 job 请求的权限必须是调用方已授予的子集。
+        # 2b) 权限子集：被调用方 job 申请的权限必须是调用方已授予的子集。
         #     这就是让 build.yml 完全无法启动的那条规则。
-        caller_granted = as_set(job.get("permissions")) or caller_top
+        job_perm = perm_map(job.get("permissions"))
+        caller_granted = job_perm if job_perm is not None else caller_top
         for cj_id, cj in (callee.get("jobs") or {}).items():
             if not isinstance(cj, dict):
                 continue
-            callee_wants = as_set(cj.get("permissions")) or as_set(callee.get("permissions"))
-            missing = callee_wants - caller_granted
+            callee_wants = perm_map(cj.get("permissions"))
+            if callee_wants is None:
+                callee_wants = perm_map(callee.get("permissions"))
+            missing = missing_permissions(caller_granted, callee_wants)
+            if missing is None:
+                perm_unchecked += 1
+                continue
             if missing:
                 problems.append(
-                    f"{path.relative_to(root)}: job {job_id} 调用 {uses}，"
+                    f"{rel(path)}: job {job_id} 调用 {uses}，"
                     f"而被调用方 job {cj_id} 申请了调用方未授予的权限 "
-                    f"{sorted(missing)}（调用方授予 {sorted(caller_granted)}）——"
+                    f"{sorted(missing)}（调用方授予 {caller_granted}）——"
                     f"GitHub 会在启动期拒绝整个工作流（startup_failure）"
                 )
 
@@ -247,7 +312,7 @@ for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml")
                 continue
             where = f"job {job_id} " if job_id else ""
             problems.append(
-                f"{path.relative_to(root)}: {where}步骤 `{step.get('name', '<未命名>')}` "
+                f"{rel(path)}: {where}步骤 `{step.get('name', '<未命名>')}` "
                 f"调用了 gh（{hits[0].strip()[:60]}…），但该 job 中没有 actions/checkout，"
                 f"也未设置 GH_REPO。gh 依赖当前目录的 git remote 推断仓库，"
                 f"会直接失败（v1.1.3 因此没有产出固件）。"
@@ -288,7 +353,7 @@ for path in sorted(wf_dir.glob("*.yml")):
         for label in runner_labels(job.get("runs-on")):
             if label.endswith("-latest"):
                 problems.append(
-                    f"{path.relative_to(root)}: job {job_id} 的 runs-on 用了浮动标签 "
+                    f"{rel(path)}: job {job_id} 的 runs-on 用了浮动标签 "
                     f"`{label}`。它指向的镜像会随时移动，同一个 commit 会在不同日子"
                     f"跑在不同发行版上（run 36282274537 实测：GitHub 对 "
                     f"ubuntu-latest 挂了 Ubuntu 26 迁移告警）。请钉住具体版本，"
@@ -324,13 +389,11 @@ def walk_runs(node, trail):
             yield from walk_runs(value, trail + [str(index)])
 
 
-run_hits = 0
 for path in sorted(list(wf_dir.glob("*.yml")) + list(act_dir.rglob("action.yml"))):
     for trail, body in walk_runs(load(path), []):
-        run_hits += 1
         first = next(l.strip() for l in body.splitlines() if GITHUB_EXPR in l)
         problems.append(
-            f"{path.relative_to(root)}: {'/'.join(trail) or 'run'} 的 run 块里出现了表达式 "
+            f"{rel(path)}: {'/'.join(trail) or 'run'} 的 run 块里出现了表达式 "
             f"`{first[:70]}`。runner 会先替换再交给 shell：字面量被改掉，且 zizmor 会报 "
             f"template-injection。请改用 `env:` 传值。"
         )
@@ -414,41 +477,52 @@ if scratch.exists():
 
     shutil.rmtree(scratch)
 scratch.mkdir()
+
+# 每个单元是「一份文档 + 它的 step 列表」：工作流的每个 job 各算一份，复合
+# action 的 `runs.steps` 也算一份 —— 复合 action 的 run 块同样是 bash（`diagnose`
+# 那一百多行取证逻辑就在其中），而此前它一个都没被 `bash -n` 看过。
+shell_units = []
+for wf in sorted((root / ".github/workflows").glob("*.yml")):
+    wf_doc = load(wf) or {}
+    for job_name, job in (wf_doc.get("jobs") or {}).items():
+        shell_units.append((wf, list((job or {}).get("steps") or [])))
+for act in sorted(act_dir.rglob("action.yml")):
+    act_doc = load(act) or {}
+    shell_units.append((act, list((act_doc.get("runs") or {}).get("steps") or [])))
+
 try:
-    for wf in sorted((root / ".github/workflows").glob("*.yml")):
-        wf_doc = load(wf) or {}
-        for job_name, job in (wf_doc.get("jobs") or {}).items():
-            for idx, step in enumerate((job or {}).get("steps") or []):
-                if not isinstance(step, dict):
-                    continue
-                body = step.get("run")
-                if not isinstance(body, str) or not body.strip():
-                    continue
-                if not str(step.get("shell") or "bash").startswith("bash"):
-                    continue
-                shell_checked += 1
-                # 写进仓库内的相对路径再交给 bash：Windows 的 python 给出的
-                # `C:\Users\…\Temp\x.sh` 到 MSYS 的 bash 手里会把反斜杠当成
-                # 转义吃掉，变成不存在的路径，于是每个块都“语法错误”。
-                rel = scratch.name + "/" + f"step{idx}.sh"
-                (root / rel).write_text(body, encoding="utf-8", newline="\n")
-                result = subprocess.run(
-                    [bash_bin, "-n", rel],
-                    cwd=str(root),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+    for doc, steps in shell_units:
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            body = step.get("run")
+            if not isinstance(body, str) or not body.strip():
+                continue
+            if not str(step.get("shell") or "bash").startswith("bash"):
+                continue
+            shell_checked += 1
+            # 写进仓库内的相对路径再交给 bash：Windows 的 python 给出的
+            # `C:\Users\…\Temp\x.sh` 到 MSYS 的 bash 手里会把反斜杠当成
+            # 转义吃掉，变成不存在的路径，于是每个块都“语法错误”。
+            rel = scratch.name + "/" + f"block{shell_checked}.sh"
+            (root / rel).write_text(body, encoding="utf-8", newline="\n")
+            result = subprocess.run(
+                [bash_bin, "-n", rel],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode != 0:
+                shell_bad += 1
+                lines = (result.stderr or "").strip().splitlines()
+                reason = lines[0] if lines else f"bash -n 返回 {result.returncode}"
+                step_name = str(step.get("name") or f"step #{idx + 1}")
+                problems.append(
+                    f"{rel(doc)}: 步骤 `{step_name}` 的 run 块不是合法的"
+                    f"shell —— {reason}"
                 )
-                if result.returncode != 0:
-                    shell_bad += 1
-                    lines = (result.stderr or "").strip().splitlines()
-                    reason = lines[0] if lines else f"bash -n 返回 {result.returncode}"
-                    step_name = str(step.get("name") or f"step #{idx + 1}")
-                    problems.append(
-                        f"{wf.relative_to(root)}: 步骤 `{step_name}` 的 run 块不是合法的"
-                        f"shell —— {reason}"
-                    )
 finally:
     import shutil as _shutil
 
@@ -466,6 +540,12 @@ print(
     f"\033[32m✓ 复用工作流契约正常\033[0m"
     f"（检查了 {checked_calls} 处 uses: ./ 调用、表达式中的连字符点号访问，"
     f"runs-on 的浮动标签、run 块里的表达式替换、固件缓存的恢复/保存顺序，"
-    f"以及 {shell_checked} 个 bash run 块的 shell 语法）"
+    f"以及 {shell_checked} 个 bash run 块的 shell 语法（含复合 action））"
 )
+if perm_unchecked:
+    # 不失败，但必须露出来：这一条查的就是 startup_failure —— 没核对等于没查。
+    print(
+        f"\033[33m! {perm_unchecked} 处可复用工作流的权限子集没能静态核对\033[0m"
+        "（调用方或其 job 没写 permissions，或用了 read-all/write-all 简写）"
+    )
 PY

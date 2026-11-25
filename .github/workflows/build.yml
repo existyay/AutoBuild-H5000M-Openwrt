@@ -236,9 +236,24 @@ jobs:
           # the line, so any dispatch input would be attacker-controlled code
           # (zizmor: template-injection).  An env var is data.
           PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.pinned || false }}
+          # A candidate pin is proved WITHOUT editing configs/upstream.env: set
+          # the OPENWRT_PINNED_REVISION repository variable (Settings ->
+          # Variables) and dispatch with `pinned`.  Empty falls back to the
+          # revision recorded in the file, because configs/upstream.env assigns
+          # `OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-…}`.  A variable
+          # and not an 11th dispatch input: GitHub caps those at 10 and this
+          # form already uses all 10.
+          OPENWRT_PINNED_REVISION: ${{ vars.OPENWRT_PINNED_REVISION || '' }}
         run: |
           set -euo pipefail
           . configs/upstream.env
+          # Validated even when it came from the file: a truncated or mistyped
+          # paste would otherwise surface as an opaque `git fetch` failure.
+          case "${OPENWRT_PINNED_REVISION}" in
+            *[!0-9a-f]*) echo "::error::OPENWRT_PINNED_REVISION must be a 40-character commit sha"; exit 1 ;;
+          esac
+          [ "${#OPENWRT_PINNED_REVISION}" -eq 40 ] ||
+            { echo "::error::OPENWRT_PINNED_REVISION must be a 40-character commit sha"; exit 1; }
           if [ "${PINNED}" = "true" ]; then
             rev="${OPENWRT_PINNED_REVISION}"
           else
@@ -566,6 +581,11 @@ jobs:
           # Same reason as the Resolve step: an input must reach the shell as
           # data, not as interpolated source text.
           PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.pinned || false }}
+          # Build exactly the revision resolved (and cached) above rather than
+          # re-resolving: `git ls-remote` can hand out a branch head that moves
+          # again before the clone, which would leave the toolchain/download/
+          # ccache keys describing a tree the build never used.
+          OPENWRT_REVISION: ${{ steps.upstream.outputs.rev }}
         run: |
           set -euo pipefail
           cd "$BUILD_DIR"
@@ -631,7 +651,7 @@ jobs:
         # re-uploading ~3 GB cannot succeed (Actions caches are immutable), so
         # skip the attempt rather than fail on purpose.  This is the normal case
         # for a tag build whose revision master already built.
-        if: success() && steps.dl-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        if: success() && steps.dl-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -666,7 +686,7 @@ jobs:
           fi
 
       - name: Save ccache
-        if: success() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && steps.ccache-restore.outputs.cache-hit != 'true'
+        if: success() && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && steps.ccache-restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -721,7 +741,7 @@ jobs:
         # created the archive.  Saving it before Build was a no-op on a cold run.
         # Skip an exact hit: the archive is byte-identical and the key is
         # immutable, so the upload could only waste minutes and then warn.
-        if: success() && steps.toolchain-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+        if: success() && steps.toolchain-restore.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -753,7 +773,7 @@ jobs:
         # * `!startsWith(github.ref, 'refs/tags/')` alone let any branch that
         #   someone dispatched overwrite it.  The other three Save steps are
         #   already limited to master/tags; this one now matches them.
-        if: success() && github.ref == 'refs/heads/master' && (github.event_name != 'workflow_dispatch' || inputs.build_repo)
+        if: success() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name != 'workflow_dispatch' || inputs.build_repo)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1333,11 +1353,26 @@ jobs:
           # the highest version across every configured repository.  A pin only
           # holds if the pinned version is the one that gets installed; the
           # device proved it does not hold on its own.
+          # The pinned version is NOT written here: it lives in
+          # configs/pins.env, the one file also read by pin_sing_box() in
+          # scripts/local-build.sh (which rewrites the feed's Makefile) and by
+          # scripts/verify-apk-repo.sh (which asserts what the repository
+          # offers).  Three literal copies of `1.12.25` had already drifted:
+          # bumping one and not the others left a gate validating a version the
+          # build no longer pinned.
+          # shellcheck source=../../../configs/pins.env
+          # 绝对路径：这一步开头 `cd "$BUILD_DIR"`（托管 runner 上是 /o 短路径绑定，
+          # 自托管上是真实的 workspace），相对路径不一定落在仓库根上。
+          pins="${GITHUB_WORKSPACE:-$PWD}/configs/pins.env"
+          [ -f "$pins" ] || { echo "::error::找不到 $pins，版本钉无法核对"; exit 1; }
+          # shellcheck disable=SC1090
+          . "$pins"
+          want_pin="sing-box-${SINGBOX_PIN_VERSION}-r${SINGBOX_PIN_RELEASE}"
           pinned="$(apk_ list sing-box 2>/dev/null | awk '{print $1}')"
           case "$pinned" in
-            sing-box-1.12.25-r1) ok "sing-box is pinned to 1.12.25 ($pinned)" ;;
-            "")                  bad "sing-box is not in the built repository" ;;
-            *)                   bad "sing-box is $pinned, not 1.12.25 — the front-ends emit removed inbound fields" ;;
+            "$want_pin") ok "sing-box is pinned to ${SINGBOX_PIN_VERSION}-r${SINGBOX_PIN_RELEASE} ($pinned)" ;;
+            "")          bad "sing-box is not in the built repository" ;;
+            *)           bad "sing-box is $pinned, not $want_pin — the front-ends emit removed inbound fields" ;;
           esac
           echo
           echo "=== dependency resolution, exactly as the device does it ==="
@@ -1758,7 +1793,18 @@ jobs:
     needs: build
     # A validation build with `build_repo` off produces no repository, so there is
     # nothing to deploy and `download-artifact` would fail on a missing name.
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_repo }}
+    #
+    # The ref gate below mirrors the `github-pages` environment's own branch
+    # policy exactly (verified with
+    # `GET /repos/{o}/{r}/environments/github-pages/deployment-branch-policies`:
+    # branch `master`, tags `openwrt-*`, tags `v*`).  From any other ref — every
+    # PR branch, every feature branch — the deployment is refused BEFORE the
+    # first step exists: the job dies in ~3 s with `"steps": []` and no log at
+    # all (the log request returns BlobNotFound).  On a PR that shows up as a
+    # permanently red check that no author can ever fix, which is noise that
+    # trains people to ignore this job.  Skipping here cannot hide a real deploy
+    # failure: a real deploy only ever runs on a ref the environment allows.
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.build_repo) && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/openwrt-') || startsWith(github.ref, 'refs/tags/v')) }}
     # Always: the firmware's built-in source entry points here, so
     # publishing it is part of producing a usable firmware.
     #
@@ -1770,12 +1816,33 @@ jobs:
     runs-on: ubuntu-24.04
     continue-on-error: true
     permissions:
+      # `contents: read` 只为下面那次 checkout（失败诊断用的是本仓库里的复合
+      # action，action.yml 必须在工作区里才找得到）。没有它 checkout 会以
+      # 「Resource not accessible by integration」失败。
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      # 第一次就成功时用它的 URL；否则用后来那次成功重试的。
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url || steps.deployment_retry2.outputs.page_url }}
     steps:
+      # 这个 job 本来不需要工作区（产物来自 artifact），但「失败诊断」调用的是
+      # 本仓库的复合 action，`.github/actions/diagnose/action.yml` 不在磁盘上时
+      # 它报的是：
+      #
+      #   Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under
+      #   '…/.github/actions/diagnose'. Did you forget to run
+      #   actions/checkout before running your local action?
+      #
+      # 也就是说部署真的失败时，本该给出证据的那一步自己又红了一次
+      # （run 45422883193 就是这样：诊断步骤 failure，日志里只有这一句）。
+      # checkout 这条仓库很小，代价约两秒。
+      - name: Checkout (for the local diagnose action)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
       - name: Download the apk repository
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -1855,10 +1922,107 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: apk-repo
+          # 名字带上 run_attempt，因为 artifact 在同一个 run 里不能重名。
+          #
+          # 「Re-run failed jobs」只会重跑失败的那个 job，而这个 job 的第一件事
+          # 就是再上传一份 Pages artifact —— 同名，于是那个 run 里就有了两份
+          # `github-pages`，deploy-pages 直接失败：
+          #
+          #   Multiple artifacts named "github-pages" were unexpectedly found
+          #   for this workflow run. Artifact count is 2.
+          #
+          # 实测：2026-11-24 的 run 45389737814 第一次因 artifact 元数据取不到
+          # 失败（GitHub 侧的抖动），重跑就撞上了上面这句。带上 attempt 之后，
+          # 重跑只会多出一个新名字，两次都能部署。
+          name: github-pages-${{ github.run_attempt }}
 
       - name: Deploy to Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        with:
+          # 与上面 Upload 的那份同名。这两个值必须一起改：deploy-pages 默认只
+          # 找 `github-pages`，名字对不上时报的是「No artifacts named …」，而
+          # 真实原因是名字改了却只改了一半。
+          artifact_name: github-pages-${{ github.run_attempt }}
+        # 步骤级的 continue-on-error 不只是「别让 run 变红」，它是下面那个
+        # `if: steps.deployment.outcome == 'failure'` 能成立的前提。
+        #
+        # 实测（run 45419038608，四个 job 的对照）：
+        #
+        #   只给 job 加 continue-on-error：步骤结论仍是 failure，但
+        #     `steps.<id>.outcome` **不是** 'failure' —— 引用它的步骤被静默
+        #     跳过。（这正是 run 45408586022 的样子：Deploy to Pages 失败，
+        #     「Deploy to Pages (retry)」和「失败诊断」都显示 skipped。）
+        #   步骤自己也加 continue-on-error：outcome = failure（重试能触发），
+        #     conclusion = success（run 仍然是绿的）。
+        #
+        # 两层都留着：job 级保证托管问题不拖挂一次好构建，步骤级让 outcome 可信。
+        continue-on-error: true
+
+      # 再试一次。
+      #
+      # deploy-pages 会在 artifact 上传完的**下一秒**去读它的元数据，而这一步
+      # 会概率性地失败（GitHub 侧的索引延迟）：
+      #
+      #   Fetching artifact metadata failed. Is githubstatus.com reporting
+      #   issues with API requests, Pages, or Actions?
+      #   ##[error]Error: No artifacts named "github-pages-1" were found for
+      #   this workflow run.
+      #
+      # 实测 2026-11-24：run 45398909792 上传成功、artifact 在
+      # `GET /actions/runs/<id>/artifacts` 里看得见，部署却报「找不到」；同一
+      # 天 12:46 的那次部署则成功了。也就是说 artifact 是好的，只是读不到 ——
+      # 隔几秒重读一次就能读到。
+      #
+      # 这个 job 是 continue-on-error 的（托管问题不能拖挂一次好构建），所以
+      # 部署失败**不会让 run 变红**，只会让站点悄悄停在上一版。重试是这个
+      # 前提下唯一能做到的补救。
+      #
+      # 实测对照：`failure()` 在 job 级 continue-on-error 下仍然会被触发，
+      # `steps.<id>.outcome` 不会 —— 所以两者不能互相替代，这一步用的是
+      # 上一个步骤带步骤级 continue-on-error 之后才可信的 `outcome`。
+      # 重试之前必须等一会儿。run 45422883193 证明“立刻重试”等于没重试：
+      # 两次部署相距 470 毫秒（16:07:49.125 → 16:07:49.595），第二次拿到的
+      # 是同一句 `Fetching artifact metadata failed`。这既然是索引/接口的
+      # 抖动，就必须给它时间恢复，否则加的只是一行日志。
+      - name: Wait before the first retry
+        if: steps.deployment.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "deploy-pages 读不到 artifact 元数据，30 秒后重试"
+          sleep 30
+
+      - name: Deploy to Pages (retry)
+        id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      - name: Wait before the second retry
+        if: steps.deployment_retry.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "第二次仍然失败，再等 60 秒"
+          sleep 60
+
+      - name: Deploy to Pages (retry 2)
+        id: deployment_retry2
+        if: steps.deployment_retry.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      # 三次都失败时至少留下证据：这个 job 不会让 run 变红，而“站点比固件旧”
+      # 是最难从界面上看出来的事，所以把日志尾部收进 step summary。
+      - name: 失败诊断
+        if: steps.deployment_retry2.outcome == 'failure'
+        uses: ./.github/actions/diagnose
+        with:
+          title: 发布 apk 仓库失败（站点可能仍是上一版）
+          log_files: ''
 
   # ---------------------------------------------------------------------------
   # Reusable Workflow call: run the firmware's own first-boot scripts against

@@ -217,6 +217,13 @@ Docker、各代理前端等）。
 H5000M_APK_REPO_URL=http://<你的地址>:8099 ./scripts/local-build.sh
 ```
 
+排错时先看清 CI 到底哪一步红了（需要 `gh` CLI，且已登录）：
+
+```sh
+./scripts/ci-status.sh              # 最近几次运行：状态、失败的 job
+./scripts/ci-status.sh <run-id>     # 某个 run 的失败步骤与看日志的命令
+```
+
 ## 已知限制
 
 - **没有 TurboACC / MTK HNAT**：主线不提供，硬件加速走的是 PPE + netfilter flowtable

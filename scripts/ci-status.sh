@@ -31,7 +31,7 @@ red() { printf '\033[31m%s\033[0m\n' "$*"; }
 grn() { printf '\033[32m%s\033[0m\n' "$*"; }
 ylw() { printf '\033[33m%s\033[0m\n' "$*"; }
 
-if [ $# -ge 1 ]; then
+if [ "$#" -ge 1 ]; then
 	run_id="$1"
 	bold "== run ${run_id} =="
 	gh api "repos/${REPO}/actions/runs/${run_id}" \
@@ -56,8 +56,16 @@ if [ $# -ge 1 ]; then
 	# The exit status has to reflect the run: this branch used to end with
 	# `exit 0` unconditionally, so `scripts/ci-status.sh <id> && …` treated a red
 	# run as green.
-	n_failed="$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" \
-		--jq '[.jobs[] | select(.conclusion == "failure")] | length' 2>/dev/null || echo 0)"
+	if ! n_failed="$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" \
+		--jq '[.jobs[] | select(.conclusion == "failure")] | length' 2>/dev/null)"; then
+		# Do not fold a failed query into "0 failures": that would report a run
+		# whose state could not be read as green, which is the one wrong answer
+		# a status tool must never give.
+		echo
+		red "  无法读取该 run 的 job 状态（gh 认证或权限问题）"
+		exit 2
+	fi
+	n_failed="${n_failed:-0}"
 	case "$n_failed" in
 		'' | 0) exit 0 ;;
 		*)
@@ -72,7 +80,7 @@ bold "== 最近 10 次运行（${REPO}）=="
 gh run list --limit 10 \
 	--json databaseId,workflowName,status,conclusion,headSha,event \
 	--jq '.[] | "\(.databaseId)\t\(.workflowName)\t\(.status)/\(.conclusion // "-")\t\(.headSha[0:7])\t\(.event)"' |
-	while IFS=$'\t' read -r id name st sha ev; do
+	while IFS=$'\t' read -r _id name st sha ev; do
 		case "$st" in
 			*/success) printf '  \033[32m%-10s\033[0m %-34s %s  %s\n' "$st" "$name" "$sha" "$ev" ;;
 			*/failure) printf '  \033[31m%-10s\033[0m %-34s %s  %s\n' "$st" "$name" "$sha" "$ev" ;;
@@ -83,13 +91,23 @@ gh run list --limit 10 \
 
 echo
 bold "-- 分支保护要求的检查（缺失/未过即为合并阻塞原因）--"
-rs_id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="master-protection") | .id' 2>/dev/null || true)"
+rs_id=""
+# 按��目标=分支且确实带了 required_status_checks”来找规则集，不按名字找：
+# 名字只是一个可改的字符串（这里曾经硬编码 `master-protection`），改名之后
+# 这整段会静默变成空列表 —— 而它恰好是“合并为什么被挡住”的答案来源。
+for id in $(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.target=="branch") | .id' 2>/dev/null || true); do
+	if gh api "repos/${REPO}/rulesets/${id}" \
+		--jq '.rules[] | select(.type=="required_status_checks") | .id' 2>/dev/null | grep -q .; then
+		rs_id="$id"
+		break
+	fi
+done
 if [ -n "$rs_id" ]; then
 	gh api "repos/${REPO}/rulesets/${rs_id}" \
 		--jq '.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' 2>/dev/null |
 		sed 's/^/  - /'
 else
-	ylw "  未找到 master-protection 规则集"
+	ylw "  未找到带 required_status_checks 的分支规则集"
 fi
 
 echo

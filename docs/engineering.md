@@ -57,7 +57,8 @@
 ```sh
 OPENWRT_REPO_URL=https://github.com/openwrt/openwrt.git
 OPENWRT_REPO_BRANCH=main
-OPENWRT_PINNED_REVISION=058da17df29908b0b77099fb522823723c385a5e
+OPENWRT_PINNED_REVISION=${OPENWRT_PINNED_REVISION:-727d8d2f8e5b19a2121e2cf05824e9e5cac35310}
+OPENWRT_PINNED_SNAPSHOT=${OPENWRT_PINNED_SNAPSHOT:-r0-727d8d2}
 OPENWRT_TRACK=latest          # latest 跟随分支头；pinned 复现指定 revision
 OPENWRT_TARGET=mediatek
 OPENWRT_SUBTARGET=filogic
@@ -65,6 +66,28 @@ OPENWRT_PROFILE=hiveton_h5000m
 ```
 
 等 25.12.6 带上该设备后，把 `OPENWRT_REPO_BRANCH` 改成 `openwrt-25.12` 即可切到稳定分支。
+
+**候选 pin 的验证顺序（不必先改文件）**：`OPENWRT_PINNED_REVISION` 与
+`OPENWRT_PINNED_SNAPSHOT` 都写成 `${VAR:-默认值}`，所以一个候选 commit 可以在
+不改仓库的前提下被完整编译验证：
+
+```sh
+# 本地：直接编译指定 commit
+scripts/local-build.sh --revision 14a07b78e9ac9d604547533550e6aa41955ac588
+# CI：把候选 sha 写进仓库变量 OPENWRT_PINNED_REVISION，然后 workflow_dispatch 勾 pinned
+```
+
+只有“镜像 + apk 仓库 + publish”都过的那次构建，才允许把候选 sha 写回
+`configs/upstream.env`。`build.yml` 把这个变量当数据传给脚本（不做文本插值，避免
+template-injection），并在使用前校验“40 位小写 hex”。CI 的 Build 步骤还会把 Resolve
+步骤算出的 revision 通过 `OPENWRT_REVISION` 交给 `local-build.sh`，保证**缓存键描述的
+那棵树就是真正编译的树** —— 否则 `git ls-remote` 与 clone 之间分支头移动，缓存就指向了
+一个没被用过的 revision（BUILD-INFO 里 `openwrt_revision_source` 记录它是
+`latest`/`pinned`/`caller`）。
+
+`OPENWRT_PINNED_SNAPSHOT` 必须描述同一个 commit（其尾部七位等于该 revision 的前七位）；
+`write_build_info()` 在两者对不上时会丢弃这个标签、退回树内推导的 `r0-<sha>`，
+所以升级 pin 要同时改这两行。
 
 ---
 
@@ -141,18 +164,30 @@ config interface 'MT5700M'
 	option modem 'm0'
 	option pdp_type 'ipv4v6'
 	option metric '50'
+	option defaultroute '1'
+	option auto '1'
 	option managed_by 'wwand'
 	option modem_config 'wwand'   # netmode hotplug 守卫标记
-
-config interface 'MT5700Mv6'
-	option proto 'dhcpv6'
-	option device '@MT5700M'
-	option extendprefix '1'
 ```
 
 结果：wwand 掌管数据面，netmode 看到一个一等公民的 modem 接口，两个上游包都可以原样跟进。
 脚本幂等——`network.MT5700M` 一旦存在就完全不动它。若模组尚未枚举，脚本什么都不做，
 交给 wwand 自己的 autosetup 建默认 `wwan0`。
+
+#### 谁负责让配置生效（首启 vs 运行期）
+
+这两个脚本各有两条调用路径，**只有运行期那条需要主动生效**：
+
+| 调用路径 | 时机 | 生效方式 |
+| --- | --- | --- |
+| `/etc/uci-defaults/91-h5000m-wwan` | S10boot，netifd 尚未启动 | netifd 在 S20network 自己读配置，`auto '1'` 的接口自动起，**不需要** reload |
+| `/etc/hotplug.d/usb/50-h5000m-wwan` | 运行期，模组后枚举 | netifd 已在跑，`uci commit` 不会通知它；脚本创建后补一次 `ubus call network reload` |
+
+运行期那条曾经是个真 bug：provisioner 写完 `network.MT5700M` 就把 wwand 的
+`autosetup` 关掉，而 hotplug 更本不通知 netifd，于是后枚举的模组永远不会起接口，
+直到重启或手动 `ifup`。现在由 hook 判断"本次是否新建了 section"，只在新建时
+reload一次（模组反复重枚举不会反复重载网络）。首启那条故意不加 reload：S10boot 时
+连 netifd 进程都没有，只会白报错。
 
 ### wwand 与 luci-app-mt5700m 互斥
 
@@ -243,6 +278,7 @@ config interface 'MT5700Mv6'
 | `--prepare-only` | 拉到源码/feeds/补丁/本地包后停止 |
 | `--config-only` | 再跑 defconfig 与包校验后停止 |
 | `--pinned` | 编译 `OPENWRT_PINNED_REVISION` 而不是分支头 |
+| `--revision <sha>` | 编译指定的 40 位 commit（覆盖面比 `--pinned` 大，用于验证候选 pin） |
 | `--skip-toolchain` | 跳过显式 `make toolchain/install` |
 | `--skip-download` | 跳过 `make download` |
 | `--skip-feeds-update` | 复用已有 feeds（本地迭代提速） |
@@ -581,6 +617,12 @@ uci-defaults 有可能在任何 radio 段存在之前就运行、什么都没配
 `lib/upgrade/keep.d/h5000m-defaults` 让 sysupgrade 保留该标记，所以后续刷机
 **不会重置用户改过的设置**。判断条件也很保守：只要任一 AP 的 SSID 已不是默认值，
 就完全不碰。
+
+**为什么两个入口都不调 `wifi reload`**：uci-defaults 那条跑在 S10boot，而 wpad 到
+S19wpad 才启动，`uci commit` 写下的配置就是 wpad 启动时读到的内容，reload 无从谈起；
+hotplug 那条更危险——它本身就在 wifi 启动路径里（`10-wifi-detect` 生成
+`/etc/config/wireless` 时 wpad 正在起），`wifi reload` 会重启 wpad、重放同一个 `add`
+事件，形成自我循环。所以生效靠的是"时机对"，不是靠 reload。
 
 默认值（构建时可覆盖，见下表）：
 
@@ -1061,6 +1103,12 @@ ERROR: kmod-tun-6.18.44-r1: unexpected end of file
   `patches/0003`，但上下文补丁会被上游例行的版本 bump 打失效，故改为脚本改写）。
   而 apk 解析依赖时**在所有源之间取最高版本**，所以只放仓库会让它去官方镜像取
   1.14.0 —— 正是这个钉要防的崩溃。**版本钉住的前提是我们能决定装哪个版本。**
+  这个钉的数值只有一处来源：`configs/pins.env` 的 `SINGBOX_PIN_VERSION` /
+  `SINGBOX_PIN_RELEASE` / `SINGBOX_PIN_HASH`。读它的是三个互不相干的程序 ——
+  `scripts/local-build.sh` 的 `pin_sing_box()`（改写 feed 的 Makefile）、
+  `scripts/verify-apk-repo.sh` 的 `PINNED_VERSION`（断言仓库里能装到的是哪个）、以及
+  `build.yml` 的发布池校验（断言 pool 里只有那个名字）。此前这三处各写一个 `1.12.25`
+  字面量：改一处忘另一处不会报错，只会留下一个“校验着构建早已不再钉的版本”的门禁。
 
 结论：**kmod 一律进镜像**（每个只有几十 KB，`=y` 只会提升符号、不会降级，因此没有"把
 基础系统已 `=y` 的模块降成仓库包"的风险），**钉版本的核（sing-box）也进镜像**；
@@ -2107,9 +2155,9 @@ Makefile，并且 `kmod-ip6tables`、`kmod-ip6tables-extra`、`kmod-ipt-nat6`、
 版本一变，`linux-6.18.60` 这个目录不再被引用、kmod 的 stamp 名字跟着 `.config` 变，
 内核与 kmod 会自己重编；缓存里留下来的只是"确实没变"的那些包。
 
-所以 `OPENWRT_PINNED_REVISION` 仍是 `058da17`，`latest` 那条线本来就在编 `14a07b7`，
-固件内容没有落后。推 pin 需要的只有一条：下一次定时构建（或手动 `pinned=true`）
-在 `14a07b78e9ac9d604547533550e6aa41955ac588` 上跑过镜像 + apk 仓库 + 发布三段门禁。
+所以这一轮的结论是「`058da17` 可以推，但推的目标已经不是 `14a07b7`」—— 写这段时 main
+已经走到 `ce245c8`，而 `latest` 线编的就是它。后面的 4.3 记录了
+那次推 pin 的完整证据。
 
 这轮顺手修的三处**自身缺陷**（前两处在 `scripts/local-build.sh`，第三处在
 `local-packages/nft-fullcone/Makefile`）：
@@ -2172,6 +2220,106 @@ docker run --rm -v "$PWD":/src:ro -v h5000m-e2e:/work debian:bookworm-slim bash 
 上游 wwand feed 自己的包（`rmnet-nss` 依赖 `kmod-qca-nss-drv`、`wwand-ims` 依赖
 `strongswan-mod-eap-aka`/`-p-cscf`/`libsimaka`），与 `ENABLE_WWAND` 默认集合无关，
 `audit_own_warnings` 把它们正确归到"上游 feed"而不是"我们的"。
+
+### 4.3 2026-11-24 推 pin：`058da17` → `ce245c8`
+
+`14a07b7` 的核对还没写完，main 就已经过了它（`14a07b7` → `ce245c8`，后者是
+`ipq806x: refresh patches`，2026-11-23T22:02:46Z）。所以推 pin 的目标直接取当时的
+head：`ce245c873917cfbb412244dad80e395effed3167`（快照标签 `r0-ce245c8`）。
+
+证据来自 CI run **45307537181**（在 `28ae754` 上以 `pinned=false` 手工派发，走的是
+`latest` 线）。`BUILD-INFO.txt` 证明编的就是这一棵：
+
+| 字段 | 值 |
+| --- | --- |
+| `openwrt_revision` | `ce245c873917cfbb412244dad80e395effed3167` |
+| `openwrt_version_code` | `r0-ce245c8` |
+| `project_version` | `1.3.0` |
+| `upstream_track` | `latest` |
+
+同一个 run 里以下步骤全是 success，没有一步 skip：镜像内的 fullcone 链、代理栈依赖、
+「本仓库自己够不够前端用」、构建告警审计；apk 仓库已发到 Pages（281.2 MB），设备脚本
+测试也在**那一次构建出来的 rootfs** 上跑过（真 `uci` + qemu-user）。产物：
+`H5000M-mainline-openwrt` 160.7 MB、`apk-repo` 281.2 MB。
+
+**发布那段是故意没跑的。**`publish_release=false`，否则 `1.3.0` 已发布的产物会被换成另
+一棵树的固件 —— 同一个版本号下换内容是比「没发布」更糟的事。publish 步骤与上游
+revision 无关，上一次绿是 run 45189136209。所以本次按「镜像 + apk 仓库」两段门禁记
+账，publish 沿用已有证据。
+
+**一次 bump 的代价，实测**：整个 job 202.3 min，其中 `Build` 170.5 min；`Install build
+dependencies` 14.5 min；`Save build cache to GitHub Packages` 8.8 min。同一个 job 在
+revision 不变时 `Build` 只要 20.4 min —— 这不属于“拖慢编译的缺陷”，而是缓存的固有
+代价：toolchain / dl / ccache / build cache 的 key 全部按 revision 命名，上游一动就是一次
+全量重编。这也是「同一天重跑很快、每周构建很慢」的真正原因。
+
+顺手把“推 pin 必须先改文件”这个死锁去掉了（`058da17` 时代只能改完文件再看 CI）：
+`OPENWRT_PINNED_REVISION` / `OPENWRT_PINNED_SNAPSHOT` 现在写成 `${VAR:-默认值}`，
+候选 sha 可以先用 `scripts/local-build.sh --revision <sha>`（或 CI 的仓库变量
+`OPENWRT_PINNED_REVISION` + `pinned=true`）完整编一遍，过了再写回文件。
+
+#### 4.3.1 推上之后那一趟：57 分钟，其中 `Build` 12.4 分钟
+
+pin 改成 `ce245c8` 并合入（`ab13f1a`）后，又派发了一趟 `{"pinned":"true",
+"publish_release":"false","build_repo":true}` 的 run **45337990913**，全部绿。它的
+`BUILD-INFO.txt` 正好把新机制钉住：
+
+```
+upstream_track=pinned
+openwrt_revision=ce245c873917cfbb412244dad80e395effed3167
+openwrt_revision_source=caller
+openwrt_version_code=r0-ce245c8
+project_version=1.3.0
+```
+
+`openwrt_revision_source=caller` 是关键：revision 是 `Resolve the upstream revision`
+解析后**传给**构建的，`local-build.sh` 没有再去 `git ls-remote` 自己取一次头部 ——
+缓存 key 与实际编译对象从此说的是同一个 commit。`r0-ce245c8` 也留住了，因为标签
+前七位与 revision 一致，`write_build_info()` 的守卫放行。
+
+时间分布（job 57.1 min）：`Install build dependencies` 11.4、
+`Restore build cache from GitHub Packages` 17.4、`Build` **12.4**、
+`Save build cache to GitHub Packages` 9.1、`Free disk space` 3.0，其余都在 1.3 以内。
+对比 4.3 里冷启动那次 `Build` 170.5 min：同一个 revision 的缓存 key 已经在 45307537181
+里存过，所以这里直接命中。**结论是一条预算而不是一个缺陷**：bump 一次要付一次全量
+（≈170 min），之后这个 revision 的每一次构建都在 15 min 量级。
+
+按预期跳过的步骤：`Save download cache` / `Save ccache` / `Save toolchain`（命中即不存）、
+`Diagnose a failed build`、`Upload build logs on failure`、`Attest …`、`Publish release`。
+产物：`H5000M-mainline-openwrt` 160.1 MB、`apk-repo` 281.2 MB、`github-pages` 281.2 MB。
+
+非 `Build` 里最贵的是**恢复**构建缓存那 17.4 min。它买的是“12.4 min 而不是 170 min”，
+所以不去动它；但这是这条流水线上下一个会先涨起来的地方。
+
+### 4.4 2026-11-24 再推一次 pin：`ce245c8` → `727d8d2`
+
+`ce245c8` 之后上游又走了 11 个 commit（head
+`727d8d2f8e5b19a2121e2cf05824e9e5cac35310`，快照标签 `r0-727d8d2`）。按 4.3 的规则，
+先编一次再记：
+
+- run **45436214328**（`pinned=false`，即走 `latest` 线，`694667a`）编的就是 `727d8d2`：
+  `openwrt_revision=727d8d2f8e5b19a2121e2cf05824e9e5cac35310`、
+  `openwrt_version_code=r0-727d8d2`、`upstream_track=latest`。
+- 全绿：`Verify the fullcone chain …`、`Verify the proxy stack dependencies …`、
+  `Verify the built repository can satisfy every frontend on its own`、
+  `Audit build warnings`、`Attest the firmware and the apk repository`、`Publish release`，
+  以及 `设备脚本测试`（真实 `uci`，qemu-user）对同一份 rootfs 全绿。
+- 这 11 个 commit 全是 realtek / airoha / starfive 的目标改动，外加一个 ppp
+  `options.pptp` 的修正；**没有** mediatek 目标文件、**没有** `package/kernel/mt76`，
+  所以本工程带的两个补丁（`0001-h5000m-userspace-fan-control.patch`、
+  `0002-h5000m-mt76-txwi-fix.patch`）一行没改就贴上了。
+
+代价，这次推翻 4.3 的结论：job 41.8 min，`Build` **12.9 min**，`Restore build cache`
+9.5 min —— 构建缓存按配置打 key 且带 `restore-keys` 回退，所以换 revision 不会再赔
+一次全量。4.3 里那次 `Build` 170 min 是缓存未命中的成本，不是换 revision 的固有成本。
+
+于是 `configs/upstream.env` 两行同时改：revision → `727d8d2f8e5b…`，标签 → `r0-727d8d2`。
+
+这一对的一致性以前只有一个**运行期且只 warn** 的守卫（`scripts/local-build.sh:4049`），
+所以只改一行会被静默放过，产物盖的是从树里推出来的版本号，而那行 warn 埋在 40 分钟的
+构建日志里。现在由 `checks.yml::check` 的
+`The pinned upstream revision and its label agree` 步骤静态断言：revision 必须是 40 位小写
+十六进制，标签必须含其前 7 位；在 `仓库与主机检查` 里分钟级失败。
 
 ### 5. 重新生成一个包内补丁
 

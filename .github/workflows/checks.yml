@@ -60,6 +60,37 @@ jobs:
       - name: Check build host
         run: ./scripts/check-deps.sh
 
+      - name: The pinned upstream revision and its label agree
+        run: |
+          set -euo pipefail
+          # configs/upstream.env pairs a 40-hex revision with the human label of
+          # that same tree (r0-<first 7>).  The only guard on that pair lives in
+          # scripts/local-build.sh:4049, and it WARNS — on a build that already
+          # got that far.  So a pin bump that updates one of the two lines and
+          # not the other passes every check, then stamps the products with a
+          # tree-derived version instead of the pinned one, and the log line
+          # saying why scrolls past in a 40-minute build job.  Asserting it here
+          # costs a shell conditional.
+          . configs/upstream.env
+          rev="${OPENWRT_PINNED_REVISION:-}"
+          label="${OPENWRT_PINNED_SNAPSHOT:-}"
+          case "$rev" in
+            '' | *[!0-9a-f]*)
+              echo "::error::OPENWRT_PINNED_REVISION is empty or not a lowercase hex sha: '${rev}'"
+              exit 1 ;;
+          esac
+          if [ "${#rev}" -ne 40 ]; then
+            echo "::error::OPENWRT_PINNED_REVISION must be 40 hex characters, got ${#rev}: '${rev}'"
+            exit 1
+          fi
+          case "$label" in
+            *"${rev:0:7}"*)
+              echo "pin label '${label}' describes ${rev:0:7}…" ;;
+            *)
+              echo "::error::OPENWRT_PINNED_SNAPSHOT='${label}' does not contain the first 7 characters of OPENWRT_PINNED_REVISION='${rev}' — one of the two lines was edited without the other"
+              exit 1 ;;
+          esac
+
       - name: Workflow contracts (reusable workflows)
         run: |
           # A silent failure mode, made loud.  When build.yml calls a reusable
@@ -158,10 +189,42 @@ jobs:
                     old-name: 'true'
           YAML
 
+          # Second fixture, separate root: a reusable-workflow call whose `with:`
+          # key the callee never declared in `on.workflow_call.inputs`.  Sharing
+          # one tree with the fixture above would defeat the point — the
+          # deprecated-input defect alone makes the gate exit nonzero, so the
+          # self-test would pass while the reusable-workflow branch did nothing.
+          reusable_fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture" "$reusable_fixture"' EXIT
+          mkdir -p "$reusable_fixture/.github/workflows"
+          cat > "$reusable_fixture/.github/workflows/callee.yml" <<'YAML'
+          name: callee
+          on:
+            workflow_call:
+              inputs:
+                known_input:
+                  type: string
+                  required: false
+          jobs:
+            noop:
+              runs-on: ubuntu-24.04
+              steps:
+                - run: echo callee
+          YAML
+          cat > "$reusable_fixture/.github/workflows/caller.yml" <<'YAML'
+          name: caller
+          on: [push]
+          jobs:
+            call:
+              uses: ./.github/workflows/callee.yml
+              with:
+                unknown_input: 'x'
+          YAML
+
           fail=0
           expect_detect() {
-            local name="$1" script="$2"
-            if "$script" "$fixture" >/dev/null 2>&1; then
+            local name="$1" script="$2" root="${3:-$fixture}"
+            if "$script" "$root" >/dev/null 2>&1; then
               echo "::error::${name} did NOT fail on the fixture — it has gone deaf"
               fail=1
             else
@@ -169,6 +232,8 @@ jobs:
             fi
           }
           expect_detect check-action-inputs.sh ./scripts/check-action-inputs.sh
+          expect_detect check-action-inputs.sh（可复用工作流）\
+            ./scripts/check-action-inputs.sh "$reusable_fixture"
           expect_detect check-workflow-contracts.sh ./scripts/check-workflow-contracts.sh
 
           # The cache-ordering assertions added on 2026-11-01 guard a measured
@@ -178,7 +243,7 @@ jobs:
           # defect at a time — a hand-written fixture would not track the file it
           # protects, and its mutation strings would go stale silently.
           cache_fixture="$(mktemp -d)"
-          trap 'rm -rf "$fixture" "$cache_fixture"' EXIT
+          trap 'rm -rf "$fixture" "$reusable_fixture" "$cache_fixture"' EXIT
           mkdir -p "$cache_fixture/.github/workflows"
           cp .github/workflows/reusable-script-test.yml "$cache_fixture/.github/workflows/"
 
@@ -260,8 +325,52 @@ jobs:
           check_cache_fixture reject permanent-key
           check_cache_fixture reject run-expression
 
+          # The permission-subset rule is the one whose failure mode is a whole
+          # workflow that never starts, so prove the gate can still bite: empty
+          # the calling job's permissions and require a rejection.  Until this
+          # fixture existed the script used `as_set(x) or caller_top`, and an
+          # empty map is falsy, so it silently fell back to the workflow-level
+          # permissions and passed the very case it was written to catch.
+          check_perm_fixture() {
+            python3 - "$cache_fixture" <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          src = pathlib.Path(".github/workflows/build.yml").read_text(encoding="utf-8")
+          lines = src.split(chr(10))
+          uses = next(i for i, l in enumerate(lines)
+                      if l.strip() == "uses: ./.github/workflows/reusable-script-test.yml")
+          start = next(i for i in range(uses - 1, -1, -1) if lines[i].strip() == "permissions:")
+          end = start + 1
+          while end < uses and lines[end].strip() and lines[end].startswith("      "):
+              end += 1
+          indent = lines[start][: len(lines[start]) - len(lines[start].lstrip())]
+          lines[start:end] = [indent + "permissions: {}"]
+          # The point of the case is "the workflow grants more than the job does",
+          # so widen the workflow-level block too: with the job granting nothing,
+          # a checker that falls back to the workflow level sees a satisfied
+          # subset and stays silent while GitHub refuses to start the workflow.
+          top = lines.index("permissions:")
+          if lines[top + 1].strip() == "contents: read":
+              lines.insert(top + 1, "  actions: read")
+          out = chr(10).join(lines)
+          if out == src or "permissions: {}" not in out or out.count("actions: read") < 2:
+              raise SystemExit("permission fixture did not apply; the caller job drifted")
+          (root / ".github" / "workflows" / "build.yml").write_text(out, encoding="utf-8")
+          PY
+            if ./scripts/check-workflow-contracts.sh "$cache_fixture" >/dev/null 2>&1; then
+              echo "::error::permission gate accepted a caller job that grants nothing — it has gone deaf"
+              fail=1
+            else
+              echo "  OK    permission gate rejects a caller job whose permissions are empty"
+            fi
+          }
+
+          check_perm_fixture
+
           [ "$fail" -eq 0 ] || exit 1
-          echo "both gates still detect the defects they exist to catch"
+          echo "all three gates still detect the defects they exist to catch"
 
       - name: Shell syntax check
         run: |
@@ -292,6 +401,31 @@ jobs:
           printf 'linting %d file(s):\n' "${#files[@]}"
           printf '  %s\n' "${files[@]}"
           shellcheck -S error "${files[@]}"
+
+      - name: local-build.sh argument guards
+        run: |
+          set -euo pipefail
+          # `--revision` is the one argument that is handed to `git fetch` AS AN
+          # ARGUMENT, so its validation is a security control rather than
+          # politeness: an unvalidated value like `--upload-pack=…` would be
+          # interpreted by git, not by us.  Every case here is pure argument
+          # parsing — no network, no clone — so the step costs milliseconds.
+          check() { # <expected-exit> <args...>
+            local want="$1"; shift
+            local rc=0
+            scripts/local-build.sh "$@" >/tmp/argguard.log 2>&1 || rc=$?
+            if [ "$rc" -ne "$want" ]; then
+              echo "::error::'local-build.sh $*' exited ${rc}, expected ${want}"
+              tail -5 /tmp/argguard.log
+              exit 1
+            fi
+          }
+          check 2 --revision 12345                      # too short
+          check 2 --revision 058da17df29908b0b77099fb522823723c385a5EZ  # uppercase
+          check 2 --revision                            # no value
+          check 2 --revision --upload-pack=touch-pwned   # would be read by git
+          check 2 --bogus                                # unknown switch
+          echo "argument guards hold"
 
       - name: actionlint (workflow schema)
         run: |
@@ -648,6 +782,10 @@ jobs:
             "the accel apply script loads cls_bpf"
           want "$accel/root/usr/sbin/h5000m-accel" 'modprobe veth' \
             "the accel apply script loads veth"
+          want "$accel/root/usr/sbin/h5000m-accel" 'net.ipv4.tcp_congestion_control=bbr' \
+            "the accel applier makes bbr survive a reboot (sysctl.d drop-in)"
+          want "$accel/root/etc/modules.d/tcp_bbr" 'tcp_bbr' \
+            "tcp_bbr is loaded before /etc/init.d/sysctl applies the drop-in"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ebpf_kernel' \
             "the accel status script reports eBPF readiness"
           want "$accel/root/usr/sbin/h5000m-accel-status" 'ls -d /sys/module/nf_flow_table' \
