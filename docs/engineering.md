@@ -2552,6 +2552,15 @@ X-Accepted-OAuth-Scopes: admin:ssh_signing_key, write:ssh_signing_key
 `client_id`（`178c6fc778ccc68e1d6a`）配 `scope=admin:ssh_signing_key` 换一次性 token，
 再 `POST /user/ssh_signing_keys` 一次。审批那一下仍然要人点，换不来的是“谁签的”。
 
+2026-11-26 09:12 走通了：`POST /user/ssh_signing_keys` → `HTTP 201`, id `1367826`,
+title `H5000M build machine (ED25519, local git)`，接口读回的
+`SHA256:CPYCyTTQ2VjmZFugp2CsDSmsTERlaQF3Dj3Mk7iYzJI` 与本机
+`git verify-commit` 报的完全一致。登记后**历史提交不需要重写**：
+`d96b448` / `1fc890d` / `eac5e41` / `5a4d541` / `4ff9ccb` / `6e66768` 立刻都变成
+`verified: true, reason: valid` —— verification 是 GitHub 当下按“当前钥匙表”
+现算的，不是提交时的快照。所以 unknown_key 是“查不到”而不是“签名坏了”，
+补登记可以追认。剩余 94 个 unsigned 全是签名前的旧提交，它们永远不会变。
+
 最后一条判据值得单独记：**本地 `git verify-commit` 通过 ≠ GitHub 认可**。前者回答
 “我这台机器认这把钥匙”，后者回答“这个账号认这把钥匙”。要看后者，就去读
 `/repos/{owner}/{repo}/commits/{sha}` 里的 `verification.verified` 与 `reason` ——
