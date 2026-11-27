@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.4.2...v1.4.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **build:** 没有 fwtool 元数据的镜像一律不许发版 ([#109](https://github.com/existyay/AutoBuild-H5000M-Openwrt/issues/109)) ([aa937fd](https://github.com/existyay/AutoBuild-H5000M-Openwrt/commit/aa937fde5567c49a4f3e95f3da2d789735d5a811))
+
 ## [1.4.2](https://github.com/existyay/AutoBuild-H5000M-Openwrt/compare/v1.4.1...v1.4.2) (2026-11-25)
 
 
