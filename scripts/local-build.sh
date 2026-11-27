@@ -3946,6 +3946,173 @@ build_apk_repository() {
 	return 0
 }
 
+# A sysupgrade image with no fwtool metadata installs nowhere: the device's own
+# /sbin/sysupgrade prints `Image metadata not present` and refuses the file
+# (`Use sysupgrade -F to override this check`), and no download page can tell
+# the difference because the name, the size and the sha256 are all correct.
+#
+# Upstream appends that metadata with
+#   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+#   define Build/append-metadata
+#   	$(if $(SUPPORTED_DEVICES),-echo $(call metadata_json) | fwtool -I - $@)
+# The leading `-` is make's "ignore this command's exit status", so if
+# SUPPORTED_DEVICES evaluates empty, or fwtool rejects its input, the picture
+# builds clean and unsigned-of-metadata.  v1.4.1 and v1.4.2 were released that
+# way: 41011200 bytes, i.e. the tar alone, where v1.4.0 was 41011462 = the same
+# tar plus 262 bytes of metadata.
+#
+# The trailer is how fwtool finds it: the last 16 bytes are fwimage_trailer,
+# whose `size` field is the total length of the metadata block that precedes it
+# (8-byte fwimage_header + JSON + trailer).  Reading it back is the only check
+# that fails when the metadata is missing, so it runs on every build.
+has_fwtool_metadata() {
+	local image="$1"
+	[ -f "$image" ] || return 1
+	# tr drops the NULs, otherwise bash warns "ignored null byte in input" on
+	# every image that has no metadata — and that image is the exact case this
+	# probe exists for.
+	[ "$(tail -c 16 "$image" | head -c 4 | tr -d '\000')" = "FWx0" ]
+}
+
+# The image rules hide themselves behind "@", and "| append-metadata" swallows its
+# own failure through make's "-" prefix, so a green log says nothing: v1.4.0 and
+# v1.4.2 are character-for-character identical around the image step, and only one
+# of them got the block.  This makes the step speak.  Everything else is already
+# built, so it costs a couple of minutes rather than a rebuild.
+diagnose_missing_metadata() {
+	local dump
+	dump="$(mktemp)"
+
+	log "the make variables that decide whether the block is appended:"
+	make -C "${SRC}/target/linux" -pn 2>/dev/null \
+		| grep -m6 -E '^(SUPPORTED_DEVICES|DEVICE_NAME|IMAGE_METADATA|DEFAULT_DEVICE_VARS)[[:space:]]*[:+?]?=' \
+		| sed 's/^/    /' >"$dump" || true
+	cat "$dump"
+
+	log "the image step again, at V=s:"
+	# grep reads to EOF on purpose.  A early-exiting reader would SIGPIPE make,
+	# and under pipefail that kills the regeneration that this is here to do.
+	make -C "${SRC}/target/linux" install V=s 2>&1 \
+		| grep -E 'fwtool|metadata|METADATA|SUPPORTED_DEVICES|Image/Build/Profile|sysupgrade' >"$dump" || true
+	local matched
+	matched="$(wc -l <"$dump")"
+	head -n 40 "$dump" | sed 's/^/    /'
+	[ "$matched" -le 40 ] || log "    (kept the first 40 of ${matched} matching lines)"
+	rm -f "$dump"
+}
+
+verify_sysupgrade_metadata() {
+	local image="$1"
+	local profiles="${SRC}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}/profiles.json"
+
+	[ -f "$image" ] || die "cannot verify metadata: ${image} does not exist"
+	command -v python3 >/dev/null 2>&1 ||
+		die "python3 is required to verify the sysupgrade metadata of ${image}"
+
+	if ! python3 - "$image" "$profiles" "$TARGET_PROFILE" <<'PY'
+import json, os, sys
+
+image, profiles_path, profile = sys.argv[1], sys.argv[2], sys.argv[3]
+size = os.path.getsize(image)
+if size < 32:
+    sys.exit(f"{image}: {size} bytes is not an image")
+
+# fwtool's own layout (package/system/fwtool, fwimage.h):
+#   struct fwimage_header  { u32 version; u32 flags; }            // 8 bytes
+#   struct fwimage_trailer { u32 magic(0x46577830 "FWx0"); u32 crc32;
+#                            u8 type; u8 pad[3]; u32 size; }      // 16 bytes
+# and `tr.size` is the WHOLE metadata block (header + json + trailer).  A
+# signed image puts a second block (type 0) after the metadata (type 1), so
+# walk backwards until the INFO block is reached.
+TRAILER = 16
+MAGIC = b"FWx0"
+INFO = 1
+
+with open(image, "rb") as fh:
+    end = size
+    block = 0
+    for _ in range(4):
+        if end < TRAILER:
+            break
+        fh.seek(end - TRAILER)
+        tail = fh.read(TRAILER)
+        if tail[:4] != MAGIC:
+            sys.exit(
+                f"{image}: no fwtool metadata (no 'FWx0' trailer in the last 16 "
+                f"bytes of {size}).\n"
+                "  The device answers 'Image metadata not present' and refuses this\n"
+                "  file; use sysupgrade -F to force it.  Upstream appends the\n"
+                "  metadata with Build/append-metadata, whose command starts with\n"
+                "  make's '-' (ignore failure) and whose body is conditional on\n"
+                "  SUPPORTED_DEVICES being non-empty — so the image builds, is\n"
+                "  named correctly and hashes correctly while being uninstallable."
+            )
+        block = int.from_bytes(tail[12:16], "big")
+        if block < 8 + TRAILER or block > end:
+            sys.exit(
+                f"{image}: trailer declares a {block}-byte metadata block inside "
+                f"{end} bytes, which cannot be right"
+            )
+        if tail[8] == INFO:
+            break
+        end -= block
+    else:
+        sys.exit(f"{image}: no FWIMAGE_INFO block in the last four fwtool blocks")
+
+    fh.seek(end - block + 8)
+    raw = fh.read(block - 8 - TRAILER)
+
+json_len = block - 8 - TRAILER
+try:
+    meta = json.loads(raw.decode("utf-8", "replace"))
+except Exception as exc:
+    sys.exit(f"{image}: metadata block is {json_len} bytes but not JSON: {exc}")
+
+if not meta.get("metadata_version"):
+    sys.exit(f"{image}: metadata has no metadata_version: {raw[:200]!r}")
+
+devices = meta.get("supported_devices") or []
+if not devices:
+    sys.exit(
+        f"{image}: metadata lists no supported_devices, so no device accepts it "
+        f"(SUPPORTED_DEVICES was empty while building)."
+    )
+
+# profiles.json is generated from the same Device definition, so it states the
+# device names the image is supposed to claim.  If the two disagree the image
+# installs on hardware it was not built for, which is worse than a refusal.
+expected = []
+try:
+    with open(profiles_path) as fh:
+        entries = json.load(fh).get("profiles")
+    # Upstream has written this both as a list of objects and as a dict keyed by
+    # profile id, so accept either instead of guessing which revision did what.
+    if isinstance(entries, dict):
+        expected = (entries.get(profile) or {}).get("supported_devices") or []
+    elif isinstance(entries, list):
+        for entry in entries:
+            if entry.get("id") == profile:
+                expected = entry.get("supported_devices") or []
+except Exception as exc:
+    print(f"warning: cannot read {profiles_path}: {exc}", file=sys.stderr)
+
+missing = [dev for dev in expected if dev not in devices]
+if missing:
+    sys.exit(
+        f"{image}: metadata claims {devices} but profile {profile} needs {missing}"
+    )
+
+print(
+    f"sysupgrade metadata: {json_len}-byte JSON in a {block}-byte fwtool block, "
+    f"version {meta.get('version')}, devices {devices}"
+)
+PY
+	then
+		# python already printed the diagnosis; keep the exit path in one place.
+		die "the sysupgrade image would not install on this device — see above"
+	fi
+}
+
 collect_artifacts() {
 	local bin_dir="${SRC}/bin/targets/${TARGET_BOARD}/${TARGET_SUBTARGET}"
 	local dest="${ART}"
@@ -3988,6 +4155,26 @@ collect_artifacts() {
 		[ -f "${dest}/${IMAGE_PREFIX}${suffix}" ] ||
 			warn "optional artifact ${IMAGE_PREFIX}${suffix} was not produced"
 	done
+
+	# The name being right says nothing about installability: v1.4.1 and v1.4.2
+	# passed every name/size/sha256 check above and were still unflashable.
+	local image="${dest}/${IMAGE_PREFIX}-squashfs-sysupgrade.bin"
+	if ! has_fwtool_metadata "$image"; then
+		# Everything else is already built, so regenerating the images costs a
+		# couple of minutes rather than a rebuild, and it is the only way to see
+		# WHY the metadata block is missing: the image rules hide themselves
+		# behind "@", and "| append-metadata" swallows its own failures through
+		# make's "-" prefix (image-commands.mk: Build/append-metadata runs
+		# $-echo $(call metadata_json) | fwtool -I - $@), so a green build log
+		# carries no trace of it either way — v1.4.0 and v1.4.2 logs are
+		# character-for-character identical around the image step while only one
+		# of them got the block.
+		warn "the sysupgrade image carries no fwtool metadata trailer; regenerating the images with V=s to record why"
+		diagnose_missing_metadata
+		local refreshed="${bin_dir}/$(basename "$image")"
+		[ -f "$refreshed" ] && cp -f "$refreshed" "$image"
+	fi
+	verify_sysupgrade_metadata "$image"
 
 	if [ -d "${bin_dir}/packages" ]; then
 		mkdir -p "${dest}/packages"
